@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::config::{FaultInjectionConfig, FaultKind, StorageConfig};
+use crate::crates::storage::backend::StorageBackend;
 
 /// Result alias used across the storage engine.
 pub type StorageResult<T> = Result<T, StorageError>;
@@ -345,6 +346,46 @@ impl FaultInjectingFs {
                 tracing::warn!(error = %e, "storage quota reconcile failed; keeping last known usage");
             }
         }
+    }
+}
+
+/// The local backend satisfies the common [`StorageBackend`] contract.
+///
+/// `used_bytes` reports `Some` only when a quota is configured, since
+/// the counter is only maintained (and only meaningful) in that case.
+/// `prepare` recreates the root directory; `new` already does this,
+/// but the trait requires the operation to be idempotent and
+/// re-runnable.
+impl StorageBackend for FaultInjectingFs {
+    fn write(&mut self, name: &str, data: &[u8]) -> StorageResult<()> {
+        FaultInjectingFs::write(self, name, data)
+    }
+
+    fn read(&mut self, name: &str) -> StorageResult<Vec<u8>> {
+        FaultInjectingFs::read(self, name)
+    }
+
+    fn delete(&mut self, name: &str) -> StorageResult<()> {
+        FaultInjectingFs::delete(self, name)
+    }
+
+    fn exists(&mut self, name: &str) -> StorageResult<bool> {
+        FaultInjectingFs::exists(self, name)
+    }
+
+    fn used_bytes(&self) -> Option<u64> {
+        self.config
+            .max_size_bytes
+            .map(|_| FaultInjectingFs::used_bytes(self))
+    }
+
+    fn prepare(&mut self) -> StorageResult<()> {
+        std::fs::create_dir_all(&self.config.root_dir).map_err(|source| {
+            StorageError::Io {
+                path: self.config.root_dir.clone(),
+                source,
+            }
+        })
     }
 }
 

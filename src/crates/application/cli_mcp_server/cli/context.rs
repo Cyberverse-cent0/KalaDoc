@@ -89,7 +89,13 @@ impl Context {
     }
 
     /// Resolved [`DbConfig`] (includes session settings).
+    ///
+    /// Also prepares the configured local storage root
+    /// ([`crate::crates::storage::local::setup`]) so every command that
+    /// opens the database has storage ready before it runs.
     pub fn db_config(&self) -> Result<DbConfig, CliError> {
-        Ok(self.config()?.to_db_config())
+        let app = self.config()?;
+        crate::crates::storage::local::setup::setup(&app.to_storage_config())?;
+        Ok(app.to_db_config())
     }
 }

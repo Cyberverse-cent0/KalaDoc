@@ -60,12 +60,13 @@ pub fn load_config() -> Result<DbConfig, crate::config::ConfigError> {
 // Pool init
 // ---------------------------------------------------------------------------
 
-/// Opens (and creates if missing) the SQLite database, runs migrations,
-/// and returns a configured pool. Loads configuration via
-/// [`load_config`].
+/// Opens (and creates if missing) the SQLite database, prepares the
+/// configured local storage root, runs migrations, and returns a
+/// configured pool. Loads configuration via [`crate::config::AppConfig`].
 pub async fn init_db() -> Result<SqlitePool, DbError> {
-    let config = load_config()?;
-    init_db_with(&config).await
+    let app = crate::config::AppConfig::load()?;
+    crate::crates::storage::local::setup::setup(&app.to_storage_config())?;
+    init_db_with(&app.to_db_config()).await
 }
 
 /// Same as [`init_db`] but takes an explicit [`DbConfig`] — used when the
@@ -190,6 +191,8 @@ pub enum DbError {
     Config(#[from] crate::config::ConfigError),
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error(transparent)]
     Jobs(#[from] crate::crates::job_engine::JobError),
 }
