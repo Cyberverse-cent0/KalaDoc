@@ -5,19 +5,21 @@
 //! writer plus the atomic `UPDATE ... RETURNING` claim makes multiple
 //! engines safe-ish, but handlers must still be idempotent because a
 //! crash between claim and completion leaves the job `running` until
-//! it is reclaimed (see [`JobEngine::reap_stale`]).
+//! [`JobEngine::run`] starts, which immediately requeues all `running`
+//! rows via [`JobEngine::recover`] (see also [`JobEngine::reap_stale`]
+//! for stale jobs orphaned by a crashed engine).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use sqlx::SqlitePool;
 
+use super::JobError;
 use super::handler::{JobContext, SharedHandler};
 use super::job::{Job, NewJob};
 use super::store;
-use super::JobError;
 
 /// Engine tunables. Built from [`crate::config::AppConfig`] via
 /// `to_job_config()` or constructed directly.
@@ -61,17 +63,11 @@ impl JobEngine {
     pub fn new(pool: SqlitePool, config: JobEngineConfig) -> Self {
         let seq = ENGINE_SEQ.fetch_add(1, Ordering::Relaxed);
         Self {
-            ctx: JobContext {
-                pool: pool.clone(),
-            },
+            ctx: JobContext { pool: pool.clone() },
             pool,
             config,
             handlers: HashMap::new(),
-            worker_id: format!(
-                "worker-{}-{}",
-                std::process::id(),
-                seq
-            ),
+            worker_id: format!("worker-{}-{}", std::process::id(), seq),
         }
     }
 
@@ -94,8 +90,7 @@ impl JobEngine {
     /// Claims and executes at most one job. Returns `true` when a job
     /// was processed. This is the unit [`JobEngine::run`] repeats.
     pub async fn run_once(&self) -> Result<bool, JobError> {
-        let Some(job) = store::claim_next(&self.pool, &self.worker_id, now_unix()).await?
-        else {
+        let Some(job) = store::claim_next(&self.pool, &self.worker_id, now_unix()).await? else {
             return Ok(false);
         };
 
@@ -122,6 +117,18 @@ impl JobEngine {
         Ok(true)
     }
 
+    /// Requeues every job still `running`, assuming a previous engine
+    /// process died before completing it. Called once at startup by
+    /// [`JobEngine::run`]; safe because one engine owns a database.
+    /// Returns rows reclaimed.
+    pub async fn recover(&self) -> Result<u64, JobError> {
+        let reclaimed = store::requeue_running(&self.pool).await?;
+        if reclaimed > 0 {
+            tracing::info!(reclaimed, "job engine recovered interrupted jobs");
+        }
+        Ok(reclaimed)
+    }
+
     /// Returns `running` jobs older than `stale_after` to `pending`.
     /// Call periodically (or on startup) to recover from crashes
     /// between claim and completion. Returns rows reclaimed.
@@ -140,10 +147,14 @@ impl JobEngine {
         Ok(done.rows_affected())
     }
 
-    /// Poll loop: reap stale jobs, then drain due work until the queue
-    /// is empty, sleeping `poll_interval` between empty polls. Runs
-    /// forever; spawn it and abort on shutdown.
+    /// Poll loop: first recovers jobs orphaned by a previous engine
+    /// process, then repeatedly reaps stale jobs and drains due work,
+    /// sleeping `poll_interval` between empty polls. Runs forever;
+    /// spawn it and abort on shutdown.
     pub async fn run(&self) {
+        if let Err(e) = self.recover().await {
+            tracing::warn!(error = %e, "job engine startup recovery failed; will continue");
+        }
         let mut ticker = tokio::time::interval(self.config.poll_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -216,8 +227,8 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crates::job_engine::job::JobStatus;
     use crate::crates::job_engine::JobHandler;
+    use crate::crates::job_engine::job::JobStatus;
     use serde_json::json;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::future::Future;
@@ -352,7 +363,13 @@ mod tests {
         assert!(eng.run_once().await.unwrap());
         let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
         assert_eq!(jobs[0].status, JobStatus::Failed);
-        assert!(jobs[0].last_error.as_deref().unwrap().contains("no handler"));
+        assert!(
+            jobs[0]
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("no handler")
+        );
     }
 
     struct PanickingHandler;
@@ -388,11 +405,13 @@ mod tests {
         assert!(eng.run_once().await.unwrap());
         let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
         assert_eq!(jobs[0].status, JobStatus::Failed);
-        assert!(jobs[0]
-            .last_error
-            .as_deref()
-            .unwrap()
-            .contains("handler panicked"));
+        assert!(
+            jobs[0]
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("handler panicked")
+        );
 
         // Engine still works afterwards.
         eng.register(
@@ -429,5 +448,165 @@ mod tests {
         .unwrap();
 
         assert!(!eng.run_once().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn requeue_running_returns_job_to_pending() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone());
+        let job = eng
+            .enqueue(&NewJob {
+                kind: "x".into(),
+                payload: json!({}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+
+        // Simulate a dead worker mid-flight.
+        sqlx::query(
+            "UPDATE jobs_tbl SET status = 'running', worker_id = 'dead-worker',
+             started_at = ?, attempts = 1, last_error = 'boom'
+             WHERE id = ?",
+        )
+        .bind(now_unix())
+        .bind(job.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(store::requeue_running(&pool).await.unwrap(), 1);
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        assert_eq!(jobs[0].status, JobStatus::Pending);
+        assert_eq!(jobs[0].worker_id, None);
+        assert_eq!(jobs[0].started_at, None);
+        assert_eq!(jobs[0].finished_at, None);
+        assert_eq!(
+            jobs[0].last_error.as_deref(),
+            Some("recovered: interrupted by shutdown")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_job_cancels_pending_but_not_succeeded() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone());
+        let pending = eng
+            .enqueue(&NewJob {
+                kind: "x".into(),
+                payload: json!({}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+        let done = eng
+            .enqueue(&NewJob {
+                kind: "x".into(),
+                payload: json!({}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs_tbl SET status = 'succeeded', finished_at = ? WHERE id = ?")
+            .bind(now_unix())
+            .bind(done.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(store::cancel_job(&pool, pending.id).await.unwrap());
+        assert!(!store::cancel_job(&pool, done.id).await.unwrap());
+
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        let by_id = |id: i64| jobs.iter().find(|j| j.id == id).unwrap().status;
+        assert_eq!(by_id(pending.id), JobStatus::Cancelled);
+        assert_eq!(by_id(done.id), JobStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn retry_job_resets_failed_but_not_pending() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone());
+        let failed = eng
+            .enqueue(&NewJob {
+                kind: "x".into(),
+                payload: json!({}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+        let pending = eng
+            .enqueue(&NewJob {
+                kind: "x".into(),
+                payload: json!({}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE jobs_tbl SET status = 'failed', attempts = 3,
+             finished_at = ?, last_error = 'boom' WHERE id = ?",
+        )
+        .bind(now_unix())
+        .bind(failed.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(store::retry_job(&pool, failed.id).await.unwrap());
+        assert!(!store::retry_job(&pool, pending.id).await.unwrap());
+
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        let job = jobs.iter().find(|j| j.id == failed.id).unwrap();
+        assert_eq!(job.status, JobStatus::Pending);
+        assert_eq!(job.attempts, 0);
+        assert_eq!(job.last_error, None);
+        assert_eq!(job.finished_at, None);
+        assert_eq!(job.worker_id, None);
+    }
+
+    #[tokio::test]
+    async fn recover_requeues_running_job() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone());
+        let job = eng
+            .enqueue(&NewJob {
+                kind: "x".into(),
+                payload: json!({}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+        // Simulate an engine that died after claiming the job.
+        sqlx::query(
+            "UPDATE jobs_tbl SET status = 'running', worker_id = 'old-worker',
+             started_at = ? WHERE id = ?",
+        )
+        .bind(now_unix())
+        .bind(job.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(eng.recover().await.unwrap(), 1);
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        assert_eq!(jobs[0].status, JobStatus::Pending);
+        assert_eq!(jobs[0].worker_id, None);
+        assert_eq!(jobs[0].started_at, None);
+
+        // A second recover finds nothing.
+        assert_eq!(eng.recover().await.unwrap(), 0);
     }
 }

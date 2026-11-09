@@ -6,8 +6,8 @@
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Executor, Row, SqlitePool};
 
-use super::job::{Job, JobStatus, NewJob};
 use super::JobError;
+use super::job::{Job, JobStatus, NewJob};
 
 /// Creates `jobs_tbl` and its indexes. Idempotent.
 pub async fn create_jobs_table(pool: &SqlitePool) -> Result<(), JobError> {
@@ -42,7 +42,11 @@ pub async fn create_jobs_table(pool: &SqlitePool) -> Result<(), JobError> {
 }
 
 /// Inserts a new pending job and returns it.
-pub async fn enqueue(pool: &SqlitePool, new: &NewJob, default_max_attempts: u32) -> Result<Job, JobError> {
+pub async fn enqueue(
+    pool: &SqlitePool,
+    new: &NewJob,
+    default_max_attempts: u32,
+) -> Result<Job, JobError> {
     let now = now_unix();
     let payload = serde_json::to_string(&new.payload)?;
     let max_attempts = new.max_attempts.unwrap_or(default_max_attempts);
@@ -173,6 +177,59 @@ pub async fn complete(
         }
     }
     Ok(())
+}
+
+/// Reclaims every job still marked `running` by returning it to
+/// `pending` with all execution bookkeeping cleared.
+///
+/// Intended for engine startup recovery: with a single engine per
+/// database, any `running` row at startup belongs to a dead process,
+/// so it is safe to requeue immediately rather than waiting for
+/// `stale_after`. Returns rows reclaimed.
+pub async fn requeue_running(pool: &SqlitePool) -> Result<u64, JobError> {
+    let done = sqlx::query(
+        "UPDATE jobs_tbl
+         SET status = 'pending', worker_id = NULL, started_at = NULL,
+             finished_at = NULL, run_at = ?, last_error = 'recovered: interrupted by shutdown'
+         WHERE status = 'running'",
+    )
+    .bind(now_unix())
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected())
+}
+
+/// Cancels a `pending` or `running` job. Returns `true` when a row
+/// was updated; `false` when the job does not exist or already
+/// reached a terminal state.
+pub async fn cancel_job(pool: &SqlitePool, job_id: i64) -> Result<bool, JobError> {
+    let done = sqlx::query(
+        "UPDATE jobs_tbl SET status = 'cancelled', finished_at = ?
+         WHERE id = ? AND status IN ('pending', 'running')",
+    )
+    .bind(now_unix())
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected() > 0)
+}
+
+/// Manually retries a `failed` job: resets it to a fresh `pending`
+/// state (attempts cleared, scheduling fields reset). Returns `false`
+/// when the job does not exist or is not `failed`.
+pub async fn retry_job(pool: &SqlitePool, job_id: i64) -> Result<bool, JobError> {
+    let done = sqlx::query(
+        "UPDATE jobs_tbl
+         SET status = 'pending', attempts = 0, run_at = ?,
+             finished_at = NULL, started_at = NULL, worker_id = NULL,
+             last_error = NULL
+         WHERE id = ? AND status = 'failed'",
+    )
+    .bind(now_unix())
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected() > 0)
 }
 
 /// Cap for exponential retry backoff (1 hour).

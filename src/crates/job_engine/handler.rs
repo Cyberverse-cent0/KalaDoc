@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use sqlx::SqlitePool;
 
-use super::job::Job;
 use super::JobError;
+use super::job::Job;
 
 /// Shared services handed to every handler invocation.
 ///

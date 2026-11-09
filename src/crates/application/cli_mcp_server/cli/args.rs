@@ -50,7 +50,8 @@ pub enum Commands {
     #[command(subcommand)]
     User(UserArgs),
 
-    /// Manage the durable job queue: run a worker, list jobs, enqueue work.
+    /// Manage the durable job queue: run a worker, list/enqueue jobs,
+    /// cancel, retry, and recover interrupted work.
     #[command(subcommand)]
     Jobs(JobsArgs),
 }
@@ -161,6 +162,21 @@ pub enum JobsArgs {
         #[arg(long)]
         max_attempts: Option<u32>,
     },
+
+    /// Cancel a pending or running job.
+    Cancel {
+        /// Job ID from `kaladoc jobs list`.
+        id: i64,
+    },
+
+    /// Requeue a failed job for another attempt.
+    Retry {
+        /// Job ID from `kaladoc jobs list`.
+        id: i64,
+    },
+
+    /// Reclaim jobs left in `running` state by a crashed worker.
+    Recover,
 }
 
 #[derive(Subcommand)]

@@ -111,7 +111,10 @@ async fn login(ctx: &Context, username_arg: Option<&str>) -> Result<i32, CliErro
         return Ok(0);
     }
     println!("logged in as {}", report.user_name);
-    println!("session {} expires at {}", report.session_id, report.expires_at);
+    println!(
+        "session {} expires at {}",
+        report.session_id, report.expires_at
+    );
 
     pool.close().await;
     Ok(0)

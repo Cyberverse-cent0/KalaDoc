@@ -78,9 +78,7 @@ impl CliError {
             Self::Validation(_) => 7,
             Self::Unsupported(_) => 13,
             Self::Auth(AuthError::Validation(_)) => 7,
-            Self::Auth(
-                AuthError::DuplicateUserName(_) | AuthError::DuplicateEmail(_),
-            ) => 6,
+            Self::Auth(AuthError::DuplicateUserName(_) | AuthError::DuplicateEmail(_)) => 6,
             _ => 1,
         }
     }
@@ -98,9 +96,9 @@ impl CliError {
             Self::Validation(_) => "validation_failed",
             Self::Unsupported(_) => "unsupported",
             Self::Auth(AuthError::Validation(_)) => "validation_failed",
-            Self::Auth(
-                AuthError::DuplicateUserName(_) | AuthError::DuplicateEmail(_),
-            ) => "conflict",
+            Self::Auth(AuthError::DuplicateUserName(_) | AuthError::DuplicateEmail(_)) => {
+                "conflict"
+            }
             Self::Auth(_) => "internal",
             Self::Db(_) | Self::Session(_) | Self::Job(_) => "internal",
             Self::Io(_) => "io_error",

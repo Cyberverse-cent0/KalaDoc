@@ -13,8 +13,8 @@ mod error;
 mod global;
 mod output;
 
-pub use error::CliError;
 pub(crate) use context::Context;
+pub use error::CliError;
 
 use args::{Cli, Commands};
 use clap::{CommandFactory, Parser};

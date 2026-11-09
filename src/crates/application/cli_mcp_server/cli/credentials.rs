@@ -42,14 +42,12 @@ pub fn path() -> Result<PathBuf, CliError> {
 pub fn load() -> Result<Option<Credentials>, CliError> {
     let path = path()?;
     match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text)
-            .map(Some)
-            .map_err(|e| {
-                CliError::Validation(format!(
-                    "credentials file {} is corrupt: {e}",
-                    path.display()
-                ))
-            }),
+        Ok(text) => toml::from_str(&text).map(Some).map_err(|e| {
+            CliError::Validation(format!(
+                "credentials file {} is corrupt: {e}",
+                path.display()
+            ))
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }

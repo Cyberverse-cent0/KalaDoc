@@ -18,4 +18,7 @@ pub use engine::{JobEngine, JobEngineConfig};
 pub use error::JobError;
 pub use handler::{JobContext, JobHandler, SharedHandler};
 pub use job::{Job, JobStatus, NewJob};
-pub use store::{claim_next, complete, create_jobs_table, enqueue, list_jobs};
+pub use store::{
+    cancel_job, claim_next, complete, create_jobs_table, enqueue, list_jobs, requeue_running,
+    retry_job,
+};

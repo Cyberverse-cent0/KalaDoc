@@ -153,7 +153,7 @@ async fn check_database(ctx: &Context) -> Check {
                 name: "database",
                 status: "fail",
                 detail: e.to_string(),
-            }
+            };
         }
     };
 
@@ -204,7 +204,7 @@ fn check_storage(ctx: &Context) -> Check {
                 name: "storage",
                 status: "fail",
                 detail: e.to_string(),
-            }
+            };
         }
     };
 

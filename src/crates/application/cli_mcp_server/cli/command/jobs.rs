@@ -1,4 +1,4 @@
-//! `kaladoc jobs worker|list|enqueue`
+//! `kaladoc jobs worker|list|enqueue|cancel|retry|recover`
 //!
 //! Thin adapter over `crate::crates::job_engine`: the worker builds a
 //! [`JobEngine`] from the resolved configuration, registers the
@@ -26,7 +26,20 @@ pub async fn run(ctx: &Context, args: &JobsArgs) -> Result<i32, CliError> {
             priority,
             run_at,
             max_attempts,
-        } => enqueue(ctx, kind, payload.as_deref(), *priority, *run_at, *max_attempts).await,
+        } => {
+            enqueue(
+                ctx,
+                kind,
+                payload.as_deref(),
+                *priority,
+                *run_at,
+                *max_attempts,
+            )
+            .await
+        }
+        JobsArgs::Cancel { id } => cancel(ctx, *id).await,
+        JobsArgs::Retry { id } => retry(ctx, *id).await,
+        JobsArgs::Recover => recover(ctx).await,
     }
 }
 
@@ -43,6 +56,13 @@ async fn worker(ctx: &Context) -> Result<i32, CliError> {
     let app_config = ctx.config()?;
     let mut engine = JobEngine::new(pool, app_config.to_job_config());
     crate::crates::application::job_handlers::register_builtin(&mut engine);
+
+    // Reclaim jobs a previous crashed worker left in `running` before
+    // this worker starts claiming new ones.
+    let recovered = engine.recover().await?;
+    if recovered > 0 {
+        eprintln!("recovered {recovered} interrupted job(s) left in running state");
+    }
 
     let engine = Arc::new(engine);
     eprintln!("job worker {} started", engine.worker_id());
@@ -64,14 +84,12 @@ async fn list(ctx: &Context, status: Option<&str>, limit: i64) -> Result<i32, Cl
         return Err(CliError::Usage("--limit must be positive".to_string()));
     }
     let status = match status {
-        Some(s) => Some(
-            JobStatus::parse(s).ok_or_else(|| {
-                CliError::Usage(format!(
-                    "invalid --status {s:?}; expected pending, running, \
+        Some(s) => Some(JobStatus::parse(s).ok_or_else(|| {
+            CliError::Usage(format!(
+                "invalid --status {s:?}; expected pending, running, \
                      succeeded, failed, or cancelled"
-                ))
-            })?,
-        ),
+            ))
+        })?),
         None => None,
     };
 
@@ -156,6 +174,77 @@ async fn enqueue(
         return Ok(0);
     }
     println!("enqueued job {} ({})", report.job.id, report.job.kind);
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// cancel / retry / recover
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+struct JobActionReport {
+    id: i64,
+    cancelled: bool,
+}
+
+async fn cancel(ctx: &Context, id: i64) -> Result<i32, CliError> {
+    let db = ctx.db_config()?;
+    let pool = init_db::init_db_with(&db).await?;
+    let cancelled = job_engine::cancel_job(&pool, id).await?;
+    pool.close().await;
+
+    let report = JobActionReport { id, cancelled };
+    if ctx.emit_structured(&report)? {
+        return Ok(0);
+    }
+    if cancelled {
+        println!("job {id} cancelled");
+    } else {
+        println!("job {id} was not cancellable (already finished)");
+    }
+    Ok(0)
+}
+
+#[derive(Debug, Serialize)]
+struct RetryReport {
+    id: i64,
+    requeued: bool,
+}
+
+async fn retry(ctx: &Context, id: i64) -> Result<i32, CliError> {
+    let db = ctx.db_config()?;
+    let pool = init_db::init_db_with(&db).await?;
+    let requeued = job_engine::retry_job(&pool, id).await?;
+    pool.close().await;
+
+    let report = RetryReport { id, requeued };
+    if ctx.emit_structured(&report)? {
+        return Ok(0);
+    }
+    if requeued {
+        println!("job {id} requeued for another attempt");
+    } else {
+        println!("job {id} was not retryable (not failed)");
+    }
+    Ok(0)
+}
+
+#[derive(Debug, Serialize)]
+struct RecoverReport {
+    recovered: u64,
+}
+
+async fn recover(ctx: &Context) -> Result<i32, CliError> {
+    let db = ctx.db_config()?;
+    let pool = init_db::init_db_with(&db).await?;
+    let recovered = job_engine::requeue_running(&pool).await?;
+    pool.close().await;
+
+    let report = RecoverReport { recovered };
+    if ctx.emit_structured(&report)? {
+        return Ok(0);
+    }
+    println!("reclaimed {recovered} interrupted job(s)");
     Ok(0)
 }
 

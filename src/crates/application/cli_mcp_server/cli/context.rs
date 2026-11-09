@@ -57,17 +57,15 @@ impl Context {
     /// when JSON/YAML output was written; `false` means the command
     /// should render its table output.
     pub fn emit_structured<T: Serialize>(&self, value: &T) -> Result<bool, CliError> {
-        match self.output {
-            OutputFormat::Json => {
-                self.emit_json(value)?;
-                Ok(true)
-            }
-            OutputFormat::Yaml => {
-                self.emit_yaml(value)?;
-                Ok(true)
-            }
-            OutputFormat::Table => Ok(false),
+        if self.output.is_json() {
+            self.emit_json(value)?;
+        } else if self.output.is_yaml() {
+            self.emit_yaml(value)?;
+        } else {
+            debug_assert!(self.output.is_table());
+            return Ok(false);
         }
+        Ok(true)
     }
 
     /// Strict config load — fails when required secret env vars

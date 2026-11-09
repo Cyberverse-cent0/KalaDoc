@@ -21,17 +21,7 @@ pub async fn run(ctx: &Context, args: &UserArgs) -> Result<i32, CliError> {
             first_name,
             last_name,
             password_stdin,
-        } => {
-            create(
-                ctx,
-                username,
-                email,
-                first_name,
-                last_name,
-                *password_stdin,
-            )
-            .await
-        }
+        } => create(ctx, username, email, first_name, last_name, *password_stdin).await,
         UserArgs::List => list(ctx).await,
         UserArgs::Delete { username } => delete(ctx, username).await,
     }
@@ -87,7 +77,10 @@ async fn create(
     if ctx.emit_structured(&report)? {
         return Ok(0);
     }
-    println!("created user '{}' (id {})", report.user_name, report.user_id);
+    println!(
+        "created user '{}' (id {})",
+        report.user_name, report.user_id
+    );
     Ok(0)
 }
 

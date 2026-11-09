@@ -102,9 +102,21 @@ fn report(cfg: &AppConfig, source: String) -> ConfigReport {
             log_level: cfg.runtime.log_level.clone(),
         },
         secrets: SecretsView {
-            app_secret_key: if cfg.secret_key.is_empty() { "unset" } else { "set (redacted)" },
-            app_db_user: if cfg.db_user.is_empty() { "unset" } else { "set (redacted)" },
-            app_db_password: if cfg.db_password.is_empty() { "unset" } else { "set (redacted)" },
+            app_secret_key: if cfg.secret_key.is_empty() {
+                "unset"
+            } else {
+                "set (redacted)"
+            },
+            app_db_user: if cfg.db_user.is_empty() {
+                "unset"
+            } else {
+                "set (redacted)"
+            },
+            app_db_password: if cfg.db_password.is_empty() {
+                "unset"
+            } else {
+                "set (redacted)"
+            },
         },
     }
 }
@@ -119,12 +131,18 @@ fn show(ctx: &Context) -> Result<i32, CliError> {
     } else {
         println!("config source: {}", report.source);
         println!("database.path: {}", report.database.path);
-        println!("database.max_connections: {}", report.database.max_connections);
+        println!(
+            "database.max_connections: {}",
+            report.database.max_connections
+        );
         println!(
             "database.acquire_timeout_secs: {}",
             report.database.acquire_timeout_secs
         );
-        println!("database.session.ttl_secs: {}", report.database.session.ttl_secs);
+        println!(
+            "database.session.ttl_secs: {}",
+            report.database.session.ttl_secs
+        );
         println!(
             "database.session.absolute_ttl_secs: {}",
             report.database.session.absolute_ttl_secs
@@ -153,7 +171,10 @@ fn show(ctx: &Context) -> Result<i32, CliError> {
         println!("runtime.log_level: {}", report.runtime.log_level);
         println!("secrets.app_secret_key: {}", report.secrets.app_secret_key);
         println!("secrets.app_db_user: {}", report.secrets.app_db_user);
-        println!("secrets.app_db_password: {}", report.secrets.app_db_password);
+        println!(
+            "secrets.app_db_password: {}",
+            report.secrets.app_db_password
+        );
     }
     Ok(0)
 }
@@ -184,9 +205,8 @@ fn get(ctx: &Context, key: &str) -> Result<i32, CliError> {
 
     // Lenient so `get` works for non-secret keys pre-configuration.
     let cfg = ctx.config_lenient()?;
-    let value = lookup(&cfg, key).ok_or_else(|| {
-        CliError::NotFound(format!("unknown configuration key {key:?}"))
-    })?;
+    let value = lookup(&cfg, key)
+        .ok_or_else(|| CliError::NotFound(format!("unknown configuration key {key:?}")))?;
 
     if ctx.json() {
         ctx.emit_json(&serde_json::json!({ "key": key, "value": value }))?;
@@ -199,8 +219,12 @@ fn get(ctx: &Context, key: &str) -> Result<i32, CliError> {
 fn is_secret_key(key: &str) -> bool {
     matches!(
         key,
-        "secret_key" | "db_user" | "db_password" | "secrets.app_secret_key"
-            | "secrets.app_db_user" | "secrets.app_db_password"
+        "secret_key"
+            | "db_user"
+            | "db_password"
+            | "secrets.app_secret_key"
+            | "secrets.app_db_user"
+            | "secrets.app_db_password"
     )
 }
 
