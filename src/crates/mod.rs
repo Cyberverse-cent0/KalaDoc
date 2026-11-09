@@ -11,6 +11,8 @@ pub mod engine_registry;
 #[path = "image-engine/src/lib.rs"]
 pub mod image_engine;
 pub mod job_engine;
+#[path = "multimedia-engine/src/lib.rs"]
+pub mod multimedia_engine;
 #[path = "observability/src/lib.rs"]
 pub mod observability;
 #[path = "pdf-engine/src/lib.rs"]
