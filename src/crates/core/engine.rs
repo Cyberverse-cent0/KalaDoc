@@ -69,6 +69,35 @@ pub enum EngineOperation {
     Transcode,
     Concat,
     ExtractAudio,
+    /// Change container without re-encoding streams (`-c copy`).
+    Remux,
+    /// Apply ffmpeg video/audio filters or a named preset.
+    Filter,
+    /// Produce a structured media analysis report (scenes, black
+    /// frames, silence, loudness, stats).
+    Analyze,
+    /// Package media for delivery (HLS, DASH, faststart MP4).
+    Package,
+    /// Extract embedded streams (subtitles, attachments, cover art,
+    /// chapters) into separate artifacts.
+    ExtractStreams,
+    /// Extract, convert, retime, or burn subtitles.
+    Subtitles,
+    /// Build a video from an image sequence / slideshow.
+    Slideshow,
+    /// Audio-domain processing: volume, loudness, mixing, fades,
+    /// channel layout, noise reduction.
+    AudioProcess,
+    /// Edit container/stream metadata tags and cover art.
+    MetadataEdit,
+    /// Objective quality metrics between two media files
+    /// (PSNR/SSIM/VMAF where the build supports them).
+    Quality,
+    /// Enumerate capture devices/sources/hardware accelerators.
+    Capture,
+    /// Encode with a professional/intermediate profile
+    /// (ProRes, DNxHD, FFV1, ...).
+    Encode,
 }
 
 impl EngineOperation {
@@ -113,6 +142,18 @@ impl EngineOperation {
             Self::Transcode => "transcode",
             Self::Concat => "concat",
             Self::ExtractAudio => "extract_audio",
+            Self::Remux => "remux",
+            Self::Filter => "filter",
+            Self::Analyze => "analyze",
+            Self::Package => "package",
+            Self::ExtractStreams => "extract_streams",
+            Self::Subtitles => "subtitles",
+            Self::Slideshow => "slideshow",
+            Self::AudioProcess => "audio_process",
+            Self::MetadataEdit => "metadata_edit",
+            Self::Quality => "quality",
+            Self::Capture => "capture",
+            Self::Encode => "encode",
         }
     }
 }

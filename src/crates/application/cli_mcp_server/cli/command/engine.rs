@@ -120,7 +120,10 @@ fn capabilities(ctx: &Context, registry: &EngineRegistry, name: &str) -> Result<
     println!("input_formats: {}", report.input_formats.join(", "));
     println!("output_formats: {}", report.output_formats.join(", "));
     println!("limits:");
-    print_limit("  max_input_bytes", report.limits.max_input_bytes.map(u64::from));
+    print_limit(
+        "  max_input_bytes",
+        report.limits.max_input_bytes.map(u64::from),
+    );
     print_limit("  max_pages", report.limits.max_pages.map(u64::from));
     print_limit("  max_pixels", report.limits.max_pixels);
     print_limit("  max_outputs", report.limits.max_outputs.map(u64::from));

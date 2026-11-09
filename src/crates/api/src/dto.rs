@@ -96,7 +96,10 @@ impl CreateDocumentRequest {
         if let Some(text) = self.content {
             payload["content"] = json!(text);
         }
-        if let Some(name) = self.file_name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        if let Some(name) = self
+            .file_name
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
         {
             payload["file_name"] = json!(name);
         }

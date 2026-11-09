@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::error::{SecurityError, SecurityResult};
 use super::filename::sanitize_filename;
 use super::limits::ResourceLimits;
-use super::sniff::{SniffedFormat, sniff_format};
+use super::sniff::{sniff_format, SniffedFormat};
 
 /// Outcome of a successful upload validation.
 ///
@@ -172,8 +172,7 @@ mod tests {
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n....";
     const ZIP: &[u8] = b"PK\x03\x04\x14\x00....";
     const MP4: &[u8] = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom....";
-    const MKV: &[u8] =
-        b"\x1a\x45\xdf\xa3\x93\x42\x82\x88matroska\x42\x87\x81\x02....";
+    const MKV: &[u8] = b"\x1a\x45\xdf\xa3\x93\x42\x82\x88matroska\x42\x87\x81\x02....";
 
     fn limits() -> ResourceLimits {
         ResourceLimits::default()
@@ -324,6 +323,31 @@ mod tests {
         // Same bytes under a non-video expectation still hit the doc cap
         // only via `expected` — but a non-video file of that size fails.
         let err = validate_upload("doc.pdf", MP4.len() as u64, PDF, &l, None).unwrap_err();
+        assert!(matches!(err, SecurityError::FileTooLarge { .. }));
+    }
+
+    #[test]
+    fn accepts_audio_uploads_under_document_cap() {
+        use crate::crates::security_engine::AudioContainer;
+        // WAV bytes sniff as Audio; audio uses `max_upload_bytes`
+        // (the document budget), not the larger video cap.
+        let wav = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00";
+        let report = validate_upload(
+            "tone.wav",
+            wav.len() as u64,
+            wav,
+            &limits(),
+            Some(SniffedFormat::Audio {
+                container: AudioContainer::Wav,
+            }),
+        )
+        .unwrap();
+        assert!(report.format.is_audio());
+        assert!(!report.format.is_video());
+        let mut l = limits();
+        l.max_upload_bytes = wav.len() as u64 - 1;
+        l.max_video_upload_bytes = 1 << 20; // irrelevant for audio
+        let err = validate_upload("tone.wav", wav.len() as u64, wav, &l, None).unwrap_err();
         assert!(matches!(err, SecurityError::FileTooLarge { .. }));
     }
 

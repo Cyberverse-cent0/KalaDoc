@@ -13,12 +13,10 @@
 //! user without re-querying.
 
 use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
 use axum::http::header::AUTHORIZATION;
+use axum::http::request::Parts;
 
-use crate::crates::application::Organization::session::{
-    Session, SessionError, validate_session,
-};
+use crate::crates::application::Organization::session::{Session, SessionError, validate_session};
 
 use super::AppState;
 use super::error::ApiError;

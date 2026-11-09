@@ -309,14 +309,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(list.as_array().unwrap().len(), 1);
 
-        let (status, one) = send(
-            &app,
-            "GET",
-            &format!("/jobs/{job_id}"),
-            Some(&token),
-            None,
-        )
-        .await;
+        let (status, one) = send(&app, "GET", &format!("/jobs/{job_id}"), Some(&token), None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(one["id"], job_id);
 

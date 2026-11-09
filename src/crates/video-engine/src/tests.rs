@@ -178,7 +178,9 @@ fn probe_rejects_non_media() {
         return;
     }
     let engine = VideoEngine::new();
-    let err = engine.probe(b"this is definitely not a media file").unwrap_err();
+    let err = engine
+        .probe(b"this is definitely not a media file")
+        .unwrap_err();
     assert!(
         matches!(err, VideoError::InvalidInput(_)),
         "expected InvalidInput, got {err:?}"

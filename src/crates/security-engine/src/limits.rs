@@ -36,7 +36,7 @@ pub struct ResourceLimits {
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            max_upload_bytes: 100 * 1024 * 1024, // 100 MiB
+            max_upload_bytes: 100 * 1024 * 1024,            // 100 MiB
             max_video_upload_bytes: 2 * 1024 * 1024 * 1024, // 2 GiB
             max_pages: Some(10_000),
             max_operation_bytes: 256 * 1024 * 1024, // 256 MiB
@@ -192,7 +192,10 @@ mod tests {
         assert!(l.check_upload_size(500, &video).is_ok());
         assert!(matches!(
             l.check_upload_size(500, &SniffedFormat::Pdf),
-            Err(SecurityError::FileTooLarge { size: 500, max: 100 })
+            Err(SecurityError::FileTooLarge {
+                size: 500,
+                max: 100
+            })
         ));
         assert!(matches!(
             l.check_upload_size(1_001, &video),

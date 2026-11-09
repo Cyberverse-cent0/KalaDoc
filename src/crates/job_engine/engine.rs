@@ -728,7 +728,12 @@ mod tests {
                 })
             }
         }
-        eng.register("test.spy", Arc::new(Spy { calls: calls.clone() }));
+        eng.register(
+            "test.spy",
+            Arc::new(Spy {
+                calls: calls.clone(),
+            }),
+        );
 
         let job = eng
             .enqueue(&NewJob {
@@ -789,7 +794,12 @@ mod tests {
                 })
             }
         }
-        eng_b.register("x", Arc::new(Spy { calls: calls.clone() }));
+        eng_b.register(
+            "x",
+            Arc::new(Spy {
+                calls: calls.clone(),
+            }),
+        );
 
         assert_eq!(eng_b.recover().await.unwrap(), 1);
         assert!(eng_b.run_once().await.unwrap());
@@ -868,15 +878,9 @@ mod tests {
         store::complete(&pool, &claimed, Ok(()), 0, now_unix())
             .await
             .unwrap();
-        store::complete(
-            &pool,
-            &claimed,
-            Err("stale failure".into()),
-            0,
-            now_unix(),
-        )
-        .await
-        .unwrap();
+        store::complete(&pool, &claimed, Err("stale failure".into()), 0, now_unix())
+            .await
+            .unwrap();
 
         let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
         assert_eq!(jobs[0].status, JobStatus::Running);

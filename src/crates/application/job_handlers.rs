@@ -20,6 +20,30 @@
 //! | `video.thumbnail`       | `{path, at_secs?, max_bytes?}`                                | Extract a PNG thumbnail frame; writes `<path>.thumb.png` |
 //! | `video.transcode`       | `{path, target_ext, max_bytes?}`                              | Transcode to `target_ext`; writes `<path>.<target_ext>` |
 //! | `video.trim`            | `{path, start_secs, end_secs?, reencode?, max_bytes?}`        | Trim a video segment; writes `<path>.trim<ext>` |
+//! | `video.remux`           | `{path, target_ext, max_bytes?}`                              | Stream-copy remux to `target_ext`; writes `<path>.<target_ext>` |
+//! | `video.extract_frames`  | `{path, every_secs?, fps?, all?, keyframes_only?, format?, max_bytes?}` | Extract frames; writes files under `<path>.frames/` |
+//! | `video.subtitles_extract` | `{path, track?, format?, max_bytes?}`                       | Extract a subtitle track; writes `<path>.subs.<fmt>` |
+//! | `video.analyze`         | `{path, max_bytes?}`                                          | Full media analysis; writes `<path>.analysis.json` |
+//! | `video.package_hls`     | `{path, max_bytes?}`                                          | HLS package; writes files under `<path>.hls/` |
+//! | `video.metadata_set`    | `{path, tags:{k:v}, max_bytes?}`                              | Set container tags; writes `<path>.tagged<ext>` |
+//! | `video.metadata_strip`  | `{path, max_bytes?}`                                          | Strip all metadata; writes `<path>.stripped<ext>` |
+//! | `video.extract_streams` | `{path, subtitles?, attachments?, cover_art?, chapters?, data?, subtitle_format?, max_bytes?}` | Extract embedded streams; writes files under `<path>.streams/` |
+//! | `video.audio_volume`    | `{path, gain_db, max_bytes?}`                                 | Apply gain in dB; writes `<path>.vol<ext>` |
+//! | `video.contact_sheet`   | `{path, cols?, rows?, thumb_width?, interval_secs?, max_bytes?}` | Build a contact-sheet PNG; writes `<path>.sheet.png` |
+//! | `video.speed`           | `{path, factor, max_bytes?}`                                  | Change playback speed; writes `<path>.speed<ext>` |
+//! | `video.reverse`         | `{path, max_bytes?}`                                          | Reverse the clip; writes `<path>.reverse<ext>` |
+//! | `video.loop`            | `{path, count, max_bytes?}`                                   | Loop the clip; writes `<path>.loop<ext>` |
+//! | `video.freeze`          | `{path, at_secs, duration_secs, max_bytes?}`                  | Freeze a frame; writes `<path>.freeze<ext>` |
+//! | `video.resize`          | `{path, width, height, fit?, max_bytes?}`                     | Resize per fit mode; writes `<path>.resize<ext>` |
+//! | `video.crop`            | `{path, x, y, w, h, max_bytes?}`                              | Crop to a rect; writes `<path>.crop<ext>` |
+//! | `video.rotate`          | `{path, degrees, max_bytes?}`                                 | Rotate; writes `<path>.rotate<ext>` |
+//! | `video.flip`            | `{path, horizontal?, max_bytes?}`                             | Mirror; writes `<path>.flip<ext>` |
+//! | `video.gif`             | `{path, fps?, width?, max_bytes?}`                            | Video → animated GIF; writes `<path>.gif` |
+//! | `video.slideshow`       | `{paths:[...], fps?, duration_per_image?, target_ext, max_bytes?}` | Images → video; writes `slideshow.<target_ext>` next to the first input |
+//! | `video.normalize`       | `{path, target_lufs?, max_bytes?}`                            | EBU R128 loudness normalize; writes `<path>.norm<ext>` |
+//! | `video.loudness`        | `{path, max_bytes?}`                                          | Measure loudness; writes `<path>.loudness.json` |
+//! | `video.scene_frames`    | `{path, threshold?, max_bytes?}`                              | Scene-change keyframes; writes files under `<path>.scenes/` |
+//! | `video.merge_av`        | `{video_path, audio_path, target_ext?, max_bytes?}`           | Merge audio into video; writes `<video_path>.merged<ext>` |
 //! | `storage.gc_staging`    | `{retention_secs?}`                                           | Delete abandoned entries under `<storage_root>/staging/` and `<storage_root>/.staging/` older than the retention window |
 //!
 //! `document.metadata_extract` / `document.index` / `thumbnail.generate`
@@ -90,6 +114,19 @@
 //! kinds are idempotent — deterministic output names make retries
 //! safe.
 //!
+//! The extended `video.*` kinds follow the same contract. Single-file
+//! transforms write `<path>.<op>.<input-ext>` (e.g. `.vol.mp4`,
+//! `.speed.mp4`); `video.remux` writes `<path>.<target_ext>` like
+//! `video.transcode`; report jobs write pretty JSON
+//! (`.analysis.json`, `.loudness.json`); multi-file jobs write a
+//! directory of sanitized relative names (`<path>.frames/`,
+//! `<path>.hls/`, `<path>.streams/`, `<path>.scenes/`). `video.gif`
+//! writes `<path>.gif`, `video.subtitles_extract` writes
+//! `<path>.subs.<fmt>`, and `video.slideshow` writes
+//! `slideshow.<target_ext>` in the first input's directory.
+//! `video.merge_av` reads two confined paths (`video_path`,
+//! `audio_path`) and writes `<video_path>.merged<ext>`.
+//!
 //! `storage.gc_staging` payload details: `retention_secs` defaults to
 //! 86 400 (24 h). Every entry directly under `staging/` **and** the
 //! streaming backend's reserved `.staging/` directory whose
@@ -98,6 +135,7 @@
 //! `remove_file`. Entries whose metadata cannot be read are skipped;
 //! a missing `staging/` directory is a no-op success.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -123,7 +161,9 @@ use crate::crates::document_engine::store::history::record_event;
 use crate::crates::document_engine::store::metadata::{
     get_document_metadata, upsert_document_metadata,
 };
-use crate::crates::job_engine::{Job, JobContext, JobEngine, JobError, JobHandler, NewJob, enqueue};
+use crate::crates::job_engine::{
+    Job, JobContext, JobEngine, JobError, JobHandler, NewJob, enqueue,
+};
 use crate::crates::security_engine::{SniffedFormat, sniff_format};
 use crate::crates::storage::local::config::StorageConfig;
 use crate::crates::storage::local::debug_when_full::{FaultInjectingFs, StorageError};
@@ -161,6 +201,78 @@ pub const VIDEO_TRANSCODE_KIND: &str = "video.transcode";
 
 /// Job kind for [`VideoTrimHandler`].
 pub const VIDEO_TRIM_KIND: &str = "video.trim";
+
+/// Job kind for [`VideoRemuxHandler`].
+pub const VIDEO_REMUX_KIND: &str = "video.remux";
+
+/// Job kind for [`VideoExtractFramesHandler`].
+pub const VIDEO_EXTRACT_FRAMES_KIND: &str = "video.extract_frames";
+
+/// Job kind for [`VideoSubtitlesExtractHandler`].
+pub const VIDEO_SUBTITLES_EXTRACT_KIND: &str = "video.subtitles_extract";
+
+/// Job kind for [`VideoAnalyzeHandler`].
+pub const VIDEO_ANALYZE_KIND: &str = "video.analyze";
+
+/// Job kind for [`VideoPackageHlsHandler`].
+pub const VIDEO_PACKAGE_HLS_KIND: &str = "video.package_hls";
+
+/// Job kind for [`VideoMetadataSetHandler`].
+pub const VIDEO_METADATA_SET_KIND: &str = "video.metadata_set";
+
+/// Job kind for [`VideoMetadataStripHandler`].
+pub const VIDEO_METADATA_STRIP_KIND: &str = "video.metadata_strip";
+
+/// Job kind for [`VideoExtractStreamsHandler`].
+pub const VIDEO_EXTRACT_STREAMS_KIND: &str = "video.extract_streams";
+
+/// Job kind for [`VideoAudioVolumeHandler`].
+pub const VIDEO_AUDIO_VOLUME_KIND: &str = "video.audio_volume";
+
+/// Job kind for [`VideoContactSheetHandler`].
+pub const VIDEO_CONTACT_SHEET_KIND: &str = "video.contact_sheet";
+
+/// Job kind for [`VideoSpeedHandler`].
+pub const VIDEO_SPEED_KIND: &str = "video.speed";
+
+/// Job kind for [`VideoReverseHandler`].
+pub const VIDEO_REVERSE_KIND: &str = "video.reverse";
+
+/// Job kind for [`VideoLoopHandler`].
+pub const VIDEO_LOOP_KIND: &str = "video.loop";
+
+/// Job kind for [`VideoFreezeHandler`].
+pub const VIDEO_FREEZE_KIND: &str = "video.freeze";
+
+/// Job kind for [`VideoResizeHandler`].
+pub const VIDEO_RESIZE_KIND: &str = "video.resize";
+
+/// Job kind for [`VideoCropHandler`].
+pub const VIDEO_CROP_KIND: &str = "video.crop";
+
+/// Job kind for [`VideoRotateHandler`].
+pub const VIDEO_ROTATE_KIND: &str = "video.rotate";
+
+/// Job kind for [`VideoFlipHandler`].
+pub const VIDEO_FLIP_KIND: &str = "video.flip";
+
+/// Job kind for [`VideoGifHandler`].
+pub const VIDEO_GIF_KIND: &str = "video.gif";
+
+/// Job kind for [`VideoSlideshowHandler`].
+pub const VIDEO_SLIDESHOW_KIND: &str = "video.slideshow";
+
+/// Job kind for [`VideoNormalizeHandler`].
+pub const VIDEO_NORMALIZE_KIND: &str = "video.normalize";
+
+/// Job kind for [`VideoLoudnessHandler`].
+pub const VIDEO_LOUDNESS_KIND: &str = "video.loudness";
+
+/// Job kind for [`VideoSceneFramesHandler`].
+pub const VIDEO_SCENE_FRAMES_KIND: &str = "video.scene_frames";
+
+/// Job kind for [`VideoMergeAvHandler`].
+pub const VIDEO_MERGE_AV_KIND: &str = "video.merge_av";
 
 /// Default `max_bytes` for `pdf.inspect` (100 MiB).
 const DEFAULT_INSPECT_MAX_BYTES: u64 = 100 * 1024 * 1024;
@@ -220,12 +332,45 @@ pub fn register_builtin(engine: &mut JobEngine) {
     engine.register(VIDEO_THUMBNAIL_KIND, Arc::new(VideoThumbnailHandler));
     engine.register(VIDEO_TRANSCODE_KIND, Arc::new(VideoTranscodeHandler));
     engine.register(VIDEO_TRIM_KIND, Arc::new(VideoTrimHandler));
+    engine.register(VIDEO_REMUX_KIND, Arc::new(VideoRemuxHandler));
+    engine.register(
+        VIDEO_EXTRACT_FRAMES_KIND,
+        Arc::new(VideoExtractFramesHandler),
+    );
+    engine.register(
+        VIDEO_SUBTITLES_EXTRACT_KIND,
+        Arc::new(VideoSubtitlesExtractHandler),
+    );
+    engine.register(VIDEO_ANALYZE_KIND, Arc::new(VideoAnalyzeHandler));
+    engine.register(VIDEO_PACKAGE_HLS_KIND, Arc::new(VideoPackageHlsHandler));
+    engine.register(VIDEO_METADATA_SET_KIND, Arc::new(VideoMetadataSetHandler));
+    engine.register(
+        VIDEO_METADATA_STRIP_KIND,
+        Arc::new(VideoMetadataStripHandler),
+    );
+    engine.register(
+        VIDEO_EXTRACT_STREAMS_KIND,
+        Arc::new(VideoExtractStreamsHandler),
+    );
+    engine.register(VIDEO_AUDIO_VOLUME_KIND, Arc::new(VideoAudioVolumeHandler));
+    engine.register(VIDEO_CONTACT_SHEET_KIND, Arc::new(VideoContactSheetHandler));
+    engine.register(VIDEO_SPEED_KIND, Arc::new(VideoSpeedHandler));
+    engine.register(VIDEO_REVERSE_KIND, Arc::new(VideoReverseHandler));
+    engine.register(VIDEO_LOOP_KIND, Arc::new(VideoLoopHandler));
+    engine.register(VIDEO_FREEZE_KIND, Arc::new(VideoFreezeHandler));
+    engine.register(VIDEO_RESIZE_KIND, Arc::new(VideoResizeHandler));
+    engine.register(VIDEO_CROP_KIND, Arc::new(VideoCropHandler));
+    engine.register(VIDEO_ROTATE_KIND, Arc::new(VideoRotateHandler));
+    engine.register(VIDEO_FLIP_KIND, Arc::new(VideoFlipHandler));
+    engine.register(VIDEO_GIF_KIND, Arc::new(VideoGifHandler));
+    engine.register(VIDEO_SLIDESHOW_KIND, Arc::new(VideoSlideshowHandler));
+    engine.register(VIDEO_NORMALIZE_KIND, Arc::new(VideoNormalizeHandler));
+    engine.register(VIDEO_LOUDNESS_KIND, Arc::new(VideoLoudnessHandler));
+    engine.register(VIDEO_SCENE_FRAMES_KIND, Arc::new(VideoSceneFramesHandler));
+    engine.register(VIDEO_MERGE_AV_KIND, Arc::new(VideoMergeAvHandler));
     engine.register(STORAGE_GC_STAGING_KIND, Arc::new(StorageGcStagingHandler));
     match DocumentMetadataExtractHandler::from_app_config() {
-        Ok(handler) => engine.register(
-            DOCUMENT_METADATA_EXTRACT_KIND,
-            Arc::new(handler),
-        ),
+        Ok(handler) => engine.register(DOCUMENT_METADATA_EXTRACT_KIND, Arc::new(handler)),
         Err(e) => tracing::warn!(
             error = %e,
             "skipping document.metadata_extract handler: storage config unavailable"
@@ -855,16 +1000,7 @@ fn write_output_atomic(out: &Path, bytes: &[u8]) -> Result<(), JobError> {
 /// Validates `target_ext` as a bare output extension: alphanumeric
 /// only, no leading dot required, case-normalized to lowercase.
 fn sanitize_target_ext(ext: &str) -> Result<String, JobError> {
-    let cleaned = ext.trim().trim_start_matches('.').to_ascii_lowercase();
-    let ok = !cleaned.is_empty()
-        && cleaned.len() <= 16
-        && cleaned.chars().all(|c| c.is_ascii_alphanumeric());
-    if !ok {
-        return Err(JobError::Failed(format!(
-            "payload.target_ext is not a safe extension: {ext:?}"
-        )));
-    }
-    Ok(cleaned)
+    sanitize_ext_field("target_ext", ext)
 }
 
 /// `video.probe` implementation: probe `rel_path` under `root` and
@@ -885,9 +1021,7 @@ fn thumbnail_video_at(root: &Path, payload: &VideoThumbnailPayload) -> Result<()
     let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
     let png = crate::crates::video_engine::VideoEngine::new()
         .thumbnail(&data, payload.at_secs, &video_limits(payload.max_bytes))
-        .map_err(|e| {
-            video_err(&format!("video thumbnail failed for {:?}", payload.path), e)
-        })?;
+        .map_err(|e| video_err(&format!("video thumbnail failed for {:?}", payload.path), e))?;
     write_output_atomic(&path_with_suffix(&file, ".thumb.png"), &png)
 }
 
@@ -906,9 +1040,7 @@ fn transcode_video_at(root: &Path, payload: &VideoTranscodePayload) -> Result<()
     }
     let bytes = crate::crates::video_engine::VideoEngine::new()
         .transcode(&data, &ext, &video_limits(payload.max_bytes))
-        .map_err(|e| {
-            video_err(&format!("video transcode failed for {:?}", payload.path), e)
-        })?;
+        .map_err(|e| video_err(&format!("video transcode failed for {:?}", payload.path), e))?;
     write_output_atomic(&out, &bytes)
 }
 
@@ -940,6 +1072,1073 @@ fn trim_video_at(root: &Path, payload: &VideoTrimPayload) -> Result<(), JobError
         )
         .map_err(|e| video_err(&format!("video trim failed for {:?}", payload.path), e))?;
     write_output_atomic(&out, &bytes)
+}
+
+// ---------------------------------------------------------------------------
+// Extended video.* handlers (remux / frames / subs / analyze / packaging /
+// metadata / streams / audio / geometry / tempo / gif / slideshow / merge)
+// ---------------------------------------------------------------------------
+//
+// Same confinement + atomic-output model as the four kinds above. The
+// `video_transform_at` helper covers the common "read → engine op →
+// `<path>.<op><ext>`" shape; report and multi-file ops have dedicated
+// bodies.
+
+/// `video.remux` — stream-copy remux to `target_ext`.
+struct VideoRemuxHandler;
+
+/// `video.extract_frames` — pull frames per a [`FramesSpec`].
+struct VideoExtractFramesHandler;
+
+/// `video.subtitles_extract` — dump one subtitle track as text.
+struct VideoSubtitlesExtractHandler;
+
+/// `video.analyze` — full media analysis report.
+struct VideoAnalyzeHandler;
+
+/// `video.package_hls` — HLS package (`index.m3u8` + segments).
+struct VideoPackageHlsHandler;
+
+/// `video.metadata_set` — write container tags.
+struct VideoMetadataSetHandler;
+
+/// `video.metadata_strip` — remove all container metadata.
+struct VideoMetadataStripHandler;
+
+/// `video.extract_streams` — pull embedded streams as files.
+struct VideoExtractStreamsHandler;
+
+/// `video.audio_volume` — gain/attenuate all audio.
+struct VideoAudioVolumeHandler;
+
+/// `video.contact_sheet` — tiled PNG of sampled frames.
+struct VideoContactSheetHandler;
+
+/// `video.speed` — change playback speed.
+struct VideoSpeedHandler;
+
+/// `video.reverse` — reverse the clip.
+struct VideoReverseHandler;
+
+/// `video.loop` — loop the clip `count` extra times.
+struct VideoLoopHandler;
+
+/// `video.freeze` — freeze the frame at `at_secs`.
+struct VideoFreezeHandler;
+
+/// `video.resize` — resize to `width`×`height` per `fit`.
+struct VideoResizeHandler;
+
+/// `video.crop` — crop to `(x, y, w, h)`.
+struct VideoCropHandler;
+
+/// `video.rotate` — rotate by `degrees`.
+struct VideoRotateHandler;
+
+/// `video.flip` — mirror horizontally or vertically.
+struct VideoFlipHandler;
+
+/// `video.gif` — video → animated GIF.
+struct VideoGifHandler;
+
+/// `video.slideshow` — images → video.
+struct VideoSlideshowHandler;
+
+/// `video.normalize` — EBU R128 loudness normalization.
+struct VideoNormalizeHandler;
+
+/// `video.loudness` — loudness measurement report.
+struct VideoLoudnessHandler;
+
+/// `video.scene_frames` — one frame per detected scene change.
+struct VideoSceneFramesHandler;
+
+/// `video.merge_av` — merge an audio file into a video.
+struct VideoMergeAvHandler;
+
+/// Parsed `video.extract_frames` payload.
+#[derive(Debug, Deserialize)]
+struct VideoExtractFramesPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// One frame every N seconds. Mutually exclusive with `fps`/`all`/
+    /// `keyframes_only` at the engine level — the engine resolves
+    /// precedence.
+    #[serde(default)]
+    every_secs: Option<f64>,
+    /// Frames per second to sample at.
+    #[serde(default)]
+    fps: Option<f64>,
+    /// Emit every frame.
+    #[serde(default)]
+    all: bool,
+    /// Only keyframes/I-frames.
+    #[serde(default)]
+    keyframes_only: bool,
+    /// Frame image format (`"png"` or `"jpg"`). Defaults to `"png"`.
+    #[serde(default)]
+    format: Option<String>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.subtitles_extract` payload.
+#[derive(Debug, Deserialize)]
+struct VideoSubtitlesExtractPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Subtitle stream ordinal (`None` → first subtitle stream).
+    #[serde(default)]
+    track: Option<u32>,
+    /// Output subtitle format (`"srt"`, `"vtt"`, or `"ass"`).
+    /// Defaults to `"srt"`.
+    #[serde(default)]
+    format: Option<String>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.metadata_set` payload.
+#[derive(Debug, Deserialize)]
+struct VideoMetadataSetPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Container tags to write (`title`, `artist`, ...). Keys/values
+    /// must be strings.
+    tags: BTreeMap<String, String>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.extract_streams` payload.
+#[derive(Debug, Deserialize)]
+struct VideoExtractStreamsPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Extract subtitle streams (as `subtitle_format` text).
+    #[serde(default)]
+    subtitles: bool,
+    /// Extract binary attachments.
+    #[serde(default)]
+    attachments: bool,
+    /// Extract attached cover art.
+    #[serde(default)]
+    cover_art: bool,
+    /// Export chapters as a JSON sidecar.
+    #[serde(default)]
+    chapters: bool,
+    /// Extract data/other streams (best effort).
+    #[serde(default)]
+    data: bool,
+    /// Subtitle text format (`"srt"`, `"vtt"`, or `"ass"`).
+    /// Defaults to `"srt"`.
+    #[serde(default)]
+    subtitle_format: Option<String>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.audio_volume` payload.
+#[derive(Debug, Deserialize)]
+struct VideoAudioVolumePayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Gain in decibels (positive = louder, negative = quieter).
+    gain_db: f64,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.contact_sheet` payload.
+#[derive(Debug, Deserialize)]
+struct VideoContactSheetPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Grid columns. Defaults to 4.
+    #[serde(default)]
+    cols: Option<u32>,
+    /// Grid rows. Defaults to 4.
+    #[serde(default)]
+    rows: Option<u32>,
+    /// Thumbnail cell width in pixels. Defaults to 320.
+    #[serde(default)]
+    thumb_width: Option<u32>,
+    /// Seconds between sampled frames (`None` → engine default,
+    /// duration / cells).
+    #[serde(default)]
+    interval_secs: Option<f64>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.speed` payload.
+#[derive(Debug, Deserialize)]
+struct VideoSpeedPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Playback speed multiplier (`2.0` = twice as fast).
+    factor: f64,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.loop` payload.
+#[derive(Debug, Deserialize)]
+struct VideoLoopPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Additional times the clip is appended after the first play.
+    count: u32,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.freeze` payload.
+#[derive(Debug, Deserialize)]
+struct VideoFreezePayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Timestamp (seconds) of the frame to freeze.
+    at_secs: f64,
+    /// How long the frozen frame is held, in seconds.
+    duration_secs: f64,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.resize` payload.
+#[derive(Debug, Deserialize)]
+struct VideoResizePayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Target width in pixels.
+    width: u32,
+    /// Target height in pixels.
+    height: u32,
+    /// Fit mode: `"fit"` (default), `"cover"`, `"contain"`, or
+    /// `"stretch"` — case-insensitive.
+    #[serde(default)]
+    fit: Option<String>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.crop` payload.
+#[derive(Debug, Deserialize)]
+struct VideoCropPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Crop origin X in pixels.
+    x: u32,
+    /// Crop origin Y in pixels.
+    y: u32,
+    /// Crop width in pixels.
+    w: u32,
+    /// Crop height in pixels.
+    h: u32,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.rotate` payload.
+#[derive(Debug, Deserialize)]
+struct VideoRotatePayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Rotation angle in degrees.
+    degrees: f64,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.flip` payload.
+#[derive(Debug, Deserialize)]
+struct VideoFlipPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// `true` (default) mirrors horizontally; `false` vertically.
+    #[serde(default)]
+    horizontal: Option<bool>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.gif` payload.
+#[derive(Debug, Deserialize)]
+struct VideoGifPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// GIF frame rate (`None` → engine default).
+    #[serde(default)]
+    fps: Option<f64>,
+    /// Output width in pixels (`None` → engine default scaling).
+    #[serde(default)]
+    width: Option<u32>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.slideshow` payload.
+#[derive(Debug, Deserialize)]
+struct VideoSlideshowPayload {
+    /// Image paths relative to the storage root, in order. Must not
+    /// be empty; each entry is confined like `path`.
+    paths: Vec<String>,
+    /// Output frame rate (`None` → 10 fps).
+    #[serde(default)]
+    fps: Option<f64>,
+    /// Seconds each image is shown (`None` → engine default).
+    #[serde(default)]
+    duration_per_image: Option<f64>,
+    /// Bare output extension (e.g. `"mp4"`). The output is written to
+    /// `slideshow.<target_ext>` in the first input's directory.
+    target_ext: String,
+    /// Size cap applied to **each** input before reading (bytes).
+    /// Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.normalize` payload.
+#[derive(Debug, Deserialize)]
+struct VideoNormalizePayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Target integrated loudness in LUFS (`None` → engine default,
+    /// typically -16 or -23 LUFS).
+    #[serde(default)]
+    target_lufs: Option<f64>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.scene_frames` payload.
+#[derive(Debug, Deserialize)]
+struct VideoSceneFramesPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Scene-change score threshold 0.0–1.0 (`None` → 0.4, matching
+    /// the engine's analysis default).
+    #[serde(default)]
+    threshold: Option<f64>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.merge_av` payload.
+#[derive(Debug, Deserialize)]
+struct VideoMergeAvPayload {
+    /// Video path relative to the storage root.
+    video_path: String,
+    /// Audio path relative to the storage root.
+    audio_path: String,
+    /// Bare output extension (`None` → the video input's extension,
+    /// or `"mp4"` when it has none).
+    #[serde(default)]
+    target_ext: Option<String>,
+    /// Size cap applied to **each** input before reading (bytes).
+    /// Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Implements [`JobHandler`] for every extended `video.*` handler:
+/// parse the payload, resolve the storage root, run the named
+/// operation. Identical contract to the four hand-written impls above.
+macro_rules! impl_video_handler {
+    ($handler:ident, $payload:ty, $op:ident) => {
+        impl JobHandler for $handler {
+            fn handle<'a>(
+                &'a self,
+                _ctx: &'a JobContext,
+                job: &'a Job,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>,
+            > {
+                Box::pin(async move {
+                    let payload: $payload = serde_json::from_value(job.payload.clone())?;
+                    let root = storage_root()?;
+                    $op(&root, &payload)
+                })
+            }
+        }
+    };
+}
+
+impl_video_handler!(VideoRemuxHandler, VideoTranscodePayload, remux_video_at);
+impl_video_handler!(
+    VideoExtractFramesHandler,
+    VideoExtractFramesPayload,
+    extract_frames_video_at
+);
+impl_video_handler!(
+    VideoSubtitlesExtractHandler,
+    VideoSubtitlesExtractPayload,
+    subtitles_extract_video_at
+);
+impl_video_handler!(VideoAnalyzeHandler, VideoPathPayload, analyze_video_at);
+impl_video_handler!(
+    VideoPackageHlsHandler,
+    VideoPathPayload,
+    package_hls_video_at
+);
+impl_video_handler!(
+    VideoMetadataSetHandler,
+    VideoMetadataSetPayload,
+    metadata_set_video_at
+);
+impl_video_handler!(
+    VideoMetadataStripHandler,
+    VideoPathPayload,
+    metadata_strip_video_at
+);
+impl_video_handler!(
+    VideoExtractStreamsHandler,
+    VideoExtractStreamsPayload,
+    extract_streams_video_at
+);
+impl_video_handler!(
+    VideoAudioVolumeHandler,
+    VideoAudioVolumePayload,
+    audio_volume_video_at
+);
+impl_video_handler!(
+    VideoContactSheetHandler,
+    VideoContactSheetPayload,
+    contact_sheet_video_at
+);
+impl_video_handler!(VideoSpeedHandler, VideoSpeedPayload, speed_video_at);
+impl_video_handler!(VideoReverseHandler, VideoPathPayload, reverse_video_at);
+impl_video_handler!(VideoLoopHandler, VideoLoopPayload, loop_video_at);
+impl_video_handler!(VideoFreezeHandler, VideoFreezePayload, freeze_video_at);
+impl_video_handler!(VideoResizeHandler, VideoResizePayload, resize_video_at);
+impl_video_handler!(VideoCropHandler, VideoCropPayload, crop_video_at);
+impl_video_handler!(VideoRotateHandler, VideoRotatePayload, rotate_video_at);
+impl_video_handler!(VideoFlipHandler, VideoFlipPayload, flip_video_at);
+impl_video_handler!(VideoGifHandler, VideoGifPayload, gif_video_at);
+impl_video_handler!(
+    VideoSlideshowHandler,
+    VideoSlideshowPayload,
+    slideshow_video_at
+);
+impl_video_handler!(
+    VideoNormalizeHandler,
+    VideoNormalizePayload,
+    normalize_video_at
+);
+impl_video_handler!(VideoLoudnessHandler, VideoPathPayload, loudness_video_at);
+impl_video_handler!(
+    VideoSceneFramesHandler,
+    VideoSceneFramesPayload,
+    scene_frames_video_at
+);
+impl_video_handler!(VideoMergeAvHandler, VideoMergeAvPayload, merge_av_video_at);
+
+/// `.<ext>` of `file` (leading dot included), or `""` when the file
+/// has no extension — used to build `<path>.<op><ext>` output names.
+fn input_ext_suffix(file: &Path) -> String {
+    file.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default()
+}
+
+/// Shared body for single-file `video.*` transforms that return
+/// `Vec<u8>`: read `path` under `root`, run `op` with
+/// [`video_limits`], and write the result to
+/// `<file>.<suffix><input-ext>` atomically. `kind` names the job kind
+/// in error messages.
+fn video_transform_at<F>(
+    root: &Path,
+    path: &str,
+    max_bytes: u64,
+    kind: &str,
+    suffix: &str,
+    op: F,
+) -> Result<(), JobError>
+where
+    F: FnOnce(
+        &[u8],
+        &crate::crates::core::engine::EngineLimits,
+    ) -> crate::crates::video_engine::VideoResult<Vec<u8>>,
+{
+    let (file, data) = read_video_input(root, path, max_bytes)?;
+    let out = path_with_suffix(&file, &format!("{suffix}{}", input_ext_suffix(&file)));
+    if out == file {
+        return Err(JobError::Failed(format!(
+            "{kind} output would overwrite the input: {path:?}"
+        )));
+    }
+    let bytes = op(&data, &video_limits(max_bytes))
+        .map_err(|e| video_err(&format!("{kind} failed for {path:?}"), e))?;
+    write_output_atomic(&out, &bytes)
+}
+
+/// `video.remux` implementation: stream-copy remux of `path` to
+/// `target_ext`, written to `<path>.<target_ext>` (same naming as
+/// `video.transcode`). Shares the transcode payload contract; the
+/// output never overwrites the input because the `.<ext>` suffix is
+/// always appended.
+fn remux_video_at(root: &Path, payload: &VideoTranscodePayload) -> Result<(), JobError> {
+    let ext = sanitize_target_ext(&payload.target_ext)?;
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let out = path_with_suffix(&file, &format!(".{ext}"));
+    if out == file {
+        return Err(JobError::Failed(format!(
+            "video.remux output would overwrite the input: {:?}",
+            payload.path
+        )));
+    }
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .remux(&data, &ext, &video_limits(payload.max_bytes))
+        .map_err(|e| video_err(&format!("video remux failed for {:?}", payload.path), e))?;
+    write_output_atomic(&out, &bytes)
+}
+
+/// `video.extract_frames` implementation: extract frames per the
+/// payload spec and write the [`MediaOutput`] set under
+/// `<path>.frames/`.
+fn extract_frames_video_at(
+    root: &Path,
+    payload: &VideoExtractFramesPayload,
+) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let format = sanitize_ext_field("format", payload.format.as_deref().unwrap_or("png"))?;
+    let spec = crate::crates::video_engine::FramesSpec {
+        all: payload.all,
+        every_secs: payload.every_secs,
+        fps: payload.fps,
+        keyframes_only: payload.keyframes_only,
+        format,
+    };
+    let out = crate::crates::video_engine::VideoEngine::new()
+        .extract_frames(&data, &spec, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(
+                &format!("video extract_frames failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_media_output(&path_with_suffix(&file, ".frames"), &out)
+}
+
+/// `video.subtitles_extract` implementation: extract subtitle track
+/// `track` (`None` → first) as `format` text, written to
+/// `<path>.subs.<fmt>`.
+fn subtitles_extract_video_at(
+    root: &Path,
+    payload: &VideoSubtitlesExtractPayload,
+) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let format = sanitize_ext_field("format", payload.format.as_deref().unwrap_or("srt"))?;
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .extract_subtitles(
+            &data,
+            payload.track,
+            &format,
+            &video_limits(payload.max_bytes),
+        )
+        .map_err(|e| {
+            video_err(
+                &format!("video subtitles_extract failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_output_atomic(&path_with_suffix(&file, &format!(".subs.{format}")), &bytes)
+}
+
+/// `video.analyze` implementation: run the full analysis pipeline and
+/// write the pretty-JSON [`MediaAnalysis`] report to
+/// `<path>.analysis.json`.
+fn analyze_video_at(root: &Path, payload: &VideoPathPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let analysis = crate::crates::video_engine::VideoEngine::new()
+        .analyze(&data, &video_limits(payload.max_bytes))
+        .map_err(|e| video_err(&format!("video analyze failed for {:?}", payload.path), e))?;
+    let json = serde_json::to_string_pretty(&analysis)?;
+    write_output_atomic(&path_with_suffix(&file, ".analysis.json"), json.as_bytes())
+}
+
+/// `video.package_hls` implementation: package the input as HLS and
+/// write the [`MediaOutput`] set (`index.m3u8` + segments) under
+/// `<path>.hls/`.
+fn package_hls_video_at(root: &Path, payload: &VideoPathPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let out = crate::crates::video_engine::VideoEngine::new()
+        .package_hls(&data, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(
+                &format!("video package_hls failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_media_output(&path_with_suffix(&file, ".hls"), &out)
+}
+
+/// `video.metadata_set` implementation: write `tags` into the
+/// container and save the result to `<path>.tagged<ext>`.
+fn metadata_set_video_at(root: &Path, payload: &VideoMetadataSetPayload) -> Result<(), JobError> {
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_METADATA_SET_KIND,
+        ".tagged",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new().set_metadata(
+                data,
+                &payload.tags,
+                limits,
+            )
+        },
+    )
+}
+
+/// `video.metadata_strip` implementation: strip all container
+/// metadata, writing `<path>.stripped<ext>`. The engine needs a target
+/// extension — the input's own extension is reused (sanitized), or
+/// `"mp4"` when the input has none/unsafe.
+fn metadata_strip_video_at(root: &Path, payload: &VideoPathPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| sanitize_target_ext(e).unwrap_or_else(|_| "mp4".to_string()))
+        .unwrap_or_else(|| "mp4".to_string());
+    let out = path_with_suffix(&file, &format!(".stripped.{ext}"));
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .strip_metadata(&data, &ext, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(
+                &format!("video metadata_strip failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_output_atomic(&out, &bytes)
+}
+
+/// `video.extract_streams` implementation: pull the selected embedded
+/// streams and write the [`MediaOutput`] set under
+/// `<path>.streams/`.
+fn extract_streams_video_at(
+    root: &Path,
+    payload: &VideoExtractStreamsPayload,
+) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let selection = crate::crates::video_engine::StreamSelection {
+        subtitles: payload.subtitles,
+        attachments: payload.attachments,
+        cover_art: payload.cover_art,
+        chapters: payload.chapters,
+        data: payload.data,
+    };
+    let subtitle_format = sanitize_ext_field(
+        "subtitle_format",
+        payload.subtitle_format.as_deref().unwrap_or("srt"),
+    )?;
+    let out = crate::crates::video_engine::VideoEngine::new()
+        .extract_streams(
+            &data,
+            &selection,
+            &subtitle_format,
+            &video_limits(payload.max_bytes),
+        )
+        .map_err(|e| {
+            video_err(
+                &format!("video extract_streams failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_media_output(&path_with_suffix(&file, ".streams"), &out)
+}
+
+/// `video.audio_volume` implementation: apply `gain_db` to all audio
+/// and write `<path>.vol<ext>`.
+fn audio_volume_video_at(root: &Path, payload: &VideoAudioVolumePayload) -> Result<(), JobError> {
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_AUDIO_VOLUME_KIND,
+        ".vol",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new().audio_volume(
+                data,
+                payload.gain_db,
+                limits,
+            )
+        },
+    )
+}
+
+/// `video.contact_sheet` implementation: build a tiled PNG of sampled
+/// frames and write it to `<path>.sheet.png`. Grid defaults: 4×4
+/// cells of 320 px-wide thumbnails.
+fn contact_sheet_video_at(root: &Path, payload: &VideoContactSheetPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let png = crate::crates::video_engine::VideoEngine::new()
+        .contact_sheet(
+            &data,
+            payload.cols.unwrap_or(4),
+            payload.rows.unwrap_or(4),
+            payload.thumb_width.unwrap_or(320),
+            payload.interval_secs,
+            &video_limits(payload.max_bytes),
+        )
+        .map_err(|e| {
+            video_err(
+                &format!("video contact_sheet failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_output_atomic(&path_with_suffix(&file, ".sheet.png"), &png)
+}
+
+/// `video.speed` implementation: retime by `factor` and write
+/// `<path>.speed<ext>`.
+fn speed_video_at(root: &Path, payload: &VideoSpeedPayload) -> Result<(), JobError> {
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_SPEED_KIND,
+        ".speed",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new().set_speed(data, payload.factor, limits)
+        },
+    )
+}
+
+/// `video.reverse` implementation: reverse the clip and write
+/// `<path>.reverse<ext>`.
+fn reverse_video_at(root: &Path, payload: &VideoPathPayload) -> Result<(), JobError> {
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_REVERSE_KIND,
+        ".reverse",
+        |data, limits| crate::crates::video_engine::VideoEngine::new().reverse(data, limits),
+    )
+}
+
+/// `video.loop` implementation: append `count` extra plays and write
+/// `<path>.loop<ext>`.
+fn loop_video_at(root: &Path, payload: &VideoLoopPayload) -> Result<(), JobError> {
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_LOOP_KIND,
+        ".loop",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new().loop_clip(data, payload.count, limits)
+        },
+    )
+}
+
+/// `video.freeze` implementation: freeze the frame at `at_secs` for
+/// `duration_secs` and write `<path>.freeze<ext>`.
+fn freeze_video_at(root: &Path, payload: &VideoFreezePayload) -> Result<(), JobError> {
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_FREEZE_KIND,
+        ".freeze",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new().freeze_frame(
+                data,
+                payload.at_secs,
+                payload.duration_secs,
+                limits,
+            )
+        },
+    )
+}
+
+/// `video.resize` implementation: resize to `width`×`height` per `fit`
+/// and write `<path>.resize<ext>`.
+fn resize_video_at(root: &Path, payload: &VideoResizePayload) -> Result<(), JobError> {
+    let fit = parse_fit_mode(payload.fit.as_deref())?;
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_RESIZE_KIND,
+        ".resize",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new().resize_video(
+                data,
+                payload.width,
+                payload.height,
+                fit,
+                limits,
+            )
+        },
+    )
+}
+
+/// `video.crop` implementation: crop to `(x, y, w, h)` and write
+/// `<path>.crop<ext>`.
+fn crop_video_at(root: &Path, payload: &VideoCropPayload) -> Result<(), JobError> {
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_CROP_KIND,
+        ".crop",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new()
+                .crop_video(data, payload.x, payload.y, payload.w, payload.h, limits)
+        },
+    )
+}
+
+/// `video.rotate` implementation: rotate by `degrees` and write
+/// `<path>.rotate<ext>`.
+fn rotate_video_at(root: &Path, payload: &VideoRotatePayload) -> Result<(), JobError> {
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_ROTATE_KIND,
+        ".rotate",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new().rotate_video(
+                data,
+                payload.degrees,
+                limits,
+            )
+        },
+    )
+}
+
+/// `video.flip` implementation: mirror horizontally (`horizontal`
+/// unset/`true`) or vertically (`false`) and write `<path>.flip<ext>`.
+fn flip_video_at(root: &Path, payload: &VideoFlipPayload) -> Result<(), JobError> {
+    let horizontal = payload.horizontal.unwrap_or(true);
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_FLIP_KIND,
+        ".flip",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new().flip_video(data, horizontal, limits)
+        },
+    )
+}
+
+/// `video.gif` implementation: convert the video to an animated GIF
+/// and write `<path>.gif`.
+fn gif_video_at(root: &Path, payload: &VideoGifPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .video_to_gif(
+            &data,
+            payload.fps,
+            payload.width,
+            &video_limits(payload.max_bytes),
+        )
+        .map_err(|e| video_err(&format!("video gif failed for {:?}", payload.path), e))?;
+    write_output_atomic(&path_with_suffix(&file, ".gif"), &bytes)
+}
+
+/// `video.slideshow` implementation: read every path in `paths`
+/// (each confined + size-checked), stitch them into a video at `fps`
+/// (`None` → 10), and write `slideshow.<target_ext>` in the first
+/// input's directory.
+fn slideshow_video_at(root: &Path, payload: &VideoSlideshowPayload) -> Result<(), JobError> {
+    if payload.paths.is_empty() {
+        return Err(JobError::Failed(
+            "payload.paths must contain at least one image".to_string(),
+        ));
+    }
+    let ext = sanitize_target_ext(&payload.target_ext)?;
+    let mut inputs = Vec::with_capacity(payload.paths.len());
+    let mut first_file: Option<PathBuf> = None;
+    for rel in &payload.paths {
+        let (file, data) = read_video_input(root, rel, payload.max_bytes)?;
+        if first_file.is_none() {
+            first_file = Some(file);
+        }
+        inputs.push(data);
+    }
+    let file = first_file.expect("paths is non-empty");
+    let fps = payload.fps.unwrap_or(10.0);
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .images_to_video(
+            &inputs,
+            fps,
+            payload.duration_per_image,
+            &ext,
+            &video_limits(payload.max_bytes),
+        )
+        .map_err(|e| video_err("video slideshow failed", e))?;
+    let dir = file.parent().unwrap_or(root);
+    write_output_atomic(&dir.join(format!("slideshow.{ext}")), &bytes)
+}
+
+/// `video.normalize` implementation: EBU R128 loudness normalization
+/// toward `target_lufs` (`None` → engine default) and write
+/// `<path>.norm<ext>`.
+fn normalize_video_at(root: &Path, payload: &VideoNormalizePayload) -> Result<(), JobError> {
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_NORMALIZE_KIND,
+        ".norm",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new().audio_normalize(
+                data,
+                payload.target_lufs,
+                limits,
+            )
+        },
+    )
+}
+
+/// `video.loudness` implementation: measure EBU R128 loudness and
+/// write the pretty-JSON [`LoudnessReport`] to
+/// `<path>.loudness.json`.
+fn loudness_video_at(root: &Path, payload: &VideoPathPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let report = crate::crates::video_engine::VideoEngine::new()
+        .measure_loudness(&data, &video_limits(payload.max_bytes))
+        .map_err(|e| video_err(&format!("video loudness failed for {:?}", payload.path), e))?;
+    let json = serde_json::to_string_pretty(&report)?;
+    write_output_atomic(&path_with_suffix(&file, ".loudness.json"), json.as_bytes())
+}
+
+/// `video.scene_frames` implementation: extract one frame per
+/// detected scene change (`threshold` 0.0–1.0, default 0.4) and write
+/// the [`MediaOutput`] set under `<path>.scenes/`.
+fn scene_frames_video_at(root: &Path, payload: &VideoSceneFramesPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let out = crate::crates::video_engine::VideoEngine::new()
+        .scene_keyframes(
+            &data,
+            payload.threshold.unwrap_or(0.4),
+            &video_limits(payload.max_bytes),
+        )
+        .map_err(|e| {
+            video_err(
+                &format!("video scene_frames failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_media_output(&path_with_suffix(&file, ".scenes"), &out)
+}
+
+/// `video.merge_av` implementation: merge `audio_path` into
+/// `video_path` (video stream copied) and write
+/// `<video_path>.merged<ext>`. `target_ext` defaults to the video
+/// input's extension, or `"mp4"`.
+fn merge_av_video_at(root: &Path, payload: &VideoMergeAvPayload) -> Result<(), JobError> {
+    let (video_file, video) = read_video_input(root, &payload.video_path, payload.max_bytes)?;
+    let (_audio_file, audio) = read_video_input(root, &payload.audio_path, payload.max_bytes)?;
+    let ext = match &payload.target_ext {
+        Some(e) => sanitize_target_ext(e)?,
+        None => video_file
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(|e| sanitize_target_ext(e).ok())
+            .unwrap_or_else(|| "mp4".to_string()),
+    };
+    let out = path_with_suffix(&video_file, &format!(".merged.{ext}"));
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .merge_av(&video, &audio, &ext, &video_limits(payload.max_bytes))
+        .map_err(|e| video_err("video merge_av failed", e))?;
+    write_output_atomic(&out, &bytes)
+}
+
+/// Validates a `MediaOutput` relative name for writing under a job
+/// output directory: rejects empty, absolute, and `..`/non-normal
+/// components (same confinement rule as [`resolve_under_root`]).
+fn sanitize_media_name(name: &str) -> Result<PathBuf, JobError> {
+    let rel = Path::new(name);
+    let ok = !name.trim().is_empty()
+        && !rel.is_absolute()
+        && rel
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+    if !ok {
+        return Err(JobError::Failed(format!(
+            "media output name escapes its directory: {name:?}"
+        )));
+    }
+    Ok(rel.to_path_buf())
+}
+
+/// Writes every file of a [`MediaOutput`] under `dir` (created if
+/// needed), each atomically via [`write_output_atomic`]. Names are
+/// sanitized by [`sanitize_media_name`]; an empty output is an error.
+fn write_media_output(
+    dir: &Path,
+    out: &crate::crates::video_engine::MediaOutput,
+) -> Result<(), JobError> {
+    if out.files.is_empty() {
+        return Err(JobError::Failed(
+            "video operation produced no output files".to_string(),
+        ));
+    }
+    std::fs::create_dir_all(dir)
+        .map_err(|e| JobError::Failed(format!("cannot create {}: {e}", dir.display())))?;
+    for file in &out.files {
+        let rel = sanitize_media_name(&file.name)?;
+        write_output_atomic(&dir.join(rel), &file.bytes)?;
+    }
+    Ok(())
+}
+
+/// Like [`sanitize_target_ext`] but reports `field` (e.g. `"format"`,
+/// `"subtitle_format"`) in the error — used for payload fields that
+/// become file extensions or ffmpeg format selectors.
+fn sanitize_ext_field(field: &str, value: &str) -> Result<String, JobError> {
+    let cleaned = value.trim().trim_start_matches('.').to_ascii_lowercase();
+    let ok = !cleaned.is_empty()
+        && cleaned.len() <= 16
+        && cleaned.chars().all(|c| c.is_ascii_alphanumeric());
+    if !ok {
+        return Err(JobError::Failed(format!(
+            "payload.{field} is not a safe extension: {value:?}"
+        )));
+    }
+    Ok(cleaned)
+}
+
+/// Parses the `video.resize` `fit` field into a [`FitMode`].
+/// `None`/empty/`"fit"` → [`FitMode::Fit`]; unknown values are
+/// rejected rather than silently approximated.
+fn parse_fit_mode(fit: Option<&str>) -> Result<crate::crates::video_engine::FitMode, JobError> {
+    use crate::crates::video_engine::FitMode;
+    match fit.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("fit") => Ok(FitMode::Fit),
+        Some("cover") => Ok(FitMode::Cover),
+        Some("contain") => Ok(FitMode::Contain),
+        Some("stretch") => Ok(FitMode::Stretch),
+        Some(other) => Err(JobError::Failed(format!(
+            "payload.fit is not a valid fit mode: {other:?} (expected fit|cover|contain|stretch)"
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,7 +2300,10 @@ fn read_object_bounded(
         .map_err(|e| JobError::Failed(format!("storage read failed for {name}: {e}")))?;
     let truncated = buf.len() as u64 > max_bytes;
     buf.truncate(max_bytes as usize);
-    Ok(BoundedBytes { bytes: buf, truncated })
+    Ok(BoundedBytes {
+        bytes: buf,
+        truncated,
+    })
 }
 
 /// [`EngineLimits`] applied to pdf-engine calls made by job handlers:
@@ -1251,12 +2453,11 @@ async fn resolve_artifact(
             Ok(artifact)
         }
         None => {
-            let artifacts = list_artifacts(pool, document_id)
-                .await
-                .map_err(store_err)?;
-            artifacts.into_iter().last().ok_or_else(|| {
-                JobError::Failed(format!("document {document_id} has no artifacts"))
-            })
+            let artifacts = list_artifacts(pool, document_id).await.map_err(store_err)?;
+            artifacts
+                .into_iter()
+                .last()
+                .ok_or_else(|| JobError::Failed(format!("document {document_id} has no artifacts")))
         }
     }
 }
@@ -1306,6 +2507,7 @@ fn sniffed_name(format: SniffedFormat) -> &'static str {
         SniffedFormat::Zip => "zip",
         SniffedFormat::Gif => "gif",
         SniffedFormat::Video { .. } => "video",
+        SniffedFormat::Audio { .. } => "audio",
         SniffedFormat::Unknown => "unknown",
     }
 }
@@ -1327,6 +2529,21 @@ fn mime_for_format(format: SniffedFormat) -> Option<&'static str> {
             ".avi" => "video/x-msvideo",
             ".ts" => "video/mp2t",
             _ => "video/mpeg",
+        }),
+        // Same dispatch as `Video`: `AudioContainer` is reachable
+        // through its public extension accessor.
+        SniffedFormat::Audio { container } => Some(match container.sniffed_extension() {
+            ".mp3" => "audio/mpeg",
+            ".wav" => "audio/wav",
+            ".flac" => "audio/flac",
+            ".ogg" => "audio/ogg",
+            ".aac" => "audio/aac",
+            ".aiff" => "audio/aiff",
+            ".au" => "audio/basic",
+            ".amr" => "audio/amr",
+            ".caf" => "audio/x-caf",
+            ".ac3" => "audio/ac3",
+            _ => "audio/mpeg",
         }),
         SniffedFormat::Unknown => None,
     }
@@ -1416,9 +2633,7 @@ impl DocumentMetadataExtractHandler {
             let format = sniff_format(head);
 
             let (pdf_info, pdf_error) = if format == SniffedFormat::Pdf && !read.truncated {
-                let engine = crate::crates::pdf_engine::PdfEngine::with_limits(
-                    processing_limits(),
-                );
+                let engine = crate::crates::pdf_engine::PdfEngine::with_limits(processing_limits());
                 match engine.inspect(&read.bytes) {
                     Ok(info) => (Some(info), None),
                     Err(e) => (None, Some(e.to_string())),
@@ -1480,8 +2695,7 @@ impl DocumentMetadataExtractHandler {
             m.custom_fields
                 .insert("metadata_extracted_at".into(), json!(extracted_at));
             if let Some(err) = &pdf_error {
-                m.custom_fields
-                    .insert("extract_error".into(), json!(err));
+                m.custom_fields.insert("extract_error".into(), json!(err));
             }
             if let Some(info) = &info {
                 m.custom_fields
@@ -1580,7 +2794,10 @@ enum IndexOutcome {
     /// Full extracted text (unbounded by the excerpt cap).
     Text { format: SniffedFormat, text: String },
     /// Permanent extraction failure (e.g. corrupt PDF).
-    Failed { format: SniffedFormat, error: String },
+    Failed {
+        format: SniffedFormat,
+        error: String,
+    },
     /// PDF is encrypted — cannot extract without a password.
     Encrypted,
 }
@@ -1598,8 +2815,7 @@ impl JobHandler for DocumentIndexHandler {
                 && job.attempts >= job.max_attempts
                 && let Ok(payload) = DocJobPayload::parse(&job.payload)
             {
-                mark_failed(&ctx.pool, &payload.document_id, INDEX_STATUS_KEY, job, e)
-                    .await;
+                mark_failed(&ctx.pool, &payload.document_id, INDEX_STATUS_KEY, job, e).await;
             }
             result
         })
@@ -1608,8 +2824,7 @@ impl JobHandler for DocumentIndexHandler {
 
 impl DocumentIndexHandler {
     async fn run(&self, ctx: &JobContext, job: &Job) -> Result<(), JobError> {
-        let (document_id, artifact) =
-            begin_processing(&ctx.pool, job, INDEX_STATUS_KEY).await?;
+        let (document_id, artifact) = begin_processing(&ctx.pool, job, INDEX_STATUS_KEY).await?;
 
         let object_name = object_name_for_uri(&artifact.storage_uri)?;
         let storage = self.storage.clone();
@@ -1627,9 +2842,8 @@ impl DocumentIndexHandler {
 
             match format {
                 SniffedFormat::Pdf => {
-                    let engine = crate::crates::pdf_engine::PdfEngine::with_limits(
-                        processing_limits(),
-                    );
+                    let engine =
+                        crate::crates::pdf_engine::PdfEngine::with_limits(processing_limits());
                     match engine.extract_text(&read.bytes, None) {
                         Ok(pages) => {
                             let text = pages
@@ -1724,16 +2938,15 @@ impl DocumentIndexHandler {
                 "processing_status".into(),
                 json!(normalized_processing_status(status)),
             );
-            m.custom_fields.insert(INDEX_STATUS_KEY.into(), json!(status));
+            m.custom_fields
+                .insert(INDEX_STATUS_KEY.into(), json!(status));
             m.custom_fields
                 .insert("index_artifact_id".into(), json!(artifact_id));
             if let Some(f) = format_label {
-                m.custom_fields
-                    .insert("index_format".into(), json!(f));
+                m.custom_fields.insert("index_format".into(), json!(f));
             }
             if let Some(e) = &index_error {
-                m.custom_fields
-                    .insert("index_error".into(), json!(e));
+                m.custom_fields.insert("index_error".into(), json!(e));
             }
             if let Some(v) = index_value {
                 m.custom_fields.insert("index".into(), v);
@@ -1832,10 +3045,7 @@ fn dict_int(dict: &lopdf::Dictionary, key: &[u8]) -> Option<i64> {
 
 /// Dereferences `obj` (following `Reference`s) and returns it as a
 /// dictionary when possible.
-fn as_dict<'a>(
-    doc: &'a lopdf::Document,
-    obj: &'a lopdf::Object,
-) -> Option<&'a lopdf::Dictionary> {
+fn as_dict<'a>(doc: &'a lopdf::Document, obj: &'a lopdf::Object) -> Option<&'a lopdf::Dictionary> {
     match doc.dereference(obj).ok()?.1 {
         lopdf::Object::Dictionary(d) => Some(d),
         _ => None,
@@ -1933,10 +3143,7 @@ fn find_pdf_thumbnail(doc: &lopdf::Document) -> Option<ThumbCandidate> {
                 }
             }
             for resources in resource_dicts {
-                let Some(xobjects) = resources
-                    .get(b"XObject")
-                    .ok()
-                    .and_then(|o| as_dict(doc, o))
+                let Some(xobjects) = resources.get(b"XObject").ok().and_then(|o| as_dict(doc, o))
                 else {
                     continue;
                 };
@@ -2189,8 +3396,7 @@ impl ThumbnailGenerateHandler {
                         .insert("thumbnail_sha256".into(), json!(sha));
                     m.custom_fields
                         .insert("thumbnail_bytes".into(), json!(nbytes));
-                    m.custom_fields
-                        .insert("thumbnail_page".into(), json!(page));
+                    m.custom_fields.insert("thumbnail_page".into(), json!(page));
                     m.custom_fields
                         .insert("thumbnail_format".into(), json!(ext));
                     m.custom_fields
@@ -2357,7 +3563,12 @@ pub async fn enqueue_video_probe(
     path: &str,
     max_bytes: Option<u64>,
 ) -> Result<Job, JobError> {
-    enqueue_video_job(pool, VIDEO_PROBE_KIND, video_path_payload(path, max_bytes, &[])).await
+    enqueue_video_job(
+        pool,
+        VIDEO_PROBE_KIND,
+        video_path_payload(path, max_bytes, &[]),
+    )
+    .await
 }
 
 /// Enqueues a `video.thumbnail` job. Payload: `{path, at_secs?,
@@ -2372,7 +3583,12 @@ pub async fn enqueue_video_thumbnail(
     if let Some(secs) = at_secs {
         extra.push(("at_secs", json!(secs)));
     }
-    enqueue_video_job(pool, VIDEO_THUMBNAIL_KIND, video_path_payload(path, max_bytes, &extra)).await
+    enqueue_video_job(
+        pool,
+        VIDEO_THUMBNAIL_KIND,
+        video_path_payload(path, max_bytes, &extra),
+    )
+    .await
 }
 
 /// Enqueues a `video.transcode` job. Payload: `{path, target_ext,
@@ -2405,7 +3621,225 @@ pub async fn enqueue_video_trim(
     if let Some(end) = end_secs {
         extra.push(("end_secs", json!(end)));
     }
-    enqueue_video_job(pool, VIDEO_TRIM_KIND, video_path_payload(path, max_bytes, &extra)).await
+    enqueue_video_job(
+        pool,
+        VIDEO_TRIM_KIND,
+        video_path_payload(path, max_bytes, &extra),
+    )
+    .await
+}
+
+/// Enqueues a `video.remux` job. Payload: `{path, target_ext,
+/// max_bytes?}` — see [`VideoRemuxHandler`].
+pub async fn enqueue_video_remux(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    target_ext: &str,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    let mut payload = video_path_payload(path, max_bytes, &[]);
+    payload["target_ext"] = json!(target_ext);
+    enqueue_video_job(pool, VIDEO_REMUX_KIND, payload).await
+}
+
+/// Enqueues a `video.extract_frames` job. Payload: `{path,
+/// every_secs?, fps?, all?, keyframes_only?, format?, max_bytes?}` —
+/// see [`VideoExtractFramesHandler`]. `None`/`false` options are
+/// omitted from the payload.
+pub async fn enqueue_video_extract_frames(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    every_secs: Option<f64>,
+    fps: Option<f64>,
+    all: bool,
+    keyframes_only: bool,
+    format: Option<&str>,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    let mut extra = vec![
+        ("all", json!(all)),
+        ("keyframes_only", json!(keyframes_only)),
+    ];
+    if let Some(v) = every_secs {
+        extra.push(("every_secs", json!(v)));
+    }
+    if let Some(v) = fps {
+        extra.push(("fps", json!(v)));
+    }
+    if let Some(v) = format {
+        extra.push(("format", json!(v)));
+    }
+    enqueue_video_job(
+        pool,
+        VIDEO_EXTRACT_FRAMES_KIND,
+        video_path_payload(path, max_bytes, &extra),
+    )
+    .await
+}
+
+/// Enqueues a `video.subtitles_extract` job. Payload: `{path, track?,
+/// format?, max_bytes?}` — see [`VideoSubtitlesExtractHandler`].
+pub async fn enqueue_video_subtitles_extract(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    track: Option<u32>,
+    format: Option<&str>,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    let mut extra = Vec::new();
+    if let Some(t) = track {
+        extra.push(("track", json!(t)));
+    }
+    if let Some(f) = format {
+        extra.push(("format", json!(f)));
+    }
+    enqueue_video_job(
+        pool,
+        VIDEO_SUBTITLES_EXTRACT_KIND,
+        video_path_payload(path, max_bytes, &extra),
+    )
+    .await
+}
+
+/// Enqueues a `video.analyze` job. Payload: `{path, max_bytes?}` —
+/// see [`VideoAnalyzeHandler`].
+pub async fn enqueue_video_analyze(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    enqueue_video_job(
+        pool,
+        VIDEO_ANALYZE_KIND,
+        video_path_payload(path, max_bytes, &[]),
+    )
+    .await
+}
+
+/// Enqueues a `video.package_hls` job. Payload: `{path, max_bytes?}`
+/// — see [`VideoPackageHlsHandler`].
+pub async fn enqueue_video_package_hls(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    enqueue_video_job(
+        pool,
+        VIDEO_PACKAGE_HLS_KIND,
+        video_path_payload(path, max_bytes, &[]),
+    )
+    .await
+}
+
+/// Enqueues a `video.metadata_set` job. Payload: `{path, tags,
+/// max_bytes?}` — see [`VideoMetadataSetHandler`].
+pub async fn enqueue_video_metadata_set(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    tags: &BTreeMap<String, String>,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    let mut payload = video_path_payload(path, max_bytes, &[]);
+    payload["tags"] = json!(tags);
+    enqueue_video_job(pool, VIDEO_METADATA_SET_KIND, payload).await
+}
+
+/// Enqueues a `video.metadata_strip` job. Payload: `{path,
+/// max_bytes?}` — see [`VideoMetadataStripHandler`].
+pub async fn enqueue_video_metadata_strip(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    enqueue_video_job(
+        pool,
+        VIDEO_METADATA_STRIP_KIND,
+        video_path_payload(path, max_bytes, &[]),
+    )
+    .await
+}
+
+/// Enqueues a `video.extract_streams` job. Payload: `{path, subtitles?,
+/// attachments?, cover_art?, chapters?, data?, subtitle_format?,
+/// max_bytes?}` — see [`VideoExtractStreamsHandler`]. `false` flags
+/// are omitted from the payload.
+pub async fn enqueue_video_extract_streams(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    subtitles: bool,
+    attachments: bool,
+    cover_art: bool,
+    chapters: bool,
+    data: bool,
+    subtitle_format: Option<&str>,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    let mut extra = Vec::new();
+    for (key, val) in [
+        ("subtitles", subtitles),
+        ("attachments", attachments),
+        ("cover_art", cover_art),
+        ("chapters", chapters),
+        ("data", data),
+    ] {
+        if val {
+            extra.push((key, json!(true)));
+        }
+    }
+    if let Some(f) = subtitle_format {
+        extra.push(("subtitle_format", json!(f)));
+    }
+    enqueue_video_job(
+        pool,
+        VIDEO_EXTRACT_STREAMS_KIND,
+        video_path_payload(path, max_bytes, &extra),
+    )
+    .await
+}
+
+/// Enqueues a `video.audio_volume` job. Payload: `{path, gain_db,
+/// max_bytes?}` — see [`VideoAudioVolumeHandler`].
+pub async fn enqueue_video_audio_volume(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    gain_db: f64,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    let payload = video_path_payload(path, max_bytes, &[("gain_db", json!(gain_db))]);
+    enqueue_video_job(pool, VIDEO_AUDIO_VOLUME_KIND, payload).await
+}
+
+/// Enqueues a `video.contact_sheet` job. Payload: `{path, cols?,
+/// rows?, thumb_width?, interval_secs?, max_bytes?}` — see
+/// [`VideoContactSheetHandler`].
+pub async fn enqueue_video_contact_sheet(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    cols: Option<u32>,
+    rows: Option<u32>,
+    thumb_width: Option<u32>,
+    interval_secs: Option<f64>,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    let mut extra = Vec::new();
+    if let Some(v) = cols {
+        extra.push(("cols", json!(v)));
+    }
+    if let Some(v) = rows {
+        extra.push(("rows", json!(v)));
+    }
+    if let Some(v) = thumb_width {
+        extra.push(("thumb_width", json!(v)));
+    }
+    if let Some(v) = interval_secs {
+        extra.push(("interval_secs", json!(v)));
+    }
+    enqueue_video_job(
+        pool,
+        VIDEO_CONTACT_SHEET_KIND,
+        video_path_payload(path, max_bytes, &extra),
+    )
+    .await
 }
 
 /// Builds the shared `{path, max_bytes?}` portion of a `video.*`
@@ -2745,17 +4179,13 @@ mod tests {
         assert_eq!(p.path, "media/clip.mp4");
         assert_eq!(p.max_bytes, DEFAULT_VIDEO_MAX_BYTES);
 
-        let p: VideoThumbnailPayload = serde_json::from_value(
-            json!({"path": "clip.mp4", "at_secs": 2.5}),
-        )
-        .unwrap();
+        let p: VideoThumbnailPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "at_secs": 2.5})).unwrap();
         assert_eq!(p.at_secs, Some(2.5));
         assert_eq!(p.max_bytes, DEFAULT_VIDEO_MAX_BYTES);
 
-        let p: VideoTranscodePayload = serde_json::from_value(
-            json!({"path": "clip.mp4", "target_ext": "webm"}),
-        )
-        .unwrap();
+        let p: VideoTranscodePayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "target_ext": "webm"})).unwrap();
         assert_eq!(p.target_ext, "webm");
 
         let p: VideoTrimPayload = serde_json::from_value(
@@ -2767,14 +4197,10 @@ mod tests {
         assert!(p.reencode);
 
         // Required fields are enforced.
-        assert!(serde_json::from_value::<VideoTrimPayload>(
-            json!({"path": "clip.mp4"})
-        )
-        .is_err());
-        assert!(serde_json::from_value::<VideoTranscodePayload>(
-            json!({"path": "clip.mp4"})
-        )
-        .is_err());
+        assert!(serde_json::from_value::<VideoTrimPayload>(json!({"path": "clip.mp4"})).is_err());
+        assert!(
+            serde_json::from_value::<VideoTranscodePayload>(json!({"path": "clip.mp4"})).is_err()
+        );
     }
 
     #[test]
@@ -2896,6 +4322,523 @@ mod tests {
     }
 
     #[test]
+    fn video_extended_payloads_parse_with_defaults() {
+        let p: VideoExtractFramesPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "every_secs": 2.0})).unwrap();
+        assert_eq!(p.path, "clip.mp4");
+        assert_eq!(p.every_secs, Some(2.0));
+        assert_eq!(p.fps, None);
+        assert!(!p.all);
+        assert!(!p.keyframes_only);
+        assert_eq!(p.format, None);
+        assert_eq!(p.max_bytes, DEFAULT_VIDEO_MAX_BYTES);
+
+        let p: VideoSubtitlesExtractPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "track": 1})).unwrap();
+        assert_eq!(p.track, Some(1));
+        assert_eq!(p.format, None);
+
+        let p: VideoMetadataSetPayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "tags": {"title": "Demo", "artist": "Me"}}),
+        )
+        .unwrap();
+        assert_eq!(p.tags["title"], "Demo");
+        assert_eq!(p.tags.len(), 2);
+        assert!(
+            serde_json::from_value::<VideoMetadataSetPayload>(json!({"path": "clip.mp4"})).is_err(),
+            "tags is required"
+        );
+
+        let p: VideoExtractStreamsPayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "subtitles": true, "chapters": true}),
+        )
+        .unwrap();
+        assert!(p.subtitles);
+        assert!(p.chapters);
+        assert!(!p.attachments);
+        assert!(!p.cover_art);
+        assert!(!p.data);
+        assert_eq!(p.subtitle_format, None);
+
+        let p: VideoAudioVolumePayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "gain_db": -3.5})).unwrap();
+        assert_eq!(p.gain_db, -3.5);
+
+        let p: VideoContactSheetPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "cols": 3})).unwrap();
+        assert_eq!(p.cols, Some(3));
+        assert_eq!(p.rows, None);
+        assert_eq!(p.thumb_width, None);
+        assert_eq!(p.interval_secs, None);
+
+        let p: VideoSpeedPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "factor": 1.5})).unwrap();
+        assert_eq!(p.factor, 1.5);
+        assert!(
+            serde_json::from_value::<VideoSpeedPayload>(json!({"path": "clip.mp4"})).is_err(),
+            "factor is required"
+        );
+
+        let p: VideoLoopPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "count": 2})).unwrap();
+        assert_eq!(p.count, 2);
+
+        let p: VideoFreezePayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "at_secs": 1.0, "duration_secs": 0.5}),
+        )
+        .unwrap();
+        assert_eq!(p.at_secs, 1.0);
+        assert_eq!(p.duration_secs, 0.5);
+
+        let p: VideoResizePayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "width": 640, "height": 360, "fit": "cover"}),
+        )
+        .unwrap();
+        assert_eq!(p.width, 640);
+        assert_eq!(p.fit.as_deref(), Some("cover"));
+
+        let p: VideoCropPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "x": 0, "y": 0, "w": 100, "h": 50}))
+                .unwrap();
+        assert_eq!((p.x, p.y, p.w, p.h), (0, 0, 100, 50));
+
+        let p: VideoRotatePayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "degrees": 90.0})).unwrap();
+        assert_eq!(p.degrees, 90.0);
+
+        let p: VideoFlipPayload = serde_json::from_value(json!({"path": "clip.mp4"})).unwrap();
+        assert_eq!(p.horizontal, None);
+        let p: VideoFlipPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "horizontal": false})).unwrap();
+        assert_eq!(p.horizontal, Some(false));
+
+        let p: VideoGifPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "fps": 12.0, "width": 320})).unwrap();
+        assert_eq!(p.fps, Some(12.0));
+        assert_eq!(p.width, Some(320));
+
+        let p: VideoSlideshowPayload = serde_json::from_value(
+            json!({"paths": ["a.png", "b.png"], "fps": 2.0, "target_ext": "mp4"}),
+        )
+        .unwrap();
+        assert_eq!(p.paths, vec!["a.png".to_string(), "b.png".to_string()]);
+        assert_eq!(p.fps, Some(2.0));
+        assert_eq!(p.duration_per_image, None);
+        assert_eq!(p.target_ext, "mp4");
+        assert!(
+            serde_json::from_value::<VideoSlideshowPayload>(
+                json!({"paths": ["a.png"], "fps": 2.0})
+            )
+            .is_err(),
+            "target_ext is required"
+        );
+        assert!(
+            serde_json::from_value::<VideoSlideshowPayload>(json!({"target_ext": "mp4"})).is_err(),
+            "paths is required"
+        );
+
+        let p: VideoNormalizePayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "target_lufs": -14.0})).unwrap();
+        assert_eq!(p.target_lufs, Some(-14.0));
+
+        let p: VideoSceneFramesPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "threshold": 0.5})).unwrap();
+        assert_eq!(p.threshold, Some(0.5));
+
+        let p: VideoMergeAvPayload = serde_json::from_value(
+            json!({"video_path": "clip.mp4", "audio_path": "voice.wav", "target_ext": "mkv"}),
+        )
+        .unwrap();
+        assert_eq!(p.video_path, "clip.mp4");
+        assert_eq!(p.audio_path, "voice.wav");
+        assert_eq!(p.target_ext.as_deref(), Some("mkv"));
+        assert!(
+            serde_json::from_value::<VideoMergeAvPayload>(json!({"video_path": "clip.mp4"}))
+                .is_err(),
+            "audio_path is required"
+        );
+    }
+
+    #[test]
+    fn video_extended_handlers_reject_path_escapes() {
+        let root = PathBuf::from("/storage");
+        let path_payload = |bad: &str| VideoPathPayload {
+            path: bad.into(),
+            max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+        };
+        for bad in ["", "../clip.mp4", "/abs/clip.mp4", "a/../../clip.mp4"] {
+            assert!(
+                remux_video_at(
+                    &root,
+                    &VideoTranscodePayload {
+                        path: bad.into(),
+                        target_ext: "mkv".into(),
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "remux should reject {bad:?}"
+            );
+            assert!(
+                extract_frames_video_at(
+                    &root,
+                    &VideoExtractFramesPayload {
+                        path: bad.into(),
+                        every_secs: None,
+                        fps: None,
+                        all: false,
+                        keyframes_only: false,
+                        format: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "extract_frames should reject {bad:?}"
+            );
+            assert!(
+                subtitles_extract_video_at(
+                    &root,
+                    &VideoSubtitlesExtractPayload {
+                        path: bad.into(),
+                        track: None,
+                        format: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "subtitles_extract should reject {bad:?}"
+            );
+            assert!(analyze_video_at(&root, &path_payload(bad)).is_err());
+            assert!(package_hls_video_at(&root, &path_payload(bad)).is_err());
+            assert!(
+                metadata_set_video_at(
+                    &root,
+                    &VideoMetadataSetPayload {
+                        path: bad.into(),
+                        tags: BTreeMap::new(),
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "metadata_set should reject {bad:?}"
+            );
+            assert!(metadata_strip_video_at(&root, &path_payload(bad)).is_err());
+            assert!(
+                extract_streams_video_at(
+                    &root,
+                    &VideoExtractStreamsPayload {
+                        path: bad.into(),
+                        subtitles: true,
+                        attachments: false,
+                        cover_art: false,
+                        chapters: false,
+                        data: false,
+                        subtitle_format: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "extract_streams should reject {bad:?}"
+            );
+            assert!(
+                audio_volume_video_at(
+                    &root,
+                    &VideoAudioVolumePayload {
+                        path: bad.into(),
+                        gain_db: 0.0,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "audio_volume should reject {bad:?}"
+            );
+            assert!(
+                contact_sheet_video_at(
+                    &root,
+                    &VideoContactSheetPayload {
+                        path: bad.into(),
+                        cols: None,
+                        rows: None,
+                        thumb_width: None,
+                        interval_secs: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "contact_sheet should reject {bad:?}"
+            );
+            assert!(
+                speed_video_at(
+                    &root,
+                    &VideoSpeedPayload {
+                        path: bad.into(),
+                        factor: 1.0,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "speed should reject {bad:?}"
+            );
+            assert!(reverse_video_at(&root, &path_payload(bad)).is_err());
+            assert!(
+                loop_video_at(
+                    &root,
+                    &VideoLoopPayload {
+                        path: bad.into(),
+                        count: 1,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "loop should reject {bad:?}"
+            );
+            assert!(
+                freeze_video_at(
+                    &root,
+                    &VideoFreezePayload {
+                        path: bad.into(),
+                        at_secs: 0.0,
+                        duration_secs: 1.0,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "freeze should reject {bad:?}"
+            );
+            assert!(
+                resize_video_at(
+                    &root,
+                    &VideoResizePayload {
+                        path: bad.into(),
+                        width: 64,
+                        height: 64,
+                        fit: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "resize should reject {bad:?}"
+            );
+            assert!(
+                crop_video_at(
+                    &root,
+                    &VideoCropPayload {
+                        path: bad.into(),
+                        x: 0,
+                        y: 0,
+                        w: 10,
+                        h: 10,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "crop should reject {bad:?}"
+            );
+            assert!(
+                rotate_video_at(
+                    &root,
+                    &VideoRotatePayload {
+                        path: bad.into(),
+                        degrees: 90.0,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "rotate should reject {bad:?}"
+            );
+            assert!(
+                flip_video_at(
+                    &root,
+                    &VideoFlipPayload {
+                        path: bad.into(),
+                        horizontal: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "flip should reject {bad:?}"
+            );
+            assert!(
+                gif_video_at(
+                    &root,
+                    &VideoGifPayload {
+                        path: bad.into(),
+                        fps: None,
+                        width: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "gif should reject {bad:?}"
+            );
+            assert!(
+                slideshow_video_at(
+                    &root,
+                    &VideoSlideshowPayload {
+                        paths: vec![bad.into()],
+                        fps: None,
+                        duration_per_image: None,
+                        target_ext: "mp4".into(),
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "slideshow should reject {bad:?}"
+            );
+            assert!(
+                normalize_video_at(
+                    &root,
+                    &VideoNormalizePayload {
+                        path: bad.into(),
+                        target_lufs: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "normalize should reject {bad:?}"
+            );
+            assert!(loudness_video_at(&root, &path_payload(bad)).is_err());
+            assert!(
+                scene_frames_video_at(
+                    &root,
+                    &VideoSceneFramesPayload {
+                        path: bad.into(),
+                        threshold: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "scene_frames should reject {bad:?}"
+            );
+            assert!(
+                merge_av_video_at(
+                    &root,
+                    &VideoMergeAvPayload {
+                        video_path: bad.into(),
+                        audio_path: "voice.wav".into(),
+                        target_ext: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "merge_av should reject bad video_path {bad:?}"
+            );
+            assert!(
+                merge_av_video_at(
+                    &root,
+                    &VideoMergeAvPayload {
+                        video_path: "clip.mp4".into(),
+                        audio_path: bad.into(),
+                        target_ext: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "merge_av should reject bad audio_path {bad:?}"
+            );
+        }
+        // Slideshow additionally rejects an empty path list before any
+        // file access.
+        assert!(
+            slideshow_video_at(
+                &root,
+                &VideoSlideshowPayload {
+                    paths: vec![],
+                    fps: None,
+                    duration_per_image: None,
+                    target_ext: "mp4".into(),
+                    max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn video_media_output_names_are_sanitized() {
+        assert!(sanitize_media_name("index.m3u8").is_ok());
+        assert!(sanitize_media_name("sub/seg_000.ts").is_ok());
+        for bad in ["", "  ", "/abs/x", "../x", "a/../../x", ".."] {
+            assert!(
+                sanitize_media_name(bad).is_err(),
+                "name {bad:?} should be rejected"
+            );
+        }
+        // An empty MediaOutput is an error rather than a silent no-op.
+        let root = temp_root();
+        let empty = crate::crates::video_engine::MediaOutput { files: vec![] };
+        assert!(write_media_output(&root, &empty).is_err());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn video_resize_fit_and_ext_sanitizers() {
+        use crate::crates::video_engine::FitMode;
+        assert_eq!(parse_fit_mode(None).unwrap(), FitMode::Fit);
+        assert_eq!(parse_fit_mode(Some(" COVER ")).unwrap(), FitMode::Cover);
+        assert_eq!(parse_fit_mode(Some("contain")).unwrap(), FitMode::Contain);
+        assert_eq!(parse_fit_mode(Some("stretch")).unwrap(), FitMode::Stretch);
+        assert!(parse_fit_mode(Some("bogus")).is_err());
+        assert_eq!(sanitize_ext_field("format", " PNG ").unwrap(), "png");
+        assert!(sanitize_ext_field("format", "a/b").is_err());
+    }
+
+    #[test]
+    fn video_remux_writes_output_when_ffmpeg_available() {
+        use std::process::Command;
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            return;
+        }
+        let root = temp_root();
+        let src = root.join("clip.mp4");
+        // `mpeg4` is an ffmpeg-native encoder — unlike `libx264` it is
+        // always available, so this fixture works on minimal builds.
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=1:r=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-c:v",
+                "mpeg4",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ])
+            .arg(&src)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !generated || !src.is_file() {
+            std::fs::remove_dir_all(&root).ok();
+            return; // encoder unavailable — skip
+        }
+
+        remux_video_at(
+            &root,
+            &VideoTranscodePayload {
+                path: "clip.mp4".into(),
+                target_ext: "mkv".into(),
+                max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+            },
+        )
+        .unwrap();
+        let out = root.join("clip.mp4.mkv");
+        assert!(out.is_file(), "remux output should be written");
+        assert!(out.metadata().unwrap().len() > 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn gc_staging_dir_removes_only_expired_entries() {
         let root = temp_root();
         let staging = root.join("staging");
@@ -2953,7 +4896,9 @@ mod tests {
         );
         eng.register(
             DOCUMENT_METADATA_EXTRACT_KIND,
-            Arc::new(DocumentMetadataExtractHandler::with_storage_config(storage())),
+            Arc::new(DocumentMetadataExtractHandler::with_storage_config(
+                storage(),
+            )),
         );
         eng.register(
             DOCUMENT_INDEX_KIND,
@@ -3118,9 +5063,19 @@ mod tests {
         let root = temp_root();
         let doc_id = make_document(&pool).await;
         let eng = full_engine(pool.clone(), &root);
-        ingest_doc(&eng, &pool, &doc_id, &test_pdf_bytes(), "report.pdf", "application/pdf").await;
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "report.pdf",
+            "application/pdf",
+        )
+        .await;
 
-        enqueue_metadata_extract(&pool, &doc_id, None).await.unwrap();
+        enqueue_metadata_extract(&pool, &doc_id, None)
+            .await
+            .unwrap();
         assert!(eng.run_once().await.unwrap());
 
         let meta = metadata_of(&pool, &doc_id).await;
@@ -3143,7 +5098,9 @@ mod tests {
         assert!(types.contains(&DocumentAuditEventType::ProcessingCompleted));
 
         // Job succeeded.
-        let jobs = list_jobs(&pool, Some(JobStatus::Succeeded), 10).await.unwrap();
+        let jobs = list_jobs(&pool, Some(JobStatus::Succeeded), 10)
+            .await
+            .unwrap();
         assert_eq!(jobs.len(), 2); // ingest + extract
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3158,12 +5115,20 @@ mod tests {
         let png = b"\x89PNG\r\n\x1a\nrest-of-file";
         ingest_doc(&eng, &pool, &doc_id, png, "img.png", "image/png").await;
 
-        enqueue_metadata_extract(&pool, &doc_id, None).await.unwrap();
+        enqueue_metadata_extract(&pool, &doc_id, None)
+            .await
+            .unwrap();
         assert!(eng.run_once().await.unwrap());
 
         let meta = metadata_of(&pool, &doc_id).await;
-        assert_eq!(meta.custom_fields["metadata_extract_status"], json!("unsupported"));
-        assert_eq!(meta.custom_fields["processing_status"], json!("unsupported"));
+        assert_eq!(
+            meta.custom_fields["metadata_extract_status"],
+            json!("unsupported")
+        );
+        assert_eq!(
+            meta.custom_fields["processing_status"],
+            json!("unsupported")
+        );
         assert_eq!(meta.custom_fields["detected_format"], json!("png"));
         assert_eq!(meta.custom_fields["mime_type"], json!("image/png"));
         std::fs::remove_dir_all(&root).ok();
@@ -3199,7 +5164,15 @@ mod tests {
         let root = temp_root();
         let doc_id = make_document(&pool).await;
         let eng = full_engine(pool.clone(), &root);
-        ingest_doc(&eng, &pool, &doc_id, &test_pdf_bytes(), "report.pdf", "application/pdf").await;
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "report.pdf",
+            "application/pdf",
+        )
+        .await;
 
         enqueue_index(&pool, &doc_id, None).await.unwrap();
         assert!(eng.run_once().await.unwrap());
@@ -3248,7 +5221,12 @@ mod tests {
         let index = &meta.custom_fields["index"];
         assert_eq!(index["char_count"], json!(43));
         assert_eq!(index["word_count"], json!(9));
-        assert!(index["excerpt"].as_str().unwrap().contains("quick brown fox"));
+        assert!(
+            index["excerpt"]
+                .as_str()
+                .unwrap()
+                .contains("quick brown fox")
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -3267,10 +5245,15 @@ mod tests {
 
         let meta = metadata_of(&pool, &doc_id).await;
         assert_eq!(meta.custom_fields["index_status"], json!("unsupported"));
-        assert_eq!(meta.custom_fields["processing_status"], json!("unsupported"));
+        assert_eq!(
+            meta.custom_fields["processing_status"],
+            json!("unsupported")
+        );
         assert!(meta.custom_fields.get("index").is_none());
         // Job itself succeeded.
-        let jobs = list_jobs(&pool, Some(JobStatus::Succeeded), 10).await.unwrap();
+        let jobs = list_jobs(&pool, Some(JobStatus::Succeeded), 10)
+            .await
+            .unwrap();
         assert_eq!(jobs.len(), 2);
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3302,7 +5285,10 @@ mod tests {
 
         // Thumbnail bytes really landed in storage as a PNG.
         let arts = list_artifacts(&pool, &doc_id).await.unwrap();
-        let uri = meta.custom_fields["thumbnail_uri"].as_str().unwrap().to_string();
+        let uri = meta.custom_fields["thumbnail_uri"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(uri.starts_with("local://documents/"));
         assert!(uri.contains("/thumbnails/"));
         assert!(uri.ends_with(".png"));
@@ -3331,14 +5317,25 @@ mod tests {
         let root = temp_root();
         let doc_id = make_document(&pool).await;
         let eng = full_engine(pool.clone(), &root);
-        ingest_doc(&eng, &pool, &doc_id, &test_pdf_bytes(), "plain.pdf", "application/pdf").await;
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "plain.pdf",
+            "application/pdf",
+        )
+        .await;
 
         enqueue_thumbnail(&pool, &doc_id, None).await.unwrap();
         assert!(eng.run_once().await.unwrap());
 
         let meta = metadata_of(&pool, &doc_id).await;
         assert_eq!(meta.custom_fields["thumbnail_status"], json!("unavailable"));
-        assert_eq!(meta.custom_fields["processing_status"], json!("unavailable"));
+        assert_eq!(
+            meta.custom_fields["processing_status"],
+            json!("unavailable")
+        );
         assert!(meta.custom_fields.get("thumbnail_uri").is_none());
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3365,10 +5362,20 @@ mod tests {
         let root = temp_root();
         let doc_id = make_document(&pool).await;
         let eng = full_engine(pool.clone(), &root);
-        ingest_doc(&eng, &pool, &doc_id, &test_pdf_bytes(), "r.pdf", "application/pdf").await;
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "r.pdf",
+            "application/pdf",
+        )
+        .await;
 
         // Enqueue helper stamps "queued".
-        enqueue_metadata_extract(&pool, &doc_id, None).await.unwrap();
+        enqueue_metadata_extract(&pool, &doc_id, None)
+            .await
+            .unwrap();
         let meta = metadata_of(&pool, &doc_id).await;
         assert_eq!(meta.custom_fields["processing_status"], json!("queued"));
         assert_eq!(
@@ -3379,13 +5386,14 @@ mod tests {
         assert!(eng.run_once().await.unwrap());
         let meta = metadata_of(&pool, &doc_id).await;
         assert_eq!(meta.custom_fields["processing_status"], json!("succeeded"));
-        assert_eq!(meta.custom_fields["metadata_extract_status"], json!("extracted"));
+        assert_eq!(
+            meta.custom_fields["metadata_extract_status"],
+            json!("extracted")
+        );
 
         // Audit ordering: started before completed.
         let history = get_document_history(&pool, &doc_id).await.unwrap();
-        let pos = |t: DocumentAuditEventType| {
-            history.iter().position(|e| e.event_type == t)
-        };
+        let pos = |t: DocumentAuditEventType| history.iter().position(|e| e.event_type == t);
         let started = pos(DocumentAuditEventType::ProcessingStarted).unwrap();
         let completed = pos(DocumentAuditEventType::ProcessingCompleted).unwrap();
         assert!(started < completed);
@@ -3398,15 +5406,29 @@ mod tests {
         let root = temp_root();
         let doc_id = make_document(&pool).await;
         let eng = full_engine(pool.clone(), &root);
-        ingest_doc(&eng, &pool, &doc_id, &test_pdf_with_image_bytes(), "i.pdf", "application/pdf").await;
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_with_image_bytes(),
+            "i.pdf",
+            "application/pdf",
+        )
+        .await;
 
         // Run each processing job twice — second run must succeed and
         // leave a single consistent state (no duplicate artifacts,
         // deterministic thumbnail path).
         for kind_payload in [
-            (DOCUMENT_METADATA_EXTRACT_KIND, json!({"document_id": doc_id.as_str()})),
+            (
+                DOCUMENT_METADATA_EXTRACT_KIND,
+                json!({"document_id": doc_id.as_str()}),
+            ),
             (DOCUMENT_INDEX_KIND, json!({"document_id": doc_id.as_str()})),
-            (THUMBNAIL_GENERATE_KIND, json!({"document_id": doc_id.as_str()})),
+            (
+                THUMBNAIL_GENERATE_KIND,
+                json!({"document_id": doc_id.as_str()}),
+            ),
         ] {
             for _ in 0..2 {
                 eng.enqueue(&NewJob {
@@ -3424,11 +5446,17 @@ mod tests {
 
         assert_eq!(list_artifacts(&pool, &doc_id).await.unwrap().len(), 1);
         let meta = metadata_of(&pool, &doc_id).await;
-        assert_eq!(meta.custom_fields["metadata_extract_status"], json!("extracted"));
+        assert_eq!(
+            meta.custom_fields["metadata_extract_status"],
+            json!("extracted")
+        );
         assert_eq!(meta.custom_fields["index_status"], json!("indexed"));
         assert_eq!(meta.custom_fields["thumbnail_status"], json!("generated"));
         // Exactly one thumbnail object on disk.
-        let thumbs = root.join("documents").join(doc_id.as_str()).join("thumbnails");
+        let thumbs = root
+            .join("documents")
+            .join(doc_id.as_str())
+            .join("thumbnails");
         let entries: Vec<_> = std::fs::read_dir(&thumbs).unwrap().collect();
         assert_eq!(entries.len(), 1);
         std::fs::remove_dir_all(&root).ok();
@@ -3440,10 +5468,20 @@ mod tests {
         let root = temp_root();
         let doc_id = make_document(&pool).await;
         let eng = full_engine(pool.clone(), &root);
-        ingest_doc(&eng, &pool, &doc_id, &test_pdf_bytes(), "c.pdf", "application/pdf").await;
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "c.pdf",
+            "application/pdf",
+        )
+        .await;
 
         enqueue_index(&pool, &doc_id, None).await.unwrap();
-        let job = list_jobs(&pool, None, 10).await.unwrap()
+        let job = list_jobs(&pool, None, 10)
+            .await
+            .unwrap()
             .into_iter()
             .find(|j| j.kind == DOCUMENT_INDEX_KIND)
             .unwrap();
@@ -3453,10 +5491,12 @@ mod tests {
             "UPDATE jobs_tbl SET status = 'running', worker_id = 'dead-worker',
              started_at = ?, attempts = 1 WHERE id = ?",
         )
-        .bind(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64)
+        .bind(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        )
         .bind(job.id)
         .execute(&pool)
         .await

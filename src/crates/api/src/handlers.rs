@@ -11,9 +11,7 @@ use axum::http::StatusCode;
 
 use crate::crates::application::job_handlers::DOCUMENT_INGEST_KIND;
 use crate::crates::job_engine::{self, NewJob};
-use crate::crates::observability::{
-    ComponentHealth, HealthStatus, OverallHealth, aggregate,
-};
+use crate::crates::observability::{ComponentHealth, HealthStatus, OverallHealth, aggregate};
 
 use super::AppState;
 use super::auth::AuthenticatedSession;

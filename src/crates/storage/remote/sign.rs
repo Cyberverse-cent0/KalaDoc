@@ -48,10 +48,7 @@ impl SigV4Signer {
                 && !k.eq_ignore_ascii_case("authorization")
         });
         headers.push(("x-amz-date".to_string(), amz_date.clone()));
-        headers.push((
-            "x-amz-content-sha256".to_string(),
-            payload_hash.clone(),
-        ));
+        headers.push(("x-amz-content-sha256".to_string(), payload_hash.clone()));
 
         let (host, canonical_uri, canonical_query) = split_url(url);
         let signed_headers = "host;x-amz-content-sha256;x-amz-date";
@@ -242,8 +239,7 @@ mod tests {
 
     #[test]
     fn split_url_extracts_host_and_sorts_query() {
-        let (host, uri, query) =
-            split_url("https://s3.example.com:9000/bucket/prefix/k?b=2&a=1");
+        let (host, uri, query) = split_url("https://s3.example.com:9000/bucket/prefix/k?b=2&a=1");
         assert_eq!(host, "s3.example.com:9000");
         assert_eq!(uri, "/bucket/prefix/k");
         assert_eq!(query, "a=1&b=2");
@@ -262,8 +258,10 @@ mod tests {
         assert!(auth.starts_with("AWS4-HMAC-SHA256 Credential=AKID/"));
         assert!(auth.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"));
         assert!(headers.iter().any(|(k, _)| k == "x-amz-date"));
-        assert!(headers
-            .iter()
-            .any(|(k, v)| k == "x-amz-content-sha256" && v.len() == 64));
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "x-amz-content-sha256" && v.len() == 64)
+        );
     }
 }
