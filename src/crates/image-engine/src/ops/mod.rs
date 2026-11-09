@@ -9,13 +9,31 @@
 //!
 //! All ops return [`ImageError`] on malformed input and never panic.
 
+mod adjust;
+mod compress;
 mod convert;
+mod crop;
+mod flip;
 mod format;
 mod info;
 mod load;
+mod metadata;
 mod resize;
+mod rotate;
+mod thumbnail;
+mod validate;
+mod watermark;
 
+pub use adjust::{AdjustOptions, adjust};
+pub use compress::{CompressOptions, compress};
 pub use convert::convert;
+pub use crop::crop;
+pub use flip::{FlipDirection, flip, flip_mirror};
 pub use format::ImageFormat;
 pub use info::{ImageInfo, inspect};
+pub use metadata::{ImageMetadata, metadata};
 pub use resize::{ResizeOptions, resize, resize_to};
+pub use rotate::rotate;
+pub use thumbnail::thumbnail;
+pub use validate::{ValidationReport, validate};
+pub use watermark::{WatermarkOptions, WatermarkPosition, watermark};

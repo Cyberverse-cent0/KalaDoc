@@ -14,7 +14,10 @@ use crate::crates::core::engine::{
 };
 
 use crate::crates::image_engine::error::ImageResult;
-use crate::crates::image_engine::ops::{self, ImageFormat, ImageInfo, ResizeOptions};
+use crate::crates::image_engine::ops::{
+    self, AdjustOptions, CompressOptions, FlipDirection, ImageFormat, ImageInfo, ImageMetadata,
+    ResizeOptions, ValidationReport, WatermarkOptions,
+};
 
 /// The raster image processing engine.
 ///
@@ -86,6 +89,93 @@ impl ImageEngine {
     pub fn convert(&self, input: &[u8], target: &str) -> ImageResult<Vec<u8>> {
         ops::convert(input, target, &self.limits)
     }
+
+    /// Rotate `input` by `degrees` — must be 90, 180, or 270.
+    ///
+    /// See [`ops::rotate`].
+    pub fn rotate(&self, input: &[u8], degrees: u16) -> ImageResult<Vec<u8>> {
+        ops::rotate(input, degrees, &self.limits)
+    }
+
+    /// Crop `input` to the rectangle `(x, y, width, height)`.
+    ///
+    /// See [`ops::crop`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn crop(
+        &self,
+        input: &[u8],
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> ImageResult<Vec<u8>> {
+        ops::crop(input, x, y, width, height, &self.limits)
+    }
+
+    /// Flip `input` in `direction` (horizontal, vertical, or both).
+    ///
+    /// See [`ops::flip`].
+    pub fn flip(&self, input: &[u8], direction: FlipDirection) -> ImageResult<Vec<u8>> {
+        ops::flip(input, direction, &self.limits)
+    }
+
+    /// Convenience wrapper for [`ImageEngine::flip`] with an explicit
+    /// horizontal flag.
+    pub fn flip_mirror(&self, input: &[u8], horizontal: bool) -> ImageResult<Vec<u8>> {
+        ops::flip_mirror(input, horizontal, &self.limits)
+    }
+
+    /// Apply brightness/contrast/hue adjustments per `options`.
+    ///
+    /// See [`ops::adjust`].
+    pub fn adjust(&self, input: &[u8], options: &AdjustOptions) -> ImageResult<Vec<u8>> {
+        ops::adjust(input, options, &self.limits)
+    }
+
+    /// Generate a thumbnail fitting within `(max_width, max_height)`.
+    ///
+    /// Never upscales. See [`ops::thumbnail`].
+    pub fn thumbnail(
+        &self,
+        input: &[u8],
+        max_width: u32,
+        max_height: u32,
+    ) -> ImageResult<Vec<u8>> {
+        ops::thumbnail(input, max_width, max_height, &self.limits)
+    }
+
+    /// Re-encode `input` with optional format override and quality.
+    ///
+    /// See [`ops::compress`].
+    pub fn compress(&self, input: &[u8], options: CompressOptions) -> ImageResult<Vec<u8>> {
+        ops::compress(input, options, &self.limits)
+    }
+
+    /// Overlay `mark` onto `input` per `options`.
+    ///
+    /// See [`ops::watermark`].
+    pub fn watermark(
+        &self,
+        input: &[u8],
+        mark: &[u8],
+        options: &WatermarkOptions,
+    ) -> ImageResult<Vec<u8>> {
+        ops::watermark(input, mark, options, &self.limits)
+    }
+
+    /// Validate `input`'s header and limits without decoding pixels.
+    ///
+    /// See [`ops::validate`].
+    pub fn validate(&self, input: &[u8]) -> ImageResult<ValidationReport> {
+        ops::validate(input, &self.limits)
+    }
+
+    /// Extract descriptive metadata for `input`.
+    ///
+    /// See [`ops::metadata`].
+    pub fn metadata(&self, input: &[u8]) -> ImageResult<ImageMetadata> {
+        ops::metadata(input, &self.limits)
+    }
 }
 
 impl Default for ImageEngine {
@@ -114,6 +204,15 @@ impl ProcessingEngine for ImageEngine {
                 EngineOperation::Inspect,
                 EngineOperation::Resize,
                 EngineOperation::Convert,
+                EngineOperation::Rotate,
+                EngineOperation::Crop,
+                EngineOperation::Adjust,
+                EngineOperation::Flip,
+                EngineOperation::Thumbnail,
+                EngineOperation::Compress,
+                EngineOperation::Watermark,
+                EngineOperation::Validate,
+                EngineOperation::ExtractMetadata,
             ],
             input_formats: formats.clone(),
             output_formats: formats,
