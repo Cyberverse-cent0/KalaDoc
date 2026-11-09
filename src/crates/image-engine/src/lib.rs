@@ -25,6 +25,10 @@
 //! | `crop`             | [`ImageEngine::crop`] | Pixel-exact rectangle crop |
 //! | `adjust`           | [`ImageEngine::adjust`] | Brightness, contrast, hue rotation |
 //! | `color`            | [`ImageEngine::color`] | Saturation, per-channel RGB, grayscale, invert, high-contrast |
+//! | `levels`           | [`ImageEngine::levels`] | Input black/white points + gamma curve |
+//! | `photocopy`        | [`ImageEngine::photocopy`] | Scanner look: grayscale, threshold, grain, dithering |
+//! | `replace_color`    | [`ImageEngine::replace_color`] | Tolerance-based color keying to a target color |
+//! | `cmyk`             | [`ImageEngine::cmyk`] | RGB→CMYK as uncompressed TIFF (output is always TIFF) |
 //! | `flip`             | [`ImageEngine::flip`] / [`ImageEngine::flip_mirror`] | Lossless mirror, no resampling |
 //! | `thumbnail`        | [`ImageEngine::thumbnail`] | Aspect-fit thumbnail; never upscales |
 //! | `compress`         | [`ImageEngine::compress`] | Quality/effort re-encode per codec |
@@ -61,8 +65,9 @@ mod tests;
 pub use engine::ImageEngine;
 pub use error::{ImageError, ImageResult};
 pub use ops::{
-    AdjustOptions, ChannelAdjust, ColorOptions, CompressOptions, FlipDirection,
-    HighContrastOptions, ImageFormat, ImageInfo, ImageMetadata, ResizeOptions, ValidationReport,
-    WatermarkOptions, WatermarkPosition, convert, flip, flip_mirror, inspect, metadata, resize,
+    AdjustOptions, ChannelAdjust, ColorOptions, ColorReplaceOptions, CompressOptions,
+    FlipDirection, HighContrastOptions, ImageFormat, ImageInfo, ImageMetadata, LevelsOptions,
+    PhotocopyOptions, ResizeOptions, ValidationReport, WatermarkOptions, WatermarkPosition, cmyk,
+    convert, flip, flip_mirror, inspect, levels, metadata, photocopy, replace_color, resize,
     resize_to, thumbnail, validate,
 };

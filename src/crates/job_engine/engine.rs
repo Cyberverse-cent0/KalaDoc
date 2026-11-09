@@ -18,7 +18,7 @@ use sqlx::SqlitePool;
 
 use super::JobError;
 use super::handler::{JobContext, SharedHandler};
-use super::job::{Job, NewJob};
+use super::job::{BatchProgress, Job, NewJob};
 use super::store;
 
 /// Engine tunables. Built from [`crate::config::AppConfig`] via
@@ -87,6 +87,31 @@ impl JobEngine {
         store::enqueue(&self.pool, new, self.config.default_max_attempts).await
     }
 
+    /// Enqueues `jobs` as one batch (see [`store::enqueue_batch`]).
+    /// Every item is an ordinary job — same kinds, payloads,
+    /// priorities, retries — sharing a `batch_id` for aggregate
+    /// progress and batch cancellation.
+    pub async fn enqueue_batch(&self, jobs: &[NewJob]) -> Result<Vec<Job>, JobError> {
+        store::enqueue_batch(&self.pool, jobs, self.config.default_max_attempts).await
+    }
+
+    /// Aggregate progress for a batch created by [`JobEngine::enqueue_batch`].
+    /// `None` when no jobs carry `batch_id`.
+    pub async fn batch_progress(&self, batch_id: i64) -> Result<Option<BatchProgress>, JobError> {
+        store::batch_progress(&self.pool, batch_id).await
+    }
+
+    /// Every job belonging to `batch_id`, in enqueue order.
+    pub async fn batch_jobs(&self, batch_id: i64) -> Result<Vec<Job>, JobError> {
+        store::batch_jobs(&self.pool, batch_id).await
+    }
+
+    /// Cancels all non-terminal jobs in `batch_id` (whole-batch
+    /// cancel). Returns how many jobs were cancelled.
+    pub async fn cancel_batch(&self, batch_id: i64) -> Result<u64, JobError> {
+        store::cancel_batch(&self.pool, batch_id).await
+    }
+
     /// Claims and executes at most one job. Returns `true` when a job
     /// was processed. This is the unit [`JobEngine::run`] repeats.
     pub async fn run_once(&self) -> Result<bool, JobError> {
@@ -140,7 +165,8 @@ impl JobEngine {
         let done = sqlx::query(
             "UPDATE jobs_tbl
              SET status = 'pending', worker_id = NULL, started_at = NULL,
-                 finished_at = NULL, run_at = ?, last_error = 'reaped: stale running job'
+                 finished_at = NULL, run_at = ?, progress_json = NULL,
+                 last_error = 'reaped: stale running job'
              WHERE status = 'running'
                AND (started_at IS NULL OR started_at < ?)",
         )
@@ -753,5 +779,232 @@ mod tests {
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
         let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
         assert_eq!(jobs[0].status, JobStatus::Succeeded);
+    }
+
+    fn batch_newjob(kind: &str, n: i64) -> NewJob {
+        NewJob {
+            kind: kind.into(),
+            payload: json!({"n": n}),
+            priority: 0,
+            run_at: None,
+            max_attempts: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn enqueue_batch_groups_items_under_first_job_id() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone());
+
+        let jobs = eng
+            .enqueue_batch(&[
+                batch_newjob("test.batch", 1),
+                batch_newjob("test.batch", 2),
+                batch_newjob("test.batch", 3),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(jobs.len(), 3);
+        let batch_id = jobs[0].id;
+        assert!(jobs.iter().all(|j| j.batch_id == Some(batch_id)));
+
+        // Persisted rows agree with the returned structs.
+        let listed = store::batch_jobs(&pool, batch_id).await.unwrap();
+        assert_eq!(listed.len(), 3);
+        assert!(listed.iter().all(|j| j.batch_id == Some(batch_id)));
+        assert!(listed.iter().all(|j| j.status == JobStatus::Pending));
+
+        let progress = eng.batch_progress(batch_id).await.unwrap().unwrap();
+        assert_eq!(progress.items_total, 3);
+        assert_eq!(progress.items_pending, 3);
+        assert_eq!(progress.items_done, 0);
+        assert_eq!(progress.pct(), 0);
+        assert!(!progress.is_complete());
+
+        // Unknown batch id → None.
+        assert!(eng.batch_progress(batch_id + 1000).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn batch_progress_tracks_per_item_outcomes() {
+        let pool = test_pool().await;
+        let mut eng = engine(pool.clone());
+        eng.register(
+            "test.batch",
+            Arc::new(CountingHandler {
+                calls: AtomicUsize::new(0),
+                fail_times: 0,
+            }),
+        );
+
+        let jobs = eng
+            .enqueue_batch(&[
+                batch_newjob("test.batch", 1),
+                batch_newjob("test.batch", 2),
+                batch_newjob("test.batch", 3),
+            ])
+            .await
+            .unwrap();
+        let batch_id = jobs[0].id;
+
+        // Two items succeed, one is skipped.
+        assert!(eng.run_once().await.unwrap());
+        assert!(eng.run_once().await.unwrap());
+        assert!(
+            store::skip_job(&pool, jobs[2].id, Some("already up to date"))
+                .await
+                .unwrap()
+        );
+
+        let progress = eng.batch_progress(batch_id).await.unwrap().unwrap();
+        assert_eq!(progress.items_total, 3);
+        assert_eq!(progress.items_done, 3);
+        assert_eq!(progress.items_succeeded, 2);
+        assert_eq!(progress.items_skipped, 1);
+        assert_eq!(progress.items_pending, 0);
+        assert_eq!(progress.pct(), 100);
+        assert!(progress.is_complete());
+
+        // The skipped job kept its reason in last_error.
+        let listed = store::batch_jobs(&pool, batch_id).await.unwrap();
+        let skipped = listed.iter().find(|j| j.id == jobs[2].id).unwrap();
+        assert_eq!(skipped.status, JobStatus::Skipped);
+        assert_eq!(skipped.last_error.as_deref(), Some("already up to date"));
+    }
+
+    #[tokio::test]
+    async fn cancel_batch_cancels_only_non_terminal_items() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone());
+
+        let jobs = eng
+            .enqueue_batch(&[
+                batch_newjob("x", 1),
+                batch_newjob("x", 2),
+                batch_newjob("x", 3),
+            ])
+            .await
+            .unwrap();
+        let batch_id = jobs[0].id;
+
+        // One item already finished — it must keep its outcome.
+        sqlx::query("UPDATE jobs_tbl SET status = 'succeeded', finished_at = ? WHERE id = ?")
+            .bind(now_unix())
+            .bind(jobs[0].id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(eng.cancel_batch(batch_id).await.unwrap(), 2);
+
+        let progress = eng.batch_progress(batch_id).await.unwrap().unwrap();
+        assert_eq!(progress.items_total, 3);
+        assert_eq!(progress.items_done, 3);
+        assert_eq!(progress.items_succeeded, 1);
+        assert_eq!(progress.items_cancelled, 2);
+        assert!(progress.is_complete());
+    }
+
+    /// Handler that reports progress mid-run, then succeeds.
+    struct ProgressHandler;
+
+    impl JobHandler for ProgressHandler {
+        fn handle<'a>(
+            &'a self,
+            ctx: &'a JobContext,
+            job: &'a Job,
+        ) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'a>> {
+            Box::pin(async move {
+                assert!(
+                    ctx.report_progress(job.id, &json!({"pct": 50, "detail": "half"}))
+                        .await
+                        .unwrap()
+                );
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn report_progress_lands_on_running_job_and_survives_completion() {
+        let pool = test_pool().await;
+        let mut eng = engine(pool.clone());
+        eng.register("test.progress", Arc::new(ProgressHandler));
+
+        let job = eng
+            .enqueue(&NewJob {
+                kind: "test.progress".into(),
+                payload: json!({}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(eng.run_once().await.unwrap());
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        let job = jobs.iter().find(|j| j.id == job.id).unwrap();
+        assert_eq!(job.status, JobStatus::Succeeded);
+        assert_eq!(job.progress, Some(json!({"pct": 50, "detail": "half"})));
+    }
+
+    #[tokio::test]
+    async fn report_progress_rejected_for_non_running_job() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone());
+        let job = eng
+            .enqueue(&NewJob {
+                kind: "x".into(),
+                payload: json!({}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+
+        // Still pending — a report must not land.
+        assert!(
+            !store::report_progress(&pool, job.id, &json!({"pct": 1}))
+                .await
+                .unwrap()
+        );
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        assert_eq!(jobs[0].progress, None);
+    }
+
+    #[tokio::test]
+    async fn progress_cleared_when_job_is_retried() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone());
+        let job = eng
+            .enqueue(&NewJob {
+                kind: "x".into(),
+                payload: json!({}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+
+        // Simulate a failed attempt that left progress behind, then
+        // a retry: progress must reset so the next attempt starts clean.
+        sqlx::query(
+            "UPDATE jobs_tbl SET status = 'running', progress_json = '{\"pct\": 90}'
+             WHERE id = ?",
+        )
+        .bind(job.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        store::complete(&pool, job.id, Err("boom".into()), 0, now_unix())
+            .await
+            .unwrap();
+
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        assert_eq!(jobs[0].status, JobStatus::Pending);
+        assert_eq!(jobs[0].progress, None);
     }
 }

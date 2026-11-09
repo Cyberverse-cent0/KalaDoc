@@ -481,23 +481,6 @@ pub(crate) fn ensure_ext_gstate(
     Ok(String::from_utf8_lossy(&name).into_owned())
 }
 
-/// Register an existing XObject (e.g. an image stream) for `page_id`
-/// and return its resource name.
-pub(crate) fn ensure_xobject_resource(
-    doc: &mut Document,
-    page_id: ObjectId,
-    xobject_id: ObjectId,
-) -> PdfResult<String> {
-    let name = ensure_page_resource(
-        doc,
-        page_id,
-        b"XObject",
-        "Im",
-        Object::Reference(xobject_id),
-    )?;
-    Ok(String::from_utf8_lossy(&name).into_owned())
-}
-
 /// Create a new stream object holding `content`; returns its id.
 pub(crate) fn add_content_stream(doc: &mut Document, content: Vec<u8>) -> PdfResult<ObjectId> {
     doc.try_add_object(Object::Stream(Stream::new(Dictionary::new(), content)))
@@ -537,18 +520,6 @@ pub(crate) fn append_page_overlay(
 ) -> PdfResult<()> {
     let mut list = contents_list(doc, page_id);
     list.push(Object::Reference(stream_id));
-    set_contents(doc, page_id, list)
-}
-
-/// Prepend `stream_id` before the page's existing content streams —
-/// watermarks paint underneath.
-pub(crate) fn wrap_page_content(
-    doc: &mut Document,
-    page_id: ObjectId,
-    stream_id: ObjectId,
-) -> PdfResult<()> {
-    let mut list = contents_list(doc, page_id);
-    list.insert(0, Object::Reference(stream_id));
     set_contents(doc, page_id, list)
 }
 

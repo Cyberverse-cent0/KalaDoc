@@ -565,6 +565,28 @@ async fn jobs_list_process_cancel_retry() {
     let index_job_id = body_json(res).await["job"]["id"].as_i64().unwrap();
     assert_ne!(index_job_id, job_id);
 
+    // A pdf-engine op enqueues a document.pdf_op job carrying the
+    // op name and params through to the worker.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{doc_id}/process"),
+            &token,
+            serde_json::json!({
+                "op": "page_count",
+                "params": { "pages": "1" }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+    let pdf_job = body_json(res).await["job"].clone();
+    assert_eq!(pdf_job["kind"], "document.pdf_op");
+    assert_eq!(pdf_job["payload"]["document_id"], doc_id);
+    assert_eq!(pdf_job["payload"]["op"], "page_count");
+    assert_eq!(pdf_job["payload"]["params"]["pages"], "1");
+
     // Unknown op → 400; unknown document → 404.
     let res = app
         .clone()

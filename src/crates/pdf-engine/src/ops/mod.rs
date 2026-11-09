@@ -16,43 +16,70 @@
 //! All ops return [`PdfError`] on malformed input and never panic;
 //! the `lopdf` load is wrapped in `catch_unwind` for hostile PDFs.
 
+mod annotations;
+mod article_threads;
+mod auto_orient;
 mod booklet;
+mod cert_info;
+mod clean_scan;
 mod compare;
 mod compress;
 mod convert;
 mod crop;
+mod crop_view;
 mod decrypt;
+mod doc_time;
+mod draw_shapes;
 mod draw_text;
 mod duplicate_pages;
+mod edit_field_props;
 mod edit_text;
 mod encrypt;
 mod extract;
 mod extract_images;
 mod extract_metadata;
+mod fill_form;
 mod flatten;
+mod form_fields;
+mod freehand;
 mod garbage_collect;
 mod grayscale;
 mod headers_footers;
 mod info;
 mod insert_blank;
+mod inspect_fonts;
+mod inspect_javascript;
 mod interleave;
 mod invert_colors;
 mod linearize;
 mod load;
 mod merge;
+mod merge_modes;
+mod named_destinations;
 mod nup;
 mod ocr;
+mod optional_content;
 mod outline;
 mod overlay;
+mod package_files;
 mod page_count;
 mod page_labels;
+mod page_size;
+mod page_transitions;
 mod pages;
 mod pdfa;
+mod pdfua;
+mod pdfx;
+mod portfolio;
 mod poster;
+mod print_marks;
 pub(crate) mod raster;
 mod redact;
+mod redact_pages;
+mod redact_regions;
 mod remove_blank_pages;
 mod remove_images;
+mod remove_objects;
 mod remove_pages;
 mod render;
 mod reorder;
@@ -60,46 +87,97 @@ mod repair;
 mod replace_image;
 mod resize;
 mod rotate;
+mod rotate_view;
 mod sanitize;
+mod scale_content;
+mod searchable_pdf;
 mod set_metadata;
+mod set_xmp_metadata;
 mod sign;
+mod sign_timestamp;
 mod single_page;
 mod split;
+mod split_bookmarks;
+mod split_modes;
 mod stamp;
+mod structure_tree;
 mod text;
 mod text_markup;
+mod timestamp;
+mod unlock_fields;
 mod validate;
 mod verify_signature;
 mod watermark;
 
+pub use annotations::{
+    AnnotFilter, AnnotationInfo, CommentIcon, CommentSpec, FreeTextSpec, add_comment, add_freetext,
+    list_annotations, remove_annotations,
+};
+pub use article_threads::{ArticleInfo, list_articles, remove_articles};
+pub use auto_orient::{OrientMode, PageOrientation, detect_orientation, normalize_orientation};
 pub use booklet::{BookletMode, BookletSize, BookletSpec, booklet};
+pub use cert_info::{
+    CertSummary, SignerCert, extract_signer_certificates, parse_cert_with_openssl,
+};
 pub use compare::{CompareMode, CompareReport, DiffEntry, DiffKind, compare};
 pub use compress::compress;
 pub use convert::{ConvertTarget, convert};
 pub use crop::crop;
+pub use crop_view::{clear_crop, set_view_crop};
 pub use decrypt::decrypt;
+pub use doc_time::{DocDates, get_document_dates, set_document_dates};
+pub use draw_shapes::{DrawSpec, Shape, ShapeStyle, draw_shapes};
 pub use draw_text::{DrawTextSpec, draw_text};
+pub use duplicate_pages::{DupPos, duplicate_pages};
+pub use edit_field_props::{FieldPatch, FieldPatchReport, edit_field_props};
+pub use edit_text::{EditOutcome, EditReport, TextEdit, edit_text};
 pub use encrypt::{PdfPermissions, encrypt};
 pub use extract::extract_pages;
 pub use extract_images::{EmbeddedImage, extract_images};
 pub use extract_metadata::{PdfDate, PdfMetadata, XmpMetadata, extract_metadata};
+pub use fill_form::{clear_form, fill_form};
 pub use flatten::flatten;
+pub use form_fields::{
+    FieldInfo, TextFieldSpec, create_text_field, delete_form_field, list_form_fields,
+};
+pub use freehand::{InkInfo, InkSpec, Stroke, add_ink, list_ink, remove_ink};
 pub use garbage_collect::{GcReport, garbage_collect};
+pub use grayscale::{ColorReport, grayscale};
 pub use headers_footers::{HeaderFooterSpec, PageNumberStyle, add_page_numbers, headers_footers};
 pub use info::{PdfInfo, inspect};
+pub use insert_blank::{InsertPos, PageSize, insert_blank};
+pub use inspect_javascript::{JsInfo, inspect_javascript};
+pub use interleave::interleave;
+pub use invert_colors::invert_colors;
 pub use linearize::{LinearizeReport, linearize};
 pub use merge::merge;
+pub use merge_modes::{MergeMode, merge_mode};
 pub use nup::nup;
 pub use ocr::{ocr, ocr_languages};
+pub use outline::{OutlineEntry, OutlineItemSpec, list_outline, remove_outline, set_outline};
 pub use overlay::overlay;
+pub use package_files::{PackageLayout, package_documents};
 pub use page_count::page_count;
 pub use page_labels::{clear_page_labels, get_page_labels, set_page_labels};
+pub use page_size::{PageSizeInfo, PageSizeSpec, SizeUnit, get_page_sizes, set_page_size};
+pub use page_transitions::{
+    PageTransition, TransitionDir, TransitionMotion, TransitionSpec, TransitionType,
+    clear_transitions, list_transitions, set_transition,
+};
 pub use pages::parse_page_range;
 pub use pdfa::{PdfaLevel, PdfaReport, to_pdfa};
+pub use pdfua::{PdfuaLevel, PdfuaReport, to_pdfua};
+pub use pdfx::{PdfxLevel, PdfxReport, to_pdfx};
+pub use portfolio::{PortfolioEntry, create_portfolio, list_portfolio};
 pub use poster::poster;
+pub use print_marks::{DEFAULT_PRINT_MARK_OFFSET, PrintMarksSpec, add_print_marks};
 pub use raster::{PageImage, PageImageReport};
 pub use redact::redact;
+pub use remove_blank_pages::{BlankReport, remove_blank_pages};
 pub use remove_images::{RemoveReport, remove_images};
+pub use remove_objects::{
+    RemoveObjectsReport, remove_embedded_files, remove_javascript_names, remove_named_objects,
+};
 pub use remove_pages::remove_pages;
 pub use render::{RenderFormat, render};
 pub use reorder::reorder;
@@ -107,18 +185,43 @@ pub use repair::{RepairReport, repair};
 pub use replace_image::{ImageInputFormat, replace_image};
 pub use resize::{ResizeSpec, resize};
 pub use rotate::{RotateDegrees, rotate};
+pub use rotate_view::{get_page_rotations, normalize_rotations, set_page_rotation};
 pub use sanitize::sanitize;
+pub use scale_content::scale_content;
+pub use searchable_pdf::{SearchableReport, make_searchable};
+pub use set_metadata::{MetadataPatch, clear_metadata, set_metadata};
+pub use set_xmp_metadata::{get_xmp, set_xmp};
 pub use sign::{SignCredentials, SignOptions, remove_signatures, sign};
+pub use sign_timestamp::{SignedTimestamp, has_timestamps, list_signature_timestamps};
 pub use single_page::single_page;
 pub use split::split;
+pub use split_bookmarks::split_at_outline;
+pub use split_modes::{SplitMode, split_mode};
 pub use stamp::{StampOptions, stamp};
+pub use structure_tree::{StructElementInfo, StructReport, inspect_structure};
 pub use text::{PageText, extract_text};
+pub use text_markup::{MarkupKind, text_markup};
+pub use timestamp::{
+    DigestReport, DocumentTimestamp, TimestampAlgorithm, TimestampToken, build_timestamp_request,
+    document_digest, request_external_timestamp, timestamp_document, timestamp_query,
+};
+pub use unlock_fields::{FieldFlagReport, lock_fields, unlock_fields};
 pub use validate::{ValidationReport, validate};
 pub use verify_signature::{
     CryptoSignatureInfo, CryptoSignatureReport, SignatureInfo, SignatureReport, verify_signatures,
     verify_signatures_crypto,
 };
 pub use watermark::{MarkPosition, WatermarkOptions, watermark};
+
+pub use clean_scan::{CleanMode, CleanReport, clean_scan};
+pub use inspect_fonts::{FontInfo, inspect_fonts};
+pub use named_destinations::{
+    FitMode, NamedDest, NamedDestInfo, add_named_destinations, list_named_destinations,
+    remove_named_destination,
+};
+pub use optional_content::{LayerInfo, list_layers, remove_oc_properties, set_layer_visibility};
+pub use redact_pages::{RedactReplacement, redact_pages};
+pub use redact_regions::{RedactReport, Redaction, redact_regions};
 
 #[cfg(test)]
 pub(crate) mod test_utils {

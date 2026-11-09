@@ -1444,6 +1444,29 @@ mod tests {
         buf
     }
 
+    /// First image XObject stream in `doc`, if any.
+    fn first_image_stream(doc: &Document) -> Option<&lopdf::Stream> {
+        doc.objects.values().find_map(|obj| match obj {
+            Object::Stream(s)
+                if s.dict.get(b"Subtype").and_then(|o| o.as_name()).ok()
+                    == Some(b"Image".as_slice()) =>
+            {
+                Some(s)
+            }
+            _ => None,
+        })
+    }
+
+    /// Dictionary integer lookup helper for assertions.
+    fn dict_int(dict: &lopdf::Dictionary, key: &[u8]) -> Option<i64> {
+        dict.get(key).ok().and_then(|o| o.as_i64().ok())
+    }
+
+    /// Dictionary name lookup helper for assertions.
+    fn dict_name<'a>(dict: &'a lopdf::Dictionary, key: &[u8]) -> Option<&'a [u8]> {
+        dict.get(key).ok().and_then(|o| o.as_name().ok())
+    }
+
     #[test]
     fn png_to_pdf_produces_valid_pdf_with_image_xobject() {
         let b = RustBackend::new();
@@ -1457,26 +1480,9 @@ mod tests {
             out.warnings
         );
         let doc = Document::load_mem(&out.bytes).unwrap();
-        // Find the image XObject and check its dictionary.
-        let mut found = false;
-        for obj in doc.objects.values() {
-            if let Object::Stream(s) = obj {
-                if let Ok(subtype) = s.dict.get(b"Subtype").and_then(|o| o.as_name()) {
-                    if subtype == b"Image".as_slice() {
-                        found = true;
-                        assert_eq!(
-                            s.dict.get(b"Width").ok().and_then(|o| o.as_i64().ok()),
-                            Some(2)
-                        );
-                        assert_eq!(
-                            s.dict.get(b"Height").ok().and_then(|o| o.as_i64().ok()),
-                            Some(2)
-                        );
-                    }
-                }
-            }
-        }
-        assert!(found, "no image XObject in generated PDF");
+        let img = first_image_stream(&doc).expect("no image XObject in generated PDF");
+        assert_eq!(dict_int(&img.dict, b"Width"), Some(2));
+        assert_eq!(dict_int(&img.dict, b"Height"), Some(2));
         // The content stream should paint the image.
         assert!(content_stream_text(&doc).contains("/Im1"));
     }
@@ -1488,32 +1494,16 @@ mod tests {
         let out = b.convert(&req(Format::Jpeg, Format::Pdf, &jpeg)).unwrap();
         assert!(out.bytes.starts_with(b"%PDF"));
         let doc = Document::load_mem(&out.bytes).unwrap();
-        let mut found = false;
-        for obj in doc.objects.values() {
-            if let Object::Stream(s) = obj {
-                if let Ok(subtype) = s.dict.get(b"Subtype").and_then(|o| o.as_name()) {
-                    if subtype == b"Image".as_slice() {
-                        found = true;
-                        assert_eq!(
-                            s.dict.get(b"Filter").ok().and_then(|o| o.as_name().ok()),
-                            Some(b"DCTDecode".as_slice())
-                        );
-                        assert_eq!(
-                            s.dict
-                                .get(b"ColorSpace")
-                                .ok()
-                                .and_then(|o| o.as_name().ok()),
-                            Some(b"DeviceRGB".as_slice())
-                        );
-                        assert_eq!(
-                            s.dict.get(b"Width").ok().and_then(|o| o.as_i64().ok()),
-                            Some(8)
-                        );
-                    }
-                }
-            }
-        }
-        assert!(found, "no image XObject in generated PDF");
+        let img = first_image_stream(&doc).expect("no image XObject in generated PDF");
+        assert_eq!(
+            dict_name(&img.dict, b"Filter"),
+            Some(b"DCTDecode".as_slice())
+        );
+        assert_eq!(
+            dict_name(&img.dict, b"ColorSpace"),
+            Some(b"DeviceRGB".as_slice())
+        );
+        assert_eq!(dict_int(&img.dict, b"Width"), Some(8));
     }
 
     #[test]
@@ -1523,17 +1513,11 @@ mod tests {
             .convert(&req(Format::Jpeg, Format::Pdf, &fake_jpeg(1)))
             .unwrap();
         let doc = Document::load_mem(&out.bytes).unwrap();
-        let mut found = false;
-        for obj in doc.objects.values() {
-            if let Object::Stream(s) = obj {
-                if let Ok(cs) = s.dict.get(b"ColorSpace").and_then(|o| o.as_name()) {
-                    if cs == b"DeviceGray".as_slice() {
-                        found = true;
-                    }
-                }
-            }
-        }
-        assert!(found, "DeviceGray color space missing");
+        let img = first_image_stream(&doc).expect("no image XObject in generated PDF");
+        assert_eq!(
+            dict_name(&img.dict, b"ColorSpace"),
+            Some(b"DeviceGray".as_slice())
+        );
     }
 
     #[test]

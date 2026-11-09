@@ -15,8 +15,9 @@ use crate::crates::core::engine::{
 
 use crate::crates::image_engine::error::ImageResult;
 use crate::crates::image_engine::ops::{
-    self, AdjustOptions, ColorOptions, CompressOptions, FlipDirection, ImageFormat, ImageInfo,
-    ImageMetadata, ResizeOptions, ValidationReport, WatermarkOptions,
+    self, AdjustOptions, ColorOptions, ColorReplaceOptions, CompressOptions, FlipDirection,
+    ImageFormat, ImageInfo, ImageMetadata, LevelsOptions, PhotocopyOptions, ResizeOptions,
+    ValidationReport, WatermarkOptions,
 };
 
 /// The raster image processing engine.
@@ -139,6 +140,45 @@ impl ImageEngine {
     /// See [`ops::color`].
     pub fn color(&self, input: &[u8], options: &ColorOptions) -> ImageResult<Vec<u8>> {
         ops::color(input, options, &self.limits)
+    }
+
+    /// Apply a levels/gamma curve per `options` (input black/white
+    /// points plus gamma exponent).
+    ///
+    /// See [`ops::levels`].
+    pub fn levels(&self, input: &[u8], options: &LevelsOptions) -> ImageResult<Vec<u8>> {
+        ops::levels(input, options, &self.limits)
+    }
+
+    /// Simulate a photocopy/scanner pass per `options`: grayscale,
+    /// threshold with optional softness, deterministic grain noise,
+    /// and ordered dithering.
+    ///
+    /// See [`ops::photocopy`].
+    pub fn photocopy(&self, input: &[u8], options: &PhotocopyOptions) -> ImageResult<Vec<u8>> {
+        ops::photocopy(input, options, &self.limits)
+    }
+
+    /// Replace colors near `options.source` with `options.target`,
+    /// blended across the `tolerance`/`feather` band.
+    ///
+    /// See [`ops::replace_color`].
+    pub fn replace_color(
+        &self,
+        input: &[u8],
+        options: &ColorReplaceOptions,
+    ) -> ImageResult<Vec<u8>> {
+        ops::replace_color(input, options, &self.limits)
+    }
+
+    /// Convert `input` to CMYK, returning uncompressed CMYK TIFF
+    /// bytes (always TIFF regardless of input format — the `image`
+    /// crate's TIFF codec is not compiled in, so the op writes the
+    /// container itself). Alpha is flattened over white.
+    ///
+    /// See [`ops::cmyk`].
+    pub fn cmyk(&self, input: &[u8]) -> ImageResult<Vec<u8>> {
+        ops::cmyk(input, &self.limits)
     }
 
     /// Generate a thumbnail fitting within `(max_width, max_height)`.

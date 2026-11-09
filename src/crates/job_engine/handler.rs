@@ -23,6 +23,22 @@ pub struct JobContext {
     pub pool: SqlitePool,
 }
 
+impl JobContext {
+    /// Reports mid-run progress for `job_id` (see
+    /// [`crate::crates::job_engine::report_progress`]). Handlers call
+    /// this as work advances; the snapshot is exposed on `Job.progress`
+    /// and via the jobs API. Returns `false` when the job is no
+    /// longer `running` (cancelled or finished) — the report is then
+    /// dropped.
+    pub async fn report_progress(
+        &self,
+        job_id: i64,
+        progress: &serde_json::Value,
+    ) -> Result<bool, JobError> {
+        super::store::report_progress(&self.pool, job_id, progress).await
+    }
+}
+
 /// A unit of work the engine can execute.
 pub trait JobHandler: Send + Sync + 'static {
     /// Execute `job`. Return `Ok(())` for success; `Err` retries the

@@ -200,7 +200,7 @@ fn ensure_info_dict(doc: &mut Document) -> PdfResult<()> {
 
 /// Mutable access to the `/Info` dictionary. Callers must run
 /// [`ensure_info_dict`] first.
-fn info_dict_mut<'a>(doc: &'a mut Document) -> PdfResult<&'a mut Dictionary> {
+fn info_dict_mut(doc: &mut Document) -> PdfResult<&mut Dictionary> {
     let location = match doc.trailer.get(b"Info") {
         Ok(Object::Reference(id)) => InfoLocation::Indirect(*id),
         Ok(Object::Dictionary(_)) => InfoLocation::Inline,
@@ -369,10 +369,13 @@ fn normalize_pdf_date_literal(s: &str) -> PdfResult<String> {
             b'Z' | b'z' if rest.len() == 1 => zone = Some(Zone::Utc),
             sign @ (b'+' | b'-') => {
                 let negative = sign == b'-';
-                let tz = rest[1..].trim_matches('\'');
-                if tz.len() == 4 && tz.bytes().all(|c| c.is_ascii_digit()) {
-                    let hours = tz[0..2].parse().unwrap_or(99);
-                    let minutes = tz[2..4].parse().unwrap_or(99);
+                // The spec writes the offset as HH'mm'; tolerate the
+                // apostrophe being absent or doubled.
+                let tz: String = rest[1..].chars().filter(|&c| c != '\'').collect();
+                let tb = tz.as_bytes();
+                if tb.len() == 4 && tb.iter().all(u8::is_ascii_digit) {
+                    let hours = u32::from(tb[0] - b'0') * 10 + u32::from(tb[1] - b'0');
+                    let minutes = u32::from(tb[2] - b'0') * 10 + u32::from(tb[3] - b'0');
                     if hours <= 23 && minutes <= 59 {
                         zone = Some(Zone::Offset {
                             hours,
@@ -607,7 +610,10 @@ mod tests {
             info_value(&out, b"CreationDate").as_deref(),
             Some("D:20240115143000+05'30'")
         );
-        assert_eq!(info_value(&out, b"ModDate").as_deref(), Some("D:20240630"));
+        assert_eq!(
+            info_value(&out, b"ModDate").as_deref(),
+            Some("D:20240630000000")
+        );
     }
 
     #[test]
@@ -663,7 +669,11 @@ mod tests {
             normalize_pdf_date("2024-01-15T14:30:00Z").unwrap(),
             "D:20240115143000Z"
         );
-        assert_eq!(normalize_pdf_date("D:20240115").unwrap(), "D:20240115");
+        // Missing fields canonicalize to their defaults.
+        assert_eq!(
+            normalize_pdf_date("D:20240115").unwrap(),
+            "D:20240115000000"
+        );
         assert_eq!(
             normalize_pdf_date("1999-12-31 23:59:58-05:00").unwrap(),
             "D:19991231235958-05'00'"

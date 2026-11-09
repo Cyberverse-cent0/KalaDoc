@@ -1961,16 +1961,17 @@ impl PdfOpHandler {
     }
 }
 
-/// Parsed `document.pdf_op` payload.
+/// Parsed `document.pdf_op` payload. `document_id`/`artifact_id` are
+/// validated through [`DocJobPayload::parse`] but resolved by
+/// [`begin_processing`], so only `op`/`params` are kept here.
 struct PdfOpPayload {
-    document: DocJobPayload,
     op: String,
     params: serde_json::Value,
 }
 
 impl PdfOpPayload {
     fn parse(payload: &serde_json::Value) -> Result<Self, JobError> {
-        let document = DocJobPayload::parse(payload)?;
+        DocJobPayload::parse(payload)?;
         let op = payload["op"]
             .as_str()
             .map(str::trim)
@@ -1989,11 +1990,7 @@ impl PdfOpPayload {
                 ));
             }
         };
-        Ok(Self {
-            document,
-            op,
-            params,
-        })
+        Ok(Self { op, params })
     }
 }
 
@@ -2379,8 +2376,10 @@ fn dispatch_pdf_op(
             pdf_outcome(op, artifact_id, bytes)
         }
         "stamp" => {
-            let mut opts = pe::StampOptions::default();
-            opts.text = opt_str(params, "text");
+            let mut opts = pe::StampOptions {
+                text: opt_str(params, "text"),
+                ..Default::default()
+            };
             if let Some(b64) = opt_str(params, "image_png_b64") {
                 opts.image_png = Some(B64.decode(b64.trim()).map_err(|e| {
                     op_param_error(format!("params.image_png_b64 is not valid base64: {e}"))
@@ -2568,8 +2567,7 @@ impl PdfOpHandler {
         // (same rules as the primary: explicit id or most recent).
         let other_artifact = match op.as_str() {
             "compare" => {
-                let other_doc = opt_str(&payload.params, "other_document_id")
-                    .map(crate::crates::document_engine::ids::DocumentId::new);
+                let other_doc = opt_str(&payload.params, "other_document_id").map(DocumentId::new);
                 let other_art = opt_str(&payload.params, "other_artifact_id");
                 match (other_doc, other_art) {
                     (None, None) => {
@@ -3964,11 +3962,11 @@ mod tests {
 
         let meta = metadata_of(&pool, &doc_id).await;
         assert_eq!(meta.custom_fields["rotate_status"], json!("error"));
+        assert_eq!(meta.custom_fields["processing_status"], json!("failed"));
         assert_eq!(
-            meta.custom_fields["processing_status"],
-            json!("failed")
+            meta.custom_fields["pdf_ops"]["rotate"]["status"],
+            json!("error")
         );
-        assert_eq!(meta.custom_fields["pdf_ops"]["rotate"]["status"], json!("error"));
         let jobs = list_jobs(&pool, Some(JobStatus::Succeeded), 10)
             .await
             .unwrap();

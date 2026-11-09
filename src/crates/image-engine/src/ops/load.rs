@@ -16,7 +16,7 @@
 
 use std::io::Cursor;
 
-use image::{DynamicImage, ImageFormat as ImageCodecFormat, ImageReader};
+use image::{ColorType, DynamicImage, ImageFormat as ImageCodecFormat, ImageReader};
 
 use crate::crates::core::engine::EngineLimits;
 use crate::crates::image_engine::error::{ImageError, ImageResult};
@@ -98,6 +98,29 @@ pub(crate) fn decode(bytes: &[u8], limits: &EngineLimits) -> ImageResult<Decoded
     let (reader, _) = open(bytes)?;
     let image = reader.decode().map_err(ImageError::Decode)?;
     Ok(Decoded { format, image })
+}
+
+/// Normalizes any decoded [`DynamicImage`] to 8-bit sRGB pixels:
+/// `Rgb8`/`Rgba8` pass through untouched; every other variant gains an
+/// RGB(A) type, preserving alpha for alpha-carrying formats. Used by
+/// the color pipeline ops (`color`, `effects`, `cmyk`) so adjustments
+/// always run on the same pixel representation.
+pub(crate) fn normalize_8bit(image: DynamicImage) -> DynamicImage {
+    match image {
+        DynamicImage::ImageRgb8(buf) => DynamicImage::ImageRgb8(buf),
+        DynamicImage::ImageRgba8(buf) => DynamicImage::ImageRgba8(buf),
+        other => {
+            let has_alpha = matches!(
+                other.color(),
+                ColorType::La8 | ColorType::La16 | ColorType::Rgba16 | ColorType::Rgba32F
+            );
+            if has_alpha {
+                DynamicImage::ImageRgba8(other.to_rgba8())
+            } else {
+                DynamicImage::ImageRgb8(other.to_rgb8())
+            }
+        }
+    }
 }
 
 /// Encodes `image` as `format`, returning the serialized bytes.

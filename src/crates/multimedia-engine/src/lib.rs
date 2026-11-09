@@ -27,10 +27,12 @@
 
 pub mod analysis;
 pub mod audio;
+pub mod container;
 pub mod conversion;
 pub mod encoding;
 pub mod engine;
 pub mod error;
+pub mod extraction;
 pub mod filters;
 pub mod frames;
 pub mod metadata;
