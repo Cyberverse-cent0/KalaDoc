@@ -40,15 +40,18 @@ pub struct ValidationReport {
 /// client cannot under-declare size to slip past [`ResourceLimits`].
 ///
 /// Checks, in order:
-/// 1. `declared_size` against `limits.max_upload_bytes`;
-/// 2. `declared_size == content.len()` ([`SecurityError::SizeMismatch`]);
-/// 3. non-empty content ([`SecurityError::EmptyFile`]);
-/// 4. filename via [`sanitize_filename`];
-/// 5. magic-byte sniff; when `expected` is `Some(fmt)`, the sniffed
+/// 1. magic-byte sniff (cheap; needed to pick the applicable size cap);
+/// 2. `declared_size` against the format's cap —
+///    [`ResourceLimits::max_video_upload_bytes`] for sniffed video,
+///    [`ResourceLimits::max_upload_bytes`] otherwise;
+/// 3. `declared_size == content.len()` ([`SecurityError::SizeMismatch`]);
+/// 4. non-empty content ([`SecurityError::EmptyFile`]);
+/// 5. filename via [`sanitize_filename`];
+/// 6. when `expected` is `Some(fmt)`, the sniffed
 ///    format must equal `fmt` — passing `None` accepts any sniffed
-///    format including [`SniffedFormat::Unknown`]. An expected `Pdf`
-///    upload whose bytes are really a ZIP archive is rejected, closing
-///    the extension/MIME-spoofing hole.
+///    format including [`SniffedFormat::Unknown`] and video containers.
+///    An expected `Pdf` upload whose bytes are really a ZIP archive is
+///    rejected, closing the extension/MIME-spoofing hole.
 ///
 /// # Errors
 /// Returns the first failing [`SecurityError`]. Error messages never
@@ -60,7 +63,11 @@ pub fn validate_upload(
     limits: &ResourceLimits,
     expected: Option<SniffedFormat>,
 ) -> SecurityResult<ValidationReport> {
-    limits.check_size(declared_size)?;
+    // Sniff first: the detected format selects the size cap, so video
+    // uploads are judged against `max_video_upload_bytes` rather than
+    // the tighter document budget.
+    let format = sniff_format(content);
+    limits.check_upload_size(declared_size, &format)?;
 
     let actual = content.len() as u64;
     if declared_size != actual {
@@ -74,7 +81,6 @@ pub fn validate_upload(
     }
 
     let sanitized_filename = sanitize_filename(filename)?;
-    let format = sniff_format(content);
 
     if let Some(expected) = expected {
         if format != expected {
@@ -160,10 +166,14 @@ fn has_pdf_header(data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crates::security_engine::VideoContainer;
 
     const PDF: &[u8] = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF";
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n....";
     const ZIP: &[u8] = b"PK\x03\x04\x14\x00....";
+    const MP4: &[u8] = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom....";
+    const MKV: &[u8] =
+        b"\x1a\x45\xdf\xa3\x93\x42\x82\x88matroska\x42\x87\x81\x02....";
 
     fn limits() -> ResourceLimits {
         ResourceLimits::default()
@@ -280,6 +290,63 @@ mod tests {
         .unwrap();
         assert_eq!(report.format, SniffedFormat::Png);
         assert_eq!(report.sanitized_filename, "img.png");
+    }
+
+    #[test]
+    fn accepts_video_uploads() {
+        for (name, data, container) in [
+            ("clip.mp4", &MP4[..], VideoContainer::Mp4),
+            ("movie.mkv", &MKV[..], VideoContainer::Matroska),
+        ] {
+            let report = validate_upload(
+                name,
+                data.len() as u64,
+                data,
+                &limits(),
+                Some(SniffedFormat::Video { container }),
+            )
+            .unwrap();
+            assert_eq!(report.format, SniffedFormat::Video { container });
+            assert_eq!(report.sanitized_filename, name);
+        }
+        // No expectation: video is accepted like any other sniffed format.
+        let report = validate_upload("clip.mp4", MP4.len() as u64, MP4, &limits(), None).unwrap();
+        assert!(report.format.is_video());
+    }
+
+    #[test]
+    fn video_uses_larger_size_cap() {
+        let mut l = limits();
+        l.max_upload_bytes = MP4.len() as u64 - 1; // doc cap rejects it…
+        l.max_video_upload_bytes = 1 << 20; // …video cap accepts it.
+        let report = validate_upload("clip.mp4", MP4.len() as u64, MP4, &l, None).unwrap();
+        assert!(report.format.is_video());
+        // Same bytes under a non-video expectation still hit the doc cap
+        // only via `expected` — but a non-video file of that size fails.
+        let err = validate_upload("doc.pdf", MP4.len() as u64, PDF, &l, None).unwrap_err();
+        assert!(matches!(err, SecurityError::FileTooLarge { .. }));
+    }
+
+    #[test]
+    fn rejects_video_expected_mismatch() {
+        // Caller expected a document; bytes are really MP4.
+        let err = validate_upload(
+            "innocent.pdf",
+            MP4.len() as u64,
+            MP4,
+            &limits(),
+            Some(SniffedFormat::Pdf),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SecurityError::ContentTypeMismatch {
+                expected: SniffedFormat::Pdf,
+                found: SniffedFormat::Video {
+                    container: VideoContainer::Mp4
+                }
+            }
+        ));
     }
 
     #[test]

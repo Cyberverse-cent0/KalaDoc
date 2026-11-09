@@ -67,6 +67,13 @@ impl ProcessingEngine for SecurityEngine {
                 "jpeg".to_string(),
                 "zip".to_string(),
                 "gif".to_string(),
+                // Video containers recognized by `sniff_format`.
+                "mp4".to_string(),
+                "mkv".to_string(),
+                "webm".to_string(),
+                "avi".to_string(),
+                "mpeg-ts".to_string(),
+                "mpeg-ps".to_string(),
             ],
             output_formats: Vec::new(),
             limits: EngineLimits {
@@ -74,6 +81,9 @@ impl ProcessingEngine for SecurityEngine {
                 max_pages: limits.max_pages,
                 max_pixels: None,
                 max_outputs: Some(limits.max_outputs),
+                // Security engine sniffs bytes only; it does not decode
+                // timed media, so no duration budget applies here.
+                max_duration_secs: None,
             },
         }
     }

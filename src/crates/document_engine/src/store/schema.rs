@@ -258,3 +258,89 @@ async fn create_audit_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 // `jobs_tbl` is owned by `crate::crates::job_engine` — its
 // `create_jobs_table` is called from `init_db_with` alongside this
 // function. Do not define a second jobs table here.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite pool");
+        init_document_store(&pool).await.expect("init store");
+        pool
+    }
+
+    /// Every table the document store owns must exist after init —
+    /// this is the contract the repository modules in this directory
+    /// are written against.
+    #[tokio::test]
+    async fn init_creates_all_tables() {
+        let pool = test_pool().await;
+        for table in [
+            "folders_tbl",
+            "documents_tbl",
+            "artifacts_tbl",
+            "revisions_tbl",
+            "versions_tbl",
+            "tags_tbl",
+            "tag_assignments_tbl",
+            "document_permissions_tbl",
+            "document_metadata_tbl",
+            "document_relationships_tbl",
+            "document_audit_tbl",
+        ] {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(exists, "missing table {table}");
+        }
+    }
+
+    /// Indexes backing the hot lookup paths: owner/folder/status on
+    /// documents, per-document children, subject-side permission and
+    /// relationship lookups, and the current-version pointer.
+    #[tokio::test]
+    async fn init_creates_expected_indexes() {
+        let pool = test_pool().await;
+        for index in [
+            "idx_folders_parent",
+            "idx_folders_owner",
+            "idx_documents_owner",
+            "idx_documents_folder",
+            "idx_documents_status",
+            "idx_artifacts_document",
+            "idx_revisions_document",
+            "idx_versions_current",
+            "idx_tag_assignments_tag",
+            "idx_doc_permissions_subject",
+            "idx_doc_relationships_source",
+            "idx_doc_relationships_target",
+            "idx_document_audit_doc",
+        ] {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)",
+            )
+            .bind(index)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(exists, "missing index {index}");
+        }
+    }
+
+    /// `init_document_store` is called on every startup; running it
+    /// twice on the same pool must be a no-op, not an error.
+    #[tokio::test]
+    async fn init_is_idempotent() {
+        let pool = test_pool().await;
+        init_document_store(&pool).await.expect("second init");
+    }
+}

@@ -20,6 +20,7 @@ pub enum EngineKind {
     Conversion,
     Security,
     Pipeline,
+    Video,
 }
 
 /// Operations an engine can perform.
@@ -44,6 +45,11 @@ pub enum EngineOperation {
     Ocr,
     Encrypt,
     Decrypt,
+    Thumbnail,
+    Trim,
+    Transcode,
+    Concat,
+    ExtractAudio,
 }
 
 impl EngineOperation {
@@ -64,6 +70,11 @@ impl EngineOperation {
             Self::Ocr => "ocr",
             Self::Encrypt => "encrypt",
             Self::Decrypt => "decrypt",
+            Self::Thumbnail => "thumbnail",
+            Self::Trim => "trim",
+            Self::Transcode => "transcode",
+            Self::Concat => "concat",
+            Self::ExtractAudio => "extract_audio",
         }
     }
 }
@@ -84,6 +95,10 @@ pub struct EngineLimits {
     pub max_pixels: Option<u64>,
     /// Maximum number of output artifacts produced by one operation.
     pub max_outputs: Option<u32>,
+    /// Maximum media duration in seconds an engine will process
+    /// (e.g. video/audio length). `None` = no limit. Ignored by
+    /// engines without timed media inputs.
+    pub max_duration_secs: Option<u64>,
 }
 
 /// Static description of what an engine supports.

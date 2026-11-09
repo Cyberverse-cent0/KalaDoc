@@ -17,7 +17,7 @@ Source: `src/crates/job_engine/`
 | `JobHandler` | `handler.rs` | Trait handlers implement; object-safe boxed-future `handle()` |
 | `JobContext` | `handler.rs` | Shared services handed to handlers (currently the `SqlitePool`) |
 | `NewJob` / `Job` | `job.rs` | Enqueue input / row shape |
-| Built-in handlers | `application/job_handlers.rs` | `document.ingest`, `system.ping`, `pdf.inspect`, `storage.gc_staging` |
+| Built-in handlers | `application/job_handlers.rs` | `document.*`, `pdf.inspect`, `video.*`, `storage.gc_staging`, `system.ping` |
 
 Claiming is atomic: `UPDATE ... WHERE id = (SELECT ... pending ...)`
 with `RETURNING`, so two engines can share one database safely.
@@ -74,6 +74,10 @@ job `kind` on the engine at worker startup:
 | `document.index` | `{document_id, artifact_id?}` | Extracts searchable text into an `index` metadata field. |
 | `thumbnail.generate` | `{document_id, artifact_id?}` | Extracts an embedded PDF thumbnail image into storage. |
 | `pdf.inspect` | `{ "path": "<relative under storage root>", "max_bytes"?: u64 }` | Size-checks before reading (default cap 100 MiB), validates bytes via `security_engine::validate_pdf`, inspects via `pdf_engine`, writes `<path>.inspect.json` next to the input. Paths are confined to the storage root — absolute paths and `..` are rejected. |
+| `video.probe` | `{ "path": "<relative under storage root>" }` | Runs `ffprobe` on the media file and writes `<path>.probe.json` next to the input with container/stream/duration metadata. Requires `ffprobe` on PATH. |
+| `video.thumbnail` | `{ "path": "<relative under storage root>", "timestamp_secs"?, "width"? }` | Extracts a JPEG/PNG frame via `ffmpeg` into storage as a thumbnail artifact. |
+| `video.transcode` | `{ "path": "<relative under storage root>", "output_format"?, "options"? }` | Re-encodes the media via `ffmpeg`; output lands under storage with a derived name. |
+| `video.trim` | `{ "path": "<relative under storage root>", "start_secs", "duration_secs"? }` | Cuts a segment via `ffmpeg`; stream-copy by default (keyframe-aligned), re-encode when frame accuracy is requested. |
 | `storage.gc_staging` | `{ "retention_secs"?: u64 }` | Deletes `<storage_root>/staging/` entries older than the retention window (default 86400 s). Abandoned staging objects from interrupted uploads are cleaned up here — the issue's crash-recovery requirement. |
 
 The `document.*` handlers share these properties (see the module docs

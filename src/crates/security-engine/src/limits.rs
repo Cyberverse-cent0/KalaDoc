@@ -11,6 +11,7 @@
 //! spawning jobs.
 
 use super::error::{SecurityError, SecurityResult};
+use super::sniff::SniffedFormat;
 
 /// Byte/page/output budgets for uploads and processing operations.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -18,6 +19,12 @@ use super::error::{SecurityError, SecurityResult};
 pub struct ResourceLimits {
     /// Maximum accepted upload size in bytes.
     pub max_upload_bytes: u64,
+    /// Maximum accepted *video* upload size in bytes. Video payloads
+    /// are legitimately far larger than documents, so they get their
+    /// own budget; non-video uploads remain capped by
+    /// [`Self::max_upload_bytes`]. See
+    /// [`Self::check_upload_size`].
+    pub max_video_upload_bytes: u64,
     /// Maximum page count for a single document; `None` = unlimited.
     pub max_pages: Option<u32>,
     /// Maximum total bytes an operation may produce across all outputs.
@@ -30,6 +37,7 @@ impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
             max_upload_bytes: 100 * 1024 * 1024, // 100 MiB
+            max_video_upload_bytes: 2 * 1024 * 1024 * 1024, // 2 GiB
             max_pages: Some(10_000),
             max_operation_bytes: 256 * 1024 * 1024, // 256 MiB
             max_outputs: 64,
@@ -48,6 +56,34 @@ impl ResourceLimits {
                 size: len,
                 max: self.max_upload_bytes,
             });
+        }
+        Ok(())
+    }
+
+    /// The byte cap that applies to a sniffed format:
+    /// [`Self::max_video_upload_bytes`] for
+    /// [`SniffedFormat::Video`], [`Self::max_upload_bytes`] otherwise.
+    /// The cap is chosen from magic-byte content, never from the
+    /// caller-declared type.
+    pub fn upload_cap_for(&self, format: &SniffedFormat) -> u64 {
+        if format.is_video() {
+            self.max_video_upload_bytes
+        } else {
+            self.max_upload_bytes
+        }
+    }
+
+    /// Check an upload's byte size against the cap that applies to its
+    /// sniffed format — the video-aware counterpart of
+    /// [`Self::check_size`].
+    ///
+    /// # Errors
+    /// [`SecurityError::FileTooLarge`] when `len` exceeds the applicable
+    /// limit.
+    pub fn check_upload_size(&self, len: u64, format: &SniffedFormat) -> SecurityResult<()> {
+        let max = self.upload_cap_for(format);
+        if len > max {
+            return Err(SecurityError::FileTooLarge { size: len, max });
         }
         Ok(())
     }
@@ -104,6 +140,7 @@ mod tests {
     fn default_values_are_sane() {
         let l = ResourceLimits::default();
         assert_eq!(l.max_upload_bytes, 100 * 1024 * 1024);
+        assert!(l.max_video_upload_bytes > l.max_upload_bytes);
         assert_eq!(l.max_pages, Some(10_000));
         assert!(l.max_operation_bytes >= l.max_upload_bytes);
         assert!(l.max_outputs > 0);
@@ -140,6 +177,29 @@ mod tests {
         assert!(matches!(
             l.check_size(u64::MAX),
             Err(SecurityError::FileTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn check_upload_size_uses_video_cap() {
+        let mut l = ResourceLimits::default();
+        l.max_upload_bytes = 100;
+        l.max_video_upload_bytes = 1_000;
+        let video = SniffedFormat::Video {
+            container: crate::crates::security_engine::VideoContainer::Mp4,
+        };
+        // 500 bytes: over the document cap but under the video cap.
+        assert!(l.check_upload_size(500, &video).is_ok());
+        assert!(matches!(
+            l.check_upload_size(500, &SniffedFormat::Pdf),
+            Err(SecurityError::FileTooLarge { size: 500, max: 100 })
+        ));
+        assert!(matches!(
+            l.check_upload_size(1_001, &video),
+            Err(SecurityError::FileTooLarge {
+                size: 1_001,
+                max: 1_000
+            })
         ));
     }
 

@@ -99,7 +99,8 @@ pub enum MacosVersion {
 // Public API
 // ============================================================
 
-/// Default dependency list: Rust toolchain + archive tools.
+/// Default dependency list: Rust toolchain + archive tools + ffmpeg
+/// (required by the video engine for `ffmpeg`/`ffprobe` on PATH).
 /// Callers can build their own list and call [`check_dependencies`] instead.
 pub fn default_dependencies() -> Vec<Dependency> {
     vec![
@@ -107,6 +108,8 @@ pub fn default_dependencies() -> Vec<Dependency> {
         Dependency::new("cargo", "1.0.0"),
         Dependency::new("tar", ""),
         Dependency::new("zip", ""),
+        Dependency::new("ffmpeg", ""),
+        Dependency::new("ffprobe", ""),
     ]
 }
 
@@ -146,38 +149,39 @@ pub fn install_hint(report: &RequirementReport) -> Vec<String> {
     match report.os {
         Os::Linux => match report.distro.unwrap_or(Distro::Other) {
             Distro::Ubuntu | Distro::Debian => {
-                hints.push("sudo apt update && sudo apt install -y tar zip curl".into());
+                hints.push("sudo apt update && sudo apt install -y tar zip curl ffmpeg".into());
                 hints.push("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh".into());
             }
             Distro::Arch => {
-                hints.push("sudo pacman -S --needed tar zip rustup".into());
+                hints.push("sudo pacman -S --needed tar zip rustup ffmpeg".into());
             }
             Distro::Fedora | Distro::CentOS | Distro::RedHat => {
-                hints.push("sudo dnf install -y tar zip".into());
+                hints.push("sudo dnf install -y tar zip ffmpeg".into());
                 hints.push("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh".into());
             }
             Distro::OpenSUSE | Distro::SLES => {
-                hints.push("sudo zypper install -y tar zip".into());
+                hints.push("sudo zypper install -y tar zip ffmpeg".into());
                 hints.push("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh".into());
             }
             Distro::Alpine => {
-                hints.push("sudo apk add tar zip curl".into());
+                hints.push("sudo apk add tar zip curl ffmpeg".into());
                 hints.push("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh".into());
             }
             Distro::Other => {
-                hints.push("Unknown distro; install tar, zip, and Rust manually.".into());
+                hints.push("Unknown distro; install tar, zip, ffmpeg, and Rust manually.".into());
             }
         },
         Os::Macos => {
             hints.push("xcode-select --install".into());
-            hints.push("brew install rustup && rustup-init".into());
+            hints.push("brew install rustup ffmpeg && rustup-init".into());
         }
         Os::Windows => {
             hints.push("tar and zip are built into Windows 10+ (bsdtar).".into());
+            hints.push("ffmpeg and ffprobe must be on PATH — install ffmpeg (e.g. `winget install ffmpeg`) so both binaries resolve.".into());
             hints.push("Install Rust via https://rustup.rs/".into());
         }
         Os::Other => {
-            hints.push("Unsupported OS; install tar, zip, and Rust manually.".into());
+            hints.push("Unsupported OS; install tar, zip, ffmpeg, and Rust manually.".into());
         }
     }
     hints

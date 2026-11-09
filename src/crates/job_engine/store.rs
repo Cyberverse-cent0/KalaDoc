@@ -119,58 +119,86 @@ pub async fn claim_next(
 
 /// Marks a claimed job succeeded or schedules its next retry.
 ///
+/// Every UPDATE is guarded by `status = 'running' AND worker_id = ?
+/// AND attempts = ?` so completion only applies while the job is still
+/// owned by this worker's claim. If the job was cancelled mid-flight
+/// (`cancel_job`), reaped as stale and re-claimed, or otherwise moved
+/// on, the update is a no-op and the current status is preserved —
+/// the handler's side effects already happened, but a stale worker
+/// must not resurrect a `cancelled` job or clobber a newer attempt.
+///
 /// On failure with attempts remaining, the job returns to `pending`
 /// with `run_at = now + backoff_secs` (exponential backoff capped at
 /// [`MAX_BACKOFF_SECS`]). Otherwise it becomes `failed`.
 pub async fn complete(
     pool: &SqlitePool,
-    job_id: i64,
+    job: &Job,
     result: Result<(), String>,
     backoff_secs: u64,
     now: i64,
 ) -> Result<(), JobError> {
+    let worker_id = job.worker_id.as_deref().unwrap_or("");
+    let attempts = job.attempts as i64;
     match result {
         Ok(()) => {
             sqlx::query(
                 "UPDATE jobs_tbl SET status = 'succeeded', finished_at = ?, last_error = NULL
-                 WHERE id = ?",
+                 WHERE id = ? AND status = 'running' AND worker_id = ? AND attempts = ?",
             )
             .bind(now)
-            .bind(job_id)
+            .bind(job.id)
+            .bind(worker_id)
+            .bind(attempts)
             .execute(pool)
             .await?;
         }
         Err(err) => {
-            // Re-read attempts/max_attempts to decide retry vs fail.
-            let row = sqlx::query("SELECT attempts, max_attempts FROM jobs_tbl WHERE id = ?")
-                .bind(job_id)
-                .fetch_one(pool)
-                .await?;
-            let attempts: i64 = row.get("attempts");
+            // Re-read attempts/max_attempts to decide retry vs fail,
+            // still scoped to this worker's claim.
+            let row = sqlx::query(
+                "SELECT attempts, max_attempts FROM jobs_tbl
+                 WHERE id = ? AND status = 'running' AND worker_id = ? AND attempts = ?",
+            )
+            .bind(job.id)
+            .bind(worker_id)
+            .bind(attempts)
+            .fetch_optional(pool)
+            .await?;
+            let Some(row) = row else {
+                // Job left `running` under this claim (cancelled,
+                // reaped, re-claimed) — nothing to do.
+                return Ok(());
+            };
+            let attempts_now: i64 = row.get("attempts");
             let max_attempts: i64 = row.get("max_attempts");
 
-            if attempts < max_attempts {
+            if attempts_now < max_attempts {
                 let delay = backoff_secs
-                    .saturating_mul(1u64 << attempts.min(20) as u32)
+                    .saturating_mul(1u64 << attempts_now.min(20) as u32)
                     .min(MAX_BACKOFF_SECS);
                 sqlx::query(
                     "UPDATE jobs_tbl
-                     SET status = 'pending', run_at = ?, finished_at = NULL, last_error = ?
-                     WHERE id = ?",
+                     SET status = 'pending', run_at = ?, finished_at = NULL,
+                         worker_id = NULL, started_at = NULL, last_error = ?
+                     WHERE id = ? AND status = 'running' AND worker_id = ? AND attempts = ?",
                 )
                 .bind(now + delay as i64)
                 .bind(&err)
-                .bind(job_id)
+                .bind(job.id)
+                .bind(worker_id)
+                .bind(attempts_now)
                 .execute(pool)
                 .await?;
             } else {
                 sqlx::query(
                     "UPDATE jobs_tbl SET status = 'failed', finished_at = ?, last_error = ?
-                     WHERE id = ?",
+                     WHERE id = ? AND status = 'running' AND worker_id = ? AND attempts = ?",
                 )
                 .bind(now)
                 .bind(&err)
-                .bind(job_id)
+                .bind(job.id)
+                .bind(worker_id)
+                .bind(attempts_now)
                 .execute(pool)
                 .await?;
             }

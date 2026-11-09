@@ -16,6 +16,10 @@
 //! | `document.index`        | `{document_id, artifact_id?}`                                 | Extract searchable text into an `index` metadata field (see [`DocumentIndexHandler`]) |
 //! | `thumbnail.generate`    | `{document_id, artifact_id?}`                                 | Extract an embedded PDF thumbnail image into storage (see [`ThumbnailGenerateHandler`]) |
 //! | `pdf.inspect`           | `{path, max_bytes?}`                                          | Validate + inspect a PDF under the storage root; writes `<path>.inspect.json` |
+//! | `video.probe`           | `{path, max_bytes?}`                                          | Probe a video under the storage root; writes `<path>.probe.json` |
+//! | `video.thumbnail`       | `{path, at_secs?, max_bytes?}`                                | Extract a PNG thumbnail frame; writes `<path>.thumb.png` |
+//! | `video.transcode`       | `{path, target_ext, max_bytes?}`                              | Transcode to `target_ext`; writes `<path>.<target_ext>` |
+//! | `video.trim`            | `{path, start_secs, end_secs?, reencode?, max_bytes?}`        | Trim a video segment; writes `<path>.trim<ext>` |
 //! | `storage.gc_staging`    | `{retention_secs?}`                                           | Delete abandoned entries under `<storage_root>/staging/` and `<storage_root>/.staging/` older than the retention window |
 //!
 //! `document.metadata_extract` / `document.index` / `thumbnail.generate`
@@ -70,6 +74,22 @@
 //! written atomically to `<root>/<path>.inspect.json` via a `*.tmp`
 //! sibling + rename.
 //!
+//! `video.*` payload details: `path` is a **relative** path under the
+//! configured storage root, confined exactly like `pdf.inspect`.
+//! `max_bytes` defaults to 4 GiB and is checked against the on-disk
+//! size before the file is read (and again after, as a TOCTOU guard);
+//! it is also passed to the engine as `EngineLimits::max_input_bytes`.
+//! `video.probe` writes the `VideoInfo` report as pretty JSON to
+//! `<root>/<path>.probe.json`; `video.thumbnail` writes PNG bytes to
+//! `<path>.thumb.png` (`at_secs` selects the frame, `None` = default);
+//! `video.transcode` writes `<path>.<target_ext>` where `target_ext`
+//! is a bare alphanumeric extension and is rejected if the output
+//! name would equal the input; `video.trim` writes
+//! `<path>.trim.<input-ext>` (`end_secs`/`reencode` optional). All
+//! outputs are written atomically via `*.tmp` + rename and all four
+//! kinds are idempotent — deterministic output names make retries
+//! safe.
+//!
 //! `storage.gc_staging` payload details: `retention_secs` defaults to
 //! 86 400 (24 h). Every entry directly under `staging/` **and** the
 //! streaming backend's reserved `.staging/` directory whose
@@ -103,7 +123,6 @@ use crate::crates::document_engine::store::history::record_event;
 use crate::crates::document_engine::store::metadata::{
     get_document_metadata, upsert_document_metadata,
 };
-use crate::crates::document_engine::store::StoreError;
 use crate::crates::job_engine::{Job, JobContext, JobEngine, JobError, JobHandler, NewJob, enqueue};
 use crate::crates::security_engine::{SniffedFormat, sniff_format};
 use crate::crates::storage::local::config::StorageConfig;
@@ -131,8 +150,23 @@ pub const DOCUMENT_INDEX_KIND: &str = "document.index";
 /// Job kind for [`ThumbnailGenerateHandler`].
 pub const THUMBNAIL_GENERATE_KIND: &str = "thumbnail.generate";
 
+/// Job kind for [`VideoProbeHandler`].
+pub const VIDEO_PROBE_KIND: &str = "video.probe";
+
+/// Job kind for [`VideoThumbnailHandler`].
+pub const VIDEO_THUMBNAIL_KIND: &str = "video.thumbnail";
+
+/// Job kind for [`VideoTranscodeHandler`].
+pub const VIDEO_TRANSCODE_KIND: &str = "video.transcode";
+
+/// Job kind for [`VideoTrimHandler`].
+pub const VIDEO_TRIM_KIND: &str = "video.trim";
+
 /// Default `max_bytes` for `pdf.inspect` (100 MiB).
 const DEFAULT_INSPECT_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Default `max_bytes` for the `video.*` handlers (4 GiB).
+const DEFAULT_VIDEO_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Hard cap on artifact bytes read for `document.metadata_extract`,
 /// `document.index`, and `thumbnail.generate`. Larger objects are
@@ -169,8 +203,9 @@ const DEFAULT_GC_RETENTION_SECS: u64 = 86_400;
 /// config that fails to load logs a warning and skips that handler so
 /// the engine can still start (its jobs will fail with `NoHandler`).
 /// Config-dependent handlers (`document.ingest`) resolve storage at
-/// construction; `pdf.inspect` / `storage.gc_staging` resolve it per
-/// job so a fixed storage root can be picked up without a restart.
+/// construction; `pdf.inspect` / `video.*` / `storage.gc_staging`
+/// resolve it per job so a fixed storage root can be picked up
+/// without a restart.
 pub fn register_builtin(engine: &mut JobEngine) {
     match DocumentIngestHandler::from_app_config() {
         Ok(handler) => engine.register(DOCUMENT_INGEST_KIND, Arc::new(handler)),
@@ -181,6 +216,10 @@ pub fn register_builtin(engine: &mut JobEngine) {
     }
     engine.register(SYSTEM_PING_KIND, Arc::new(SystemPingHandler));
     engine.register(PDF_INSPECT_KIND, Arc::new(PdfInspectHandler));
+    engine.register(VIDEO_PROBE_KIND, Arc::new(VideoProbeHandler));
+    engine.register(VIDEO_THUMBNAIL_KIND, Arc::new(VideoThumbnailHandler));
+    engine.register(VIDEO_TRANSCODE_KIND, Arc::new(VideoTranscodeHandler));
+    engine.register(VIDEO_TRIM_KIND, Arc::new(VideoTrimHandler));
     engine.register(STORAGE_GC_STAGING_KIND, Arc::new(StorageGcStagingHandler));
     match DocumentMetadataExtractHandler::from_app_config() {
         Ok(handler) => engine.register(
@@ -592,6 +631,318 @@ fn inspect_pdf_at(root: &Path, rel_path: &str, max_bytes: u64) -> Result<(), Job
 }
 
 // ---------------------------------------------------------------------------
+// video.probe / video.thumbnail / video.transcode / video.trim
+// ---------------------------------------------------------------------------
+//
+// ffmpeg-backed media operations over files stored under the storage
+// root. All four kinds share the `pdf.inspect` confinement model:
+// `path` is relative to the storage root, size is checked before
+// reading, and outputs are deterministic sibling files written
+// atomically (`*.tmp` + rename) so retries are idempotent.
+
+/// `video.probe` — probes a video file and writes the `VideoInfo`
+/// report next to it as pretty JSON.
+struct VideoProbeHandler;
+
+/// `video.thumbnail` — extracts a PNG thumbnail frame from a video.
+struct VideoThumbnailHandler;
+
+/// `video.transcode` — transcodes a video to `target_ext`.
+struct VideoTranscodeHandler;
+
+/// `video.trim` — cuts a video to `[start_secs, end_secs)`.
+struct VideoTrimHandler;
+
+/// Shared `path` + `max_bytes` fields for the `video.*` payloads.
+#[derive(Debug, Deserialize)]
+struct VideoPathPayload {
+    /// Path relative to the storage root. Must not be absolute and
+    /// must not contain `..` components.
+    path: String,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.thumbnail` payload.
+#[derive(Debug, Deserialize)]
+struct VideoThumbnailPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Timestamp (seconds) of the frame to thumbnail. `None` = engine
+    /// default (typically the first frame).
+    #[serde(default)]
+    at_secs: Option<f64>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.transcode` payload.
+#[derive(Debug, Deserialize)]
+struct VideoTranscodePayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Bare output extension (e.g. `"webm"`, `"mp4"`). Must be
+    /// alphanumeric; the output is written to `<path>.<target_ext>`.
+    target_ext: String,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.trim` payload.
+#[derive(Debug, Deserialize)]
+struct VideoTrimPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Start of the kept segment, in seconds.
+    start_secs: f64,
+    /// End of the kept segment, in seconds. `None` = to the end.
+    #[serde(default)]
+    end_secs: Option<f64>,
+    /// Whether to re-encode (frame-accurate) instead of stream-copy.
+    #[serde(default)]
+    reencode: bool,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+fn default_video_max_bytes() -> u64 {
+    DEFAULT_VIDEO_MAX_BYTES
+}
+
+impl JobHandler for VideoProbeHandler {
+    fn handle<'a>(
+        &'a self,
+        _ctx: &'a JobContext,
+        job: &'a Job,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let payload: VideoPathPayload = serde_json::from_value(job.payload.clone())?;
+            let root = storage_root()?;
+            probe_video_at(&root, &payload.path, payload.max_bytes)
+        })
+    }
+}
+
+impl JobHandler for VideoThumbnailHandler {
+    fn handle<'a>(
+        &'a self,
+        _ctx: &'a JobContext,
+        job: &'a Job,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let payload: VideoThumbnailPayload = serde_json::from_value(job.payload.clone())?;
+            let root = storage_root()?;
+            thumbnail_video_at(&root, &payload)
+        })
+    }
+}
+
+impl JobHandler for VideoTranscodeHandler {
+    fn handle<'a>(
+        &'a self,
+        _ctx: &'a JobContext,
+        job: &'a Job,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let payload: VideoTranscodePayload = serde_json::from_value(job.payload.clone())?;
+            let root = storage_root()?;
+            transcode_video_at(&root, &payload)
+        })
+    }
+}
+
+impl JobHandler for VideoTrimHandler {
+    fn handle<'a>(
+        &'a self,
+        _ctx: &'a JobContext,
+        job: &'a Job,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let payload: VideoTrimPayload = serde_json::from_value(job.payload.clone())?;
+            let root = storage_root()?;
+            trim_video_at(&root, &payload)
+        })
+    }
+}
+
+/// [`EngineLimits`] handed to video-engine calls: the caller's byte
+/// cap as `max_input_bytes`, everything else left to engine defaults.
+fn video_limits(max_bytes: u64) -> crate::crates::core::engine::EngineLimits {
+    crate::crates::core::engine::EngineLimits {
+        max_input_bytes: Some(max_bytes),
+        ..Default::default()
+    }
+}
+
+/// Maps a video-engine failure into a retryable job failure.
+fn video_err(context: &str, e: crate::crates::video_engine::VideoError) -> JobError {
+    JobError::Failed(format!("{context}: {e}"))
+}
+
+/// Confines `rel_path` under `root`, checks the file size against
+/// `max_bytes` **before** reading (then again after, as a TOCTOU
+/// guard), and returns the resolved path plus the file bytes.
+fn read_video_input(
+    root: &Path,
+    rel_path: &str,
+    max_bytes: u64,
+) -> Result<(PathBuf, Vec<u8>), JobError> {
+    let file = resolve_under_root(root, rel_path)?;
+    let meta = std::fs::metadata(&file)
+        .map_err(|e| JobError::Failed(format!("cannot stat {}: {e}", file.display())))?;
+    if !meta.is_file() {
+        return Err(JobError::Failed(format!(
+            "payload.path is not a regular file: {rel_path:?}"
+        )));
+    }
+    if meta.len() > max_bytes {
+        return Err(JobError::Failed(format!(
+            "file {} is {} bytes, exceeding max_bytes {max_bytes}",
+            rel_path,
+            meta.len()
+        )));
+    }
+    let data = std::fs::read(&file)
+        .map_err(|e| JobError::Failed(format!("cannot read {}: {e}", file.display())))?;
+    if data.len() as u64 > max_bytes {
+        return Err(JobError::Failed(format!(
+            "file {} grew past max_bytes {max_bytes} while reading",
+            rel_path
+        )));
+    }
+    Ok((file, data))
+}
+
+/// Appends `suffix` to a path's file name (operating on the whole
+/// path string, like the `.inspect.json` report naming).
+fn path_with_suffix(file: &Path, suffix: &str) -> PathBuf {
+    let mut os = file.as_os_str().to_os_string();
+    os.push(suffix);
+    PathBuf::from(os)
+}
+
+/// Writes `bytes` to `out` atomically: a `*.tmp` sibling is written
+/// first, then renamed over `out`, so a crash mid-write can't leave a
+/// truncated output that looks authoritative.
+fn write_output_atomic(out: &Path, bytes: &[u8]) -> Result<(), JobError> {
+    let mut tmp_os = out.as_os_str().to_os_string();
+    tmp_os.push(".tmp");
+    let tmp = PathBuf::from(tmp_os);
+    if let Some(parent) = tmp.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| JobError::Failed(format!("cannot create {}: {e}", parent.display())))?;
+    }
+    std::fs::write(&tmp, bytes)
+        .map_err(|e| JobError::Failed(format!("cannot write {}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, out).map_err(|e| {
+        JobError::Failed(format!(
+            "cannot rename {} -> {}: {e}",
+            tmp.display(),
+            out.display()
+        ))
+    })?;
+    Ok(())
+}
+
+/// Validates `target_ext` as a bare output extension: alphanumeric
+/// only, no leading dot required, case-normalized to lowercase.
+fn sanitize_target_ext(ext: &str) -> Result<String, JobError> {
+    let cleaned = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+    let ok = !cleaned.is_empty()
+        && cleaned.len() <= 16
+        && cleaned.chars().all(|c| c.is_ascii_alphanumeric());
+    if !ok {
+        return Err(JobError::Failed(format!(
+            "payload.target_ext is not a safe extension: {ext:?}"
+        )));
+    }
+    Ok(cleaned)
+}
+
+/// `video.probe` implementation: probe `rel_path` under `root` and
+/// write the pretty-JSON `VideoInfo` report to
+/// `<root>/<rel_path>.probe.json`.
+fn probe_video_at(root: &Path, rel_path: &str, max_bytes: u64) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, rel_path, max_bytes)?;
+    let info = crate::crates::video_engine::VideoEngine::new()
+        .probe(&data)
+        .map_err(|e| video_err(&format!("video probe failed for {rel_path:?}"), e))?;
+    let json = serde_json::to_string_pretty(&info)?;
+    write_output_atomic(&path_with_suffix(&file, ".probe.json"), json.as_bytes())
+}
+
+/// `video.thumbnail` implementation: extract a PNG frame from
+/// `rel_path` and write it to `<root>/<rel_path>.thumb.png`.
+fn thumbnail_video_at(root: &Path, payload: &VideoThumbnailPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let png = crate::crates::video_engine::VideoEngine::new()
+        .thumbnail(&data, payload.at_secs, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(&format!("video thumbnail failed for {:?}", payload.path), e)
+        })?;
+    write_output_atomic(&path_with_suffix(&file, ".thumb.png"), &png)
+}
+
+/// `video.transcode` implementation: transcode `rel_path` to
+/// `target_ext` and write the result to `<root>/<rel_path>.<ext>`.
+/// Fails rather than overwrite the input if the names collide.
+fn transcode_video_at(root: &Path, payload: &VideoTranscodePayload) -> Result<(), JobError> {
+    let ext = sanitize_target_ext(&payload.target_ext)?;
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let out = path_with_suffix(&file, &format!(".{ext}"));
+    if out == file {
+        return Err(JobError::Failed(format!(
+            "video.transcode output would overwrite the input: {:?}",
+            payload.path
+        )));
+    }
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .transcode(&data, &ext, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(&format!("video transcode failed for {:?}", payload.path), e)
+        })?;
+    write_output_atomic(&out, &bytes)
+}
+
+/// `video.trim` implementation: cut `rel_path` to
+/// `[start_secs, end_secs)` and write the result to
+/// `<root>/<rel_path>.trim.<input-ext>` (`.trim` alone when the input
+/// has no extension).
+fn trim_video_at(root: &Path, payload: &VideoTrimPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    let out = path_with_suffix(&file, &format!(".trim{ext}"));
+    if out == file {
+        return Err(JobError::Failed(format!(
+            "video.trim output would overwrite the input: {:?}",
+            payload.path
+        )));
+    }
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .trim(
+            &data,
+            payload.start_secs,
+            payload.end_secs,
+            payload.reencode,
+            &video_limits(payload.max_bytes),
+        )
+        .map_err(|e| video_err(&format!("video trim failed for {:?}", payload.path), e))?;
+    write_output_atomic(&out, &bytes)
+}
+
+// ---------------------------------------------------------------------------
 // storage.gc_staging
 // ---------------------------------------------------------------------------
 
@@ -954,6 +1305,7 @@ fn sniffed_name(format: SniffedFormat) -> &'static str {
         SniffedFormat::Jpeg => "jpeg",
         SniffedFormat::Zip => "zip",
         SniffedFormat::Gif => "gif",
+        SniffedFormat::Video { .. } => "video",
         SniffedFormat::Unknown => "unknown",
     }
 }
@@ -966,6 +1318,16 @@ fn mime_for_format(format: SniffedFormat) -> Option<&'static str> {
         SniffedFormat::Jpeg => Some("image/jpeg"),
         SniffedFormat::Zip => Some("application/zip"),
         SniffedFormat::Gif => Some("image/gif"),
+        // `VideoContainer` lives in security_engine's private `sniff`
+        // module, so dispatch on its public extension accessor.
+        SniffedFormat::Video { container } => Some(match container.sniffed_extension() {
+            ".mp4" => "video/mp4",
+            ".mkv" => "video/x-matroska",
+            ".webm" => "video/webm",
+            ".avi" => "video/x-msvideo",
+            ".ts" => "video/mp2t",
+            _ => "video/mpeg",
+        }),
         SniffedFormat::Unknown => None,
     }
 }
@@ -1100,8 +1462,10 @@ impl DocumentMetadataExtractHandler {
         let artifact_size = artifact.size_bytes;
 
         mutate_metadata(&ctx.pool, &document_id, move |m| {
-            m.custom_fields
-                .insert("processing_status".into(), json!(status));
+            m.custom_fields.insert(
+                "processing_status".into(),
+                json!(normalized_processing_status(status)),
+            );
             m.custom_fields
                 .insert(META_EXTRACT_STATUS_KEY.into(), json!(status));
             m.custom_fields
@@ -1356,8 +1720,10 @@ impl DocumentIndexHandler {
         };
 
         mutate_metadata(&ctx.pool, &document_id, move |m| {
-            m.custom_fields
-                .insert("processing_status".into(), json!(status));
+            m.custom_fields.insert(
+                "processing_status".into(),
+                json!(normalized_processing_status(status)),
+            );
             m.custom_fields.insert(INDEX_STATUS_KEY.into(), json!(status));
             m.custom_fields
                 .insert("index_artifact_id".into(), json!(artifact_id));
@@ -1741,8 +2107,10 @@ impl ThumbnailGenerateHandler {
                     _ => "unavailable",
                 };
                 mutate_metadata(&ctx.pool, &document_id, move |m| {
-                    m.custom_fields
-                        .insert("processing_status".into(), json!(status));
+                    m.custom_fields.insert(
+                        "processing_status".into(),
+                        json!(normalized_processing_status(status)),
+                    );
                     m.custom_fields
                         .insert(THUMBNAIL_STATUS_KEY.into(), json!(status));
                 })
@@ -1763,7 +2131,7 @@ impl ThumbnailGenerateHandler {
             ThumbOutcome::Failed { error } => {
                 mutate_metadata(&ctx.pool, &document_id, move |m| {
                     m.custom_fields
-                        .insert("processing_status".into(), json!("error"));
+                        .insert("processing_status".into(), json!("failed"));
                     m.custom_fields
                         .insert(THUMBNAIL_STATUS_KEY.into(), json!("error"));
                     m.custom_fields
@@ -1812,7 +2180,7 @@ impl ThumbnailGenerateHandler {
                 let artifact_id = artifact.id.clone();
                 mutate_metadata(&ctx.pool, &document_id, move |m| {
                     m.custom_fields
-                        .insert("processing_status".into(), json!("generated"));
+                        .insert("processing_status".into(), json!("succeeded"));
                     m.custom_fields
                         .insert(THUMBNAIL_STATUS_KEY.into(), json!("generated"));
                     m.custom_fields
@@ -1974,930 +2342,96 @@ pub async fn enqueue_thumbnail(
 }
 
 // ---------------------------------------------------------------------------
-// document.metadata_extract / document.index / thumbnail.generate
+// video.* enqueue helpers
 // ---------------------------------------------------------------------------
+//
+// Unlike the document handlers there is no document-level status
+// tracking for video jobs — they operate on storage-root paths, not
+// document rows — so these helpers just enqueue with the documented
+// payload contract.
 
-/// Shared payload for the document-processing handlers:
-/// `{document_id, artifact_id?}`. When `artifact_id` is omitted the
-/// most recently created artifact of the document is used.
-#[derive(Debug, Deserialize)]
-struct DocumentJobPayload {
-    document_id: String,
-    #[serde(default)]
-    artifact_id: Option<String>,
-}
-
-impl DocumentJobPayload {
-    fn parse(payload: &serde_json::Value) -> Result<(Self, DocumentId), JobError> {
-        let parsed: Self = serde_json::from_value(payload.clone())?;
-        if parsed.document_id.trim().is_empty() {
-            return Err(JobError::Failed(
-                "payload.document_id must be a non-empty string".into(),
-            ));
-        }
-        let id = DocumentId::new(parsed.document_id.clone());
-        Ok((parsed, id))
-    }
-}
-
-/// Resolves the artifact a document job operates on: the explicitly
-/// named artifact, or the most recently created one. The artifact must
-/// belong to the payload's document.
-async fn resolve_job_artifact(
+/// Enqueues a `video.probe` job. Payload: `{path, max_bytes?}` — see
+/// [`VideoProbeHandler`].
+pub async fn enqueue_video_probe(
     pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
-    artifact_id: Option<&str>,
-) -> Result<DocumentArtifact, JobError> {
-    let artifact = match artifact_id {
-        Some(id) => download_artifact(pool, id)
-            .await
-            .map_err(store_err)?
-            .ok_or_else(|| JobError::Failed(format!("artifact not found: {id}")))?,
-        None => list_artifacts(pool, document_id)
-            .await
-            .map_err(store_err)?
-            .into_iter()
-            .next_back()
-            .ok_or_else(|| JobError::Failed("document has no artifacts".into()))?,
-    };
-    if artifact.document_id != *document_id {
-        return Err(JobError::Failed(format!(
-            "artifact {} does not belong to document {document_id}",
-            artifact.id
-        )));
-    }
-    Ok(artifact)
-}
-
-/// Maps a `local://` storage URI to the backend object name. Other
-/// schemes are rejected — these handlers only read local storage.
-fn object_name_from_uri(uri: &str) -> Result<String, JobError> {
-    uri.strip_prefix("local://")
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            JobError::Failed(format!("unsupported storage_uri scheme: {uri:?}"))
-        })
-}
-
-fn storage_fs(config: &StorageConfig) -> Result<FaultInjectingFs, JobError> {
-    FaultInjectingFs::new(config.clone())
-        .map_err(|e| JobError::Failed(format!("storage init failed: {e}")))
-}
-
-/// Reads at most `cap` bytes of object `name` through the streaming
-/// backend. Returns `Ok(None)` when the object exceeds `cap` — the
-/// caller records `skipped_too_large` rather than buffering it.
-fn read_object_capped(
-    fs: &mut FaultInjectingFs,
-    name: &str,
-    cap: u64,
-) -> Result<Option<Vec<u8>>, JobError> {
-    let mut reader = fs
-        .open_reader(name)
-        .map_err(|e| JobError::Failed(format!("storage read failed for {name:?}: {e}")))?;
-    let mut buf = Vec::new();
-    (&mut reader)
-        .take(cap.saturating_add(1))
-        .read_to_end(&mut buf)
-        .map_err(|e| JobError::Failed(format!("storage read failed for {name:?}: {e}")))?;
-    if buf.len() as u64 > cap {
-        return Ok(None);
-    }
-    Ok(Some(buf))
-}
-
-/// Reads the artifact's bytes, enforcing [`MAX_PROCESSING_BYTES`].
-/// `Ok(None)` means "too large — record skipped_too_large".
-fn read_artifact_bytes(
-    fs: &mut FaultInjectingFs,
-    artifact: &DocumentArtifact,
-) -> Result<Option<Vec<u8>>, JobError> {
-    if artifact.size_bytes > MAX_PROCESSING_BYTES {
-        return Ok(None);
-    }
-    let name = object_name_from_uri(&artifact.storage_uri)?;
-    read_object_capped(fs, &name, MAX_PROCESSING_BYTES)
-}
-
-/// Marks the start of a processing op: `processing_status = "running"`
-/// plus a [`DocumentAuditEventType::ProcessingStarted`] event.
-async fn begin_processing(
-    pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
-) -> Result<(), JobError> {
-    set_custom_field(pool, document_id, "processing_status", &json!("running"))
-        .await
-        .map_err(store_err)?;
-    record_event(
-        pool,
-        document_id,
-        None,
-        DocumentAuditEventType::ProcessingStarted,
-        None,
-    )
-    .await
-    .map_err(store_err)
-}
-
-/// Records a terminal processing outcome: `processing_status` plus the
-/// per-op `{op}_status` custom field, and the matching audit event.
-async fn finish_processing(
-    pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
-    op: &str,
-    status: &str,
-    audit: DocumentAuditEventType,
-) -> Result<(), JobError> {
-    set_custom_field(pool, document_id, "processing_status", &json!(status))
-        .await
-        .map_err(store_err)?;
-    set_custom_field(
-        pool,
-        document_id,
-        &format!("{op}_status"),
-        &json!(status),
-    )
-    .await
-    .map_err(store_err)?;
-    record_event(
-        pool,
-        document_id,
-        None,
-        audit,
-        Some(&json!({ "operation": op, "status": status })),
-    )
-    .await
-    .map_err(store_err)
-}
-
-/// Terminal statuses shared by all document-processing handlers.
-mod op_status {
-    pub const SUCCEEDED: &str = "succeeded";
-    pub const FAILED: &str = "failed";
-    pub const UNSUPPORTED: &str = "unsupported";
-    pub const UNAVAILABLE: &str = "unavailable";
-    pub const SKIPPED_TOO_LARGE: &str = "skipped_too_large";
-}
-
-/// Runs the shared preamble for a document job: parse payload, verify
-/// the document exists, mark processing as running, resolve + size-check
-/// the target artifact. Returns the artifact bytes, or `None` when the
-/// artifact exceeded [`MAX_PROCESSING_BYTES`] (caller records
-/// `skipped_too_large`).
-async fn load_job_input(
-    ctx: &JobContext,
-    fs: &mut FaultInjectingFs,
-    job: &Job,
-) -> Result<Option<(DocumentId, DocumentArtifact, Vec<u8>)>, JobError> {
-    let (payload, document_id) = DocumentJobPayload::parse(&job.payload)?;
-    get_document(&ctx.pool, &document_id)
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| JobError::Failed(format!("document not found: {document_id}")))?;
-    begin_processing(&ctx.pool, &document_id).await?;
-    let artifact = resolve_job_artifact(&ctx.pool, &document_id, payload.artifact_id.as_deref())
-        .await?;
-    match read_artifact_bytes(fs, &artifact)? {
-        Some(bytes) => Ok(Some((document_id, artifact, bytes))),
-        None => Ok(None),
-    }
-}
-
-/// Records the failure-side bookkeeping when a handler returns `Err`:
-/// on the final attempt (`attempts + 1 >= max_attempts`) the document
-/// gets `processing_status = "failed"` and a `ProcessingFailed` audit
-/// event; intermediate retries stay `running` — the job row remains
-/// the authoritative retry state.
-async fn note_failure(ctx: &JobContext, job: &Job, document_id: Option<&DocumentId>) {
-    let Some(document_id) = document_id else { return };
-    if job.attempts.saturating_add(1) < job.max_attempts {
-        return;
-    }
-    let _ = finish_processing(
-        &ctx.pool,
-        document_id,
-        "processing",
-        op_status::FAILED,
-        DocumentAuditEventType::ProcessingFailed,
-    )
-    .await;
-}
-
-/// `document.metadata_extract` — sniffs the target artifact and, for
-/// PDFs, writes title/author/producer/page-count into document
-/// metadata. Non-PDF artifacts are recorded `unsupported`.
-pub struct DocumentMetadataExtractHandler {
-    storage: StorageConfig,
-}
-
-impl DocumentMetadataExtractHandler {
-    /// Builds the handler from the application's storage configuration.
-    pub fn from_app_config() -> Result<Self, crate::config::ConfigError> {
-        Ok(Self::with_storage_config(
-            AppConfig::load_lenient()?.to_storage_config(),
-        ))
-    }
-
-    /// Builds the handler around an explicit storage config (tests).
-    pub fn with_storage_config(storage: StorageConfig) -> Self {
-        Self { storage }
-    }
-}
-
-impl JobHandler for DocumentMetadataExtractHandler {
-    fn handle<'a>(
-        &'a self,
-        ctx: &'a JobContext,
-        job: &'a Job,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let mut fs = storage_fs(&self.storage)?;
-            let input = load_job_input(ctx, &mut fs, job).await;
-            let (document_id, _artifact, bytes) = match input {
-                Ok(Some(input)) => input,
-                Ok(None) => {
-                    // Too-large artifact: still need the document id for
-                    // status bookkeeping — re-parse cheaply.
-                    let (_, document_id) =
-                        DocumentJobPayload::parse(&job.payload)?;
-                    let id = DocumentId::new(document_id.document_id.clone());
-                    finish_processing(
-                        &ctx.pool,
-                        &id,
-                        "metadata_extract",
-                        op_status::SKIPPED_TOO_LARGE,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    note_failure(ctx, job, None).await;
-                    return Err(e);
-                }
-            };
-
-            let result = extract_metadata_into_store(ctx, &document_id, &bytes).await;
-            match result {
-                Ok(()) => {
-                    finish_processing(
-                        &ctx.pool,
-                        &document_id,
-                        "metadata_extract",
-                        op_status::SUCCEEDED,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await
-                }
-                Err(e) if is_unsupported_format(&e) => {
-                    finish_processing(
-                        &ctx.pool,
-                        &document_id,
-                        "metadata_extract",
-                        op_status::UNSUPPORTED,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await
-                }
-                Err(e) => {
-                    note_failure(ctx, job, Some(&document_id)).await;
-                    Err(e)
-                }
-            }
-        })
-    }
-}
-
-/// Runs the PDF metadata extraction and merges the result into the
-/// document's stored metadata (existing custom fields are preserved).
-async fn extract_metadata_into_store(
-    ctx: &JobContext,
-    document_id: &DocumentId,
-    bytes: &[u8],
-) -> Result<(), JobError> {
-    if sniff_format(bytes) != SniffedFormat::Pdf {
-        return Err(unsupported_format());
-    }
-
-    let info = crate::crates::pdf_engine::PdfEngine::new()
-        .inspect(bytes)
-        .map_err(|e| JobError::Failed(format!("pdf inspect failed: {e}")))?;
-
-    let mut metadata = get_document_metadata(&ctx.pool, document_id)
-        .await
-        .map_err(store_err)?
-        .unwrap_or_else(|| DocumentMetadata {
-            document_id: document_id.clone(),
-            title: None,
-            author: None,
-            subject: None,
-            language: None,
-            keywords: Vec::new(),
-            custom_fields: serde_json::Map::new(),
-        });
-
-    // PDF Info-dict fields win when present; existing values are kept
-    // otherwise so re-runs never erase metadata set by other tools.
-    if info.title.is_some() {
-        metadata.title = info.title.clone();
-    }
-    if info.author.is_some() {
-        metadata.author = info.author.clone();
-    }
-    metadata.custom_fields.insert(
-        "format".to_string(),
-        json!("pdf"),
-    );
-    metadata.custom_fields.insert(
-        "page_count".to_string(),
-        json!(info.page_count),
-    );
-    metadata.custom_fields.insert(
-        "encrypted".to_string(),
-        json!(info.encrypted),
-    );
-    metadata.custom_fields.insert(
-        "file_size_bytes".to_string(),
-        json!(info.file_size_bytes),
-    );
-    if let Some(v) = &info.creator {
-        metadata.custom_fields.insert("creator".to_string(), json!(v));
-    }
-    if let Some(v) = &info.producer {
-        metadata.custom_fields.insert("producer".to_string(), json!(v));
-    }
-
-    upsert_document_metadata(&ctx.pool, &metadata)
-        .await
-        .map_err(store_err)
-}
-
-/// `document.index` — extracts the PDF text layer into the `index`
-/// metadata custom field (excerpt + sha256 + counts). Non-PDF
-/// artifacts are recorded `unsupported`.
-pub struct DocumentIndexHandler {
-    storage: StorageConfig,
-}
-
-impl DocumentIndexHandler {
-    /// Builds the handler from the application's storage configuration.
-    pub fn from_app_config() -> Result<Self, crate::config::ConfigError> {
-        Ok(Self::with_storage_config(
-            AppConfig::load_lenient()?.to_storage_config(),
-        ))
-    }
-
-    /// Builds the handler around an explicit storage config (tests).
-    pub fn with_storage_config(storage: StorageConfig) -> Self {
-        Self { storage }
-    }
-}
-
-impl JobHandler for DocumentIndexHandler {
-    fn handle<'a>(
-        &'a self,
-        ctx: &'a JobContext,
-        job: &'a Job,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let mut fs = storage_fs(&self.storage)?;
-            let input = load_job_input(ctx, &mut fs, job).await;
-            let (document_id, _artifact, bytes) = match input {
-                Ok(Some(input)) => input,
-                Ok(None) => {
-                    let (_, document_id) = DocumentJobPayload::parse(&job.payload)?;
-                    let id = DocumentId::new(document_id.document_id.clone());
-                    finish_processing(
-                        &ctx.pool,
-                        &id,
-                        "index",
-                        op_status::SKIPPED_TOO_LARGE,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    note_failure(ctx, job, None).await;
-                    return Err(e);
-                }
-            };
-
-            let result = index_document_text(ctx, &document_id, &bytes).await;
-            match result {
-                Ok(()) => {
-                    finish_processing(
-                        &ctx.pool,
-                        &document_id,
-                        "index",
-                        op_status::SUCCEEDED,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await
-                }
-                Err(e) => {
-                    if is_unsupported_format(&e) {
-                        finish_processing(
-                            &ctx.pool,
-                            &document_id,
-                            "index",
-                            op_status::UNSUPPORTED,
-                            DocumentAuditEventType::ProcessingCompleted,
-                        )
-                        .await
-                    } else {
-                        note_failure(ctx, job, Some(&document_id)).await;
-                        Err(e)
-                    }
-                }
-            }
-        })
-    }
-}
-
-/// Marker prefix for the "format not supported" job error.
-const UNSUPPORTED_FORMAT: &str = "unsupported document format";
-
-fn unsupported_format() -> JobError {
-    JobError::Failed(UNSUPPORTED_FORMAT.to_string())
-}
-
-fn is_unsupported_format(e: &JobError) -> bool {
-    matches!(e, JobError::Failed(msg) if msg == UNSUPPORTED_FORMAT)
-}
-
-/// Extracts the PDF text layer and stores it under the `index` custom
-/// field: `{excerpt, sha256, characters, words}`. The excerpt is capped
-/// at [`INDEX_EXCERPT_CHARS`]; counts/hash always cover the full text.
-async fn index_document_text(
-    ctx: &JobContext,
-    document_id: &DocumentId,
-    bytes: &[u8],
-) -> Result<(), JobError> {
-    if sniff_format(bytes) != SniffedFormat::Pdf {
-        return Err(unsupported_format());
-    }
-
-    let pages = crate::crates::pdf_engine::PdfEngine::new()
-        .extract_text(bytes, None)
-        .map_err(|e| JobError::Failed(format!("pdf text extraction failed: {e}")))?;
-
-    let text = pages
-        .iter()
-        .map(|p| p.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let words = text.split_whitespace().count() as u64;
-    let characters = text.chars().count() as u64;
-    let sha256 = hex_lower(&Sha256::digest(text.as_bytes()));
-    let excerpt: String = text.chars().take(INDEX_EXCERPT_CHARS).collect();
-
-    set_custom_field(
-        &ctx.pool,
-        document_id,
-        "index",
-        &json!({
-            "excerpt": excerpt,
-            "sha256": sha256,
-            "characters": characters,
-            "words": words,
-        }),
-    )
-    .await
-    .map_err(store_err)?;
-    Ok(())
-}
-
-/// `thumbnail.generate` — extracts the document's embedded thumbnail
-/// (page `/Thumb` or first image XObject) and stores it under
-/// `thumbnails/{document_id}/thumbnail.{ext}`.
-pub struct ThumbnailGenerateHandler {
-    storage: StorageConfig,
-}
-
-impl ThumbnailGenerateHandler {
-    /// Builds the handler from the application's storage configuration.
-    pub fn from_app_config() -> Result<Self, crate::config::ConfigError> {
-        Ok(Self::with_storage_config(
-            AppConfig::load_lenient()?.to_storage_config(),
-        ))
-    }
-
-    /// Builds the handler around an explicit storage config (tests).
-    pub fn with_storage_config(storage: StorageConfig) -> Self {
-        Self { storage }
-    }
-}
-
-impl JobHandler for ThumbnailGenerateHandler {
-    fn handle<'a>(
-        &'a self,
-        ctx: &'a JobContext,
-        job: &'a Job,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let mut fs = storage_fs(&self.storage)?;
-            let input = load_job_input(ctx, &mut fs, job).await;
-            let (document_id, _artifact, bytes) = match input {
-                Ok(Some(input)) => input,
-                Ok(None) => {
-                    let (_, document_id) = DocumentJobPayload::parse(&job.payload)?;
-                    let id = DocumentId::new(document_id.document_id.clone());
-                    finish_processing(
-                        &ctx.pool,
-                        &id,
-                        "thumbnail",
-                        op_status::SKIPPED_TOO_LARGE,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    note_failure(ctx, job, None).await;
-                    return Err(e);
-                }
-            };
-
-            match generate_thumbnail(ctx, &mut fs, &document_id, &bytes).await {
-                Ok(()) => {
-                    finish_processing(
-                        &ctx.pool,
-                        &document_id,
-                        "thumbnail",
-                        op_status::SUCCEEDED,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await
-                }
-                Err(ThumbnailOutcome::Unavailable) => {
-                    finish_processing(
-                        &ctx.pool,
-                        &document_id,
-                        "thumbnail",
-                        op_status::UNAVAILABLE,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await
-                }
-                Err(ThumbnailOutcome::Unsupported) => {
-                    finish_processing(
-                        &ctx.pool,
-                        &document_id,
-                        "thumbnail",
-                        op_status::UNSUPPORTED,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await
-                }
-                Err(ThumbnailOutcome::Failed(e)) => {
-                    note_failure(ctx, job, Some(&document_id)).await;
-                    Err(e)
-                }
-            }
-        })
-    }
-}
-
-/// Outcome of a thumbnail attempt that isn't a plain success/failure.
-enum ThumbnailOutcome {
-    /// No embedded thumbnail could be found or decoded.
-    Unavailable,
-    /// The artifact isn't a PDF.
-    Unsupported,
-    /// A real error (storage, parse, encode).
-    Failed(JobError),
-}
-
-impl From<JobError> for ThumbnailOutcome {
-    fn from(e: JobError) -> Self {
-        Self::Failed(e)
-    }
-}
-
-/// Extracts and stores the document thumbnail. Deterministic object
-/// name → retries overwrite the same bytes (idempotent).
-async fn generate_thumbnail(
-    ctx: &JobContext,
-    fs: &mut FaultInjectingFs,
-    document_id: &DocumentId,
-    bytes: &[u8],
-) -> Result<(), ThumbnailOutcome> {
-    if sniff_format(bytes) != SniffedFormat::Pdf {
-        return Err(ThumbnailOutcome::Unsupported);
-    }
-    let (image, ext) =
-        extract_pdf_thumbnail(bytes).map_err(ThumbnailOutcome::Failed)?
-            .ok_or(ThumbnailOutcome::Unavailable)?;
-
-    let name = format!("thumbnails/{document_id}/thumbnail{ext}");
-    let mut writer = fs
-        .begin_upload(&name)
-        .map_err(|e| ThumbnailOutcome::Failed(JobError::Failed(format!("storage init failed: {e}"))))?;
-    for chunk in image.chunks(UPLOAD_CHUNK_BYTES) {
-        writer
-            .write_chunk(chunk)
-            .map_err(|e| ThumbnailOutcome::Failed(JobError::Failed(format!("thumbnail upload failed: {e}"))))?;
-    }
-    writer
-        .commit()
-        .map_err(|e| ThumbnailOutcome::Failed(JobError::Failed(format!("thumbnail commit failed: {e}"))))?;
-
-    set_custom_field(
-        &ctx.pool,
-        document_id,
-        "thumbnail_uri",
-        &json!(format!("local://{name}")),
-    )
-    .await
-    .map_err(|e| ThumbnailOutcome::Failed(store_err(e)))?;
-    Ok(())
-}
-
-/// Finds and decodes the best embedded thumbnail in a PDF: the first
-/// page's `/Thumb` entry, falling back to the first image XObject in
-/// that page's resources. Returns `(encoded_bytes, extension)`.
-fn extract_pdf_thumbnail(pdf: &[u8]) -> Result<Option<(Vec<u8>, &'static str)>, JobError> {
-    let doc = lopdf::Document::load_mem(pdf)
-        .map_err(|e| JobError::Failed(format!("pdf parse failed: {e}")))?;
-    if doc.trailer.has(b"Encrypt") {
-        return Ok(None);
-    }
-    let pages = doc.get_pages();
-    let Some(first_page_id) = pages.values().next().copied() else {
-        return Ok(None);
-    };
-    let Ok(page) = doc.get_dictionary(first_page_id) else {
-        return Ok(None);
-    };
-
-    // 1) Explicit /Thumb entry on the page.
-    if let Ok(thumb) = page.get(b"Thumb")
-        && let Ok((_, obj)) = doc.dereference(thumb)
-        && let Ok(stream) = obj.as_stream()
-        && let Some(found) = image_stream_to_file(stream)?
-    {
-        return Ok(Some(found));
-    }
-
-    // 2) First image XObject in the page's /Resources.
-    if let Ok(resources) = page.get(b"Resources")
-        && let Ok((_, res_obj)) = doc.dereference(resources)
-        && let Ok(res_dict) = res_obj.as_dict()
-        && let Ok(xobjects) = res_dict.get(b"XObject")
-        && let Ok((_, xo_obj)) = doc.dereference(xobjects)
-        && let Ok(xo_dict) = xo_obj.as_dict()
-    {
-        for (_, xobj) in xo_dict.iter() {
-            if let Ok((_, obj)) = doc.dereference(xobj)
-                && let Ok(stream) = obj.as_stream()
-                && stream
-                    .dict
-                    .get(b"Subtype")
-                    .is_ok_and(|s| s.as_name() == Ok(b"Image"))
-                && let Some(found) = image_stream_to_file(stream)?
-            {
-                return Ok(Some(found));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Converts one PDF image stream into a storable file: already-encoded
-/// formats (JPEG/JPX/CCITT) pass through with their extension; raw
-/// sample data (FlateDecode) is decoded to PNG via the `image` crate.
-fn image_stream_to_file(
-    stream: &lopdf::Stream,
-) -> Result<Option<(Vec<u8>, &'static str)>, JobError> {
-    // Filter may be a name or an array of names; anything more complex
-    // (multiple filters, decode parms we don't model) is declined.
-    let filter = match stream.dict.get(b"Filter") {
-        Ok(lopdf::Object::Name(n)) => Some(n.as_slice().to_vec()),
-        Ok(lopdf::Object::Array(items)) if items.len() == 1 => items[0]
-            .as_name()
-            .ok()
-            .map(|n| n.as_slice().to_vec()),
-        Ok(_) => return Ok(None),
-        Err(_) => None,
-    };
-
-    // Already-file formats: the (still-filtered) stream content is the
-    // file itself.
-    if let Some(name) = filter.as_deref() {
-        let ext = match name {
-            b"DCTDecode" => Some(".jpg"),
-            b"JPXDecode" => Some(".jp2"),
-            b"CCITTFaxDecode" => Some(".ccitt"),
-            b"JBIG2Decode" => Some(".jbig2"),
-            _ => None,
-        };
-        if let Some(ext) = ext {
-            if stream.content.is_empty() || stream.content.len() > MAX_THUMBNAIL_DECODED_BYTES {
-                return Ok(None);
-            }
-            return Ok(Some((stream.content.clone(), ext)));
-        }
-    }
-
-    // Raw sample path: only plain FlateDecode (or unfiltered) streams
-    // with trivial decode parms are supported.
-    let flate_only = filter.is_none() || filter.as_deref() == Some(b"FlateDecode");
-    if !flate_only {
-        return Ok(None);
-    }
-    if stream
-        .dict
-        .get(b"DecodeParms")
-        .is_ok_and(|dp| dp.as_dict().is_ok_and(|d| d.get(b"Predictor").is_ok()))
-    {
-        // Row predictors change the sample layout — decoding them is
-        // out of scope; report "no usable thumbnail" honestly.
-        return Ok(None);
-    }
-
-    let width = stream.dict.get(b"Width").ok().and_then(|v| v.as_i64().ok())
-        .filter(|&w| w > 0)
-        .map(|w| w as u32)
-        .ok_or_else(|| JobError::Failed("thumbnail stream missing /Width".into()))?;
-    let height = stream.dict.get(b"Height").ok().and_then(|v| v.as_i64().ok())
-        .filter(|&h| h > 0)
-        .map(|h| h as u32)
-        .ok_or_else(|| JobError::Failed("thumbnail stream missing /Height".into()))?;
-    let bpc = stream
-        .dict
-        .get(b"BitsPerComponent")
-        .ok()
-        .and_then(|v| v.as_i64().ok())
-        .unwrap_or(8);
-    if bpc != 8 {
-        return Ok(None);
-    }
-    let components = color_space_components(stream)?;
-    let Some(components) = components else {
-        return Ok(None);
-    };
-    if u64::from(width) * u64::from(height) > MAX_THUMBNAIL_PIXELS {
-        return Ok(None);
-    }
-
-    let samples = stream
-        .decompressed_content_with_limit(MAX_THUMBNAIL_DECODED_BYTES)
-        .map_err(|e| JobError::Failed(format!("thumbnail decode failed: {e}")))?;
-    let expected = width as usize * height as usize * components;
-    if samples.len() < expected {
-        return Ok(None);
-    }
-    let samples = &samples[..expected];
-
-    let mut png = std::io::Cursor::new(Vec::new());
-    match components {
-        1 => {
-            let img = image::GrayImage::from_raw(width, height, samples.to_vec())
-                .ok_or_else(|| JobError::Failed("thumbnail buffer size mismatch".into()))?;
-            image::DynamicImage::ImageLuma8(img)
-                .write_to(&mut png, image::ImageFormat::Png)
-                .map_err(|e| JobError::Failed(format!("thumbnail png encode failed: {e}")))?;
-        }
-        3 => {
-            let img = image::RgbImage::from_raw(width, height, samples.to_vec())
-                .ok_or_else(|| JobError::Failed("thumbnail buffer size mismatch".into()))?;
-            image::DynamicImage::ImageRgb8(img)
-                .write_to(&mut png, image::ImageFormat::Png)
-                .map_err(|e| JobError::Failed(format!("thumbnail png encode failed: {e}")))?;
-        }
-        _ => return Ok(None),
-    }
-    Ok(Some((png.into_inner(), ".png")))
-}
-
-/// Maps a PDF `/ColorSpace` entry to a component count for 8-bpc
-/// device spaces. Returns `None` for anything else (ICCBased,
-/// Indexed, Separation, Pattern, ...).
-fn color_space_components(stream: &lopdf::Stream) -> Result<Option<usize>, JobError> {
-    let cs = match stream.dict.get(b"ColorSpace") {
-        Ok(v) => v,
-        Err(_) => return Ok(Some(1)), // image XObjects default to DeviceGray
-    };
-    let name = match cs {
-        lopdf::Object::Name(n) => Some(n.as_slice()),
-        lopdf::Object::Array(items) => items
-            .first()
-            .and_then(|o| o.as_name().ok())
-            .map(|n| n.as_slice()),
-        _ => None,
-    };
-    Ok(match name {
-        Some(b"DeviceGray") | Some(b"G") => Some(1),
-        Some(b"DeviceRGB") | Some(b"RGB") => Some(3),
-        _ => None,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// enqueue_* producer helpers
-// ---------------------------------------------------------------------------
-
-/// Builds the `document.ingest` payload, enqueues the job, and stamps
-/// `processing_status = "queued"` (best-effort). Bytes are base64'd
-/// into `content_b64`.
-pub async fn enqueue_ingest(
-    pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
-    file_name: &str,
-    mime_type: Option<&str>,
-    bytes: &[u8],
-    default_max_attempts: u32,
+    path: &str,
+    max_bytes: Option<u64>,
 ) -> Result<Job, JobError> {
-    let job = enqueue(
-        pool,
-        &NewJob {
-            kind: DOCUMENT_INGEST_KIND.to_string(),
-            payload: json!({
-                "document_id": document_id.as_str(),
-                "content_b64": B64.encode(bytes),
-                "file_name": file_name,
-                "mime_type": mime_type,
-            }),
-            priority: 0,
-            run_at: None,
-            max_attempts: None,
-        },
-        default_max_attempts,
-    )
-    .await?;
-    stamp_queued(pool, document_id).await;
-    Ok(job)
+    enqueue_video_job(pool, VIDEO_PROBE_KIND, video_path_payload(path, max_bytes, &[])).await
 }
 
-/// Enqueues `document.metadata_extract` for `document_id`
-/// (`artifact_id` optional — most recent artifact when `None`).
-pub async fn enqueue_metadata_extract(
+/// Enqueues a `video.thumbnail` job. Payload: `{path, at_secs?,
+/// max_bytes?}` — see [`VideoThumbnailHandler`].
+pub async fn enqueue_video_thumbnail(
     pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
-    artifact_id: Option<&str>,
-    default_max_attempts: u32,
+    path: &str,
+    at_secs: Option<f64>,
+    max_bytes: Option<u64>,
 ) -> Result<Job, JobError> {
-    enqueue_document_op(
-        pool,
-        DOCUMENT_METADATA_EXTRACT_KIND,
-        document_id,
-        artifact_id,
-        default_max_attempts,
-    )
-    .await
+    let mut extra = Vec::new();
+    if let Some(secs) = at_secs {
+        extra.push(("at_secs", json!(secs)));
+    }
+    enqueue_video_job(pool, VIDEO_THUMBNAIL_KIND, video_path_payload(path, max_bytes, &extra)).await
 }
 
-/// Enqueues `document.index` for `document_id`.
-pub async fn enqueue_index(
+/// Enqueues a `video.transcode` job. Payload: `{path, target_ext,
+/// max_bytes?}` — see [`VideoTranscodeHandler`].
+pub async fn enqueue_video_transcode(
     pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
-    artifact_id: Option<&str>,
-    default_max_attempts: u32,
+    path: &str,
+    target_ext: &str,
+    max_bytes: Option<u64>,
 ) -> Result<Job, JobError> {
-    enqueue_document_op(
-        pool,
-        DOCUMENT_INDEX_KIND,
-        document_id,
-        artifact_id,
-        default_max_attempts,
-    )
-    .await
+    let mut payload = video_path_payload(path, max_bytes, &[]);
+    payload["target_ext"] = json!(target_ext);
+    enqueue_video_job(pool, VIDEO_TRANSCODE_KIND, payload).await
 }
 
-/// Enqueues `thumbnail.generate` for `document_id`.
-pub async fn enqueue_thumbnail(
+/// Enqueues a `video.trim` job. Payload: `{path, start_secs,
+/// end_secs?, reencode?, max_bytes?}` — see [`VideoTrimHandler`].
+pub async fn enqueue_video_trim(
     pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
-    artifact_id: Option<&str>,
-    default_max_attempts: u32,
+    path: &str,
+    start_secs: f64,
+    end_secs: Option<f64>,
+    reencode: bool,
+    max_bytes: Option<u64>,
 ) -> Result<Job, JobError> {
-    enqueue_document_op(
-        pool,
-        THUMBNAIL_GENERATE_KIND,
-        document_id,
-        artifact_id,
-        default_max_attempts,
-    )
-    .await
+    let mut extra = vec![
+        ("start_secs", json!(start_secs)),
+        ("reencode", json!(reencode)),
+    ];
+    if let Some(end) = end_secs {
+        extra.push(("end_secs", json!(end)));
+    }
+    enqueue_video_job(pool, VIDEO_TRIM_KIND, video_path_payload(path, max_bytes, &extra)).await
 }
 
-async fn enqueue_document_op(
+/// Builds the shared `{path, max_bytes?}` portion of a `video.*`
+/// payload plus any operation-specific extra fields.
+fn video_path_payload(
+    path: &str,
+    max_bytes: Option<u64>,
+    extra: &[(&str, serde_json::Value)],
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({ "path": path });
+    if let Some(max) = max_bytes {
+        payload["max_bytes"] = json!(max);
+    }
+    for (key, value) in extra {
+        payload[*key] = value.clone();
+    }
+    payload
+}
+
+/// Enqueues a `video.*` job with the standard retry policy.
+async fn enqueue_video_job(
     pool: &sqlx::SqlitePool,
     kind: &str,
-    document_id: &DocumentId,
-    artifact_id: Option<&str>,
-    default_max_attempts: u32,
+    payload: serde_json::Value,
 ) -> Result<Job, JobError> {
-    let mut payload = json!({ "document_id": document_id.as_str() });
-    if let Some(id) = artifact_id {
-        payload["artifact_id"] = json!(id);
-    }
-    let job = enqueue(
+    enqueue(
         pool,
         &NewJob {
             kind: kind.to_string(),
@@ -2906,21 +2440,9 @@ async fn enqueue_document_op(
             run_at: None,
             max_attempts: None,
         },
-        default_max_attempts,
+        DEFAULT_MAX_ATTEMPTS,
     )
-    .await?;
-    stamp_queued(pool, document_id).await;
-    Ok(job)
-}
-
-/// Best-effort `processing_status = "queued"` stamp — producers must
-/// never fail just because the status field couldn't be written.
-async fn stamp_queued(pool: &sqlx::SqlitePool, document_id: &DocumentId) {
-    if let Err(e) = set_custom_field(pool, document_id, "processing_status", &json!("queued"))
-        .await
-    {
-        tracing::warn!(error = %e, "failed to stamp processing_status=queued");
-    }
+    .await
 }
 
 #[cfg(test)]
@@ -3210,6 +2732,167 @@ mod tests {
                 "expected {bad:?} to be rejected"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // video.* handlers
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn video_payloads_parse_with_defaults() {
+        let p: VideoPathPayload =
+            serde_json::from_value(json!({"path": "media/clip.mp4"})).unwrap();
+        assert_eq!(p.path, "media/clip.mp4");
+        assert_eq!(p.max_bytes, DEFAULT_VIDEO_MAX_BYTES);
+
+        let p: VideoThumbnailPayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "at_secs": 2.5}),
+        )
+        .unwrap();
+        assert_eq!(p.at_secs, Some(2.5));
+        assert_eq!(p.max_bytes, DEFAULT_VIDEO_MAX_BYTES);
+
+        let p: VideoTranscodePayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "target_ext": "webm"}),
+        )
+        .unwrap();
+        assert_eq!(p.target_ext, "webm");
+
+        let p: VideoTrimPayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "start_secs": 1.0, "end_secs": 3.0, "reencode": true}),
+        )
+        .unwrap();
+        assert_eq!(p.start_secs, 1.0);
+        assert_eq!(p.end_secs, Some(3.0));
+        assert!(p.reencode);
+
+        // Required fields are enforced.
+        assert!(serde_json::from_value::<VideoTrimPayload>(
+            json!({"path": "clip.mp4"})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<VideoTranscodePayload>(
+            json!({"path": "clip.mp4"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn video_handlers_reject_path_escapes() {
+        let root = PathBuf::from("/storage");
+        for bad in ["", "../clip.mp4", "/abs/clip.mp4", "a/../../clip.mp4"] {
+            assert!(
+                probe_video_at(&root, bad, DEFAULT_VIDEO_MAX_BYTES).is_err(),
+                "probe should reject {bad:?}"
+            );
+            assert!(
+                thumbnail_video_at(
+                    &root,
+                    &VideoThumbnailPayload {
+                        path: bad.into(),
+                        at_secs: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "thumbnail should reject {bad:?}"
+            );
+            assert!(
+                transcode_video_at(
+                    &root,
+                    &VideoTranscodePayload {
+                        path: bad.into(),
+                        target_ext: "webm".into(),
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "transcode should reject {bad:?}"
+            );
+            assert!(
+                trim_video_at(
+                    &root,
+                    &VideoTrimPayload {
+                        path: bad.into(),
+                        start_secs: 0.0,
+                        end_secs: None,
+                        reencode: false,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "trim should reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn video_transcode_rejects_unsafe_target_ext() {
+        let root = PathBuf::from("/storage");
+        for bad in ["", "  ", "../x", "a/b", "a.b", "mp4;rm", "-"] {
+            let r = transcode_video_at(
+                &root,
+                &VideoTranscodePayload {
+                    path: "clip.mp4".into(),
+                    target_ext: bad.into(),
+                    max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                },
+            );
+            // Unsafe ext fails at sanitize (before any file access);
+            // "-" is alphanumeric-safe? No — '-' is not alphanumeric.
+            assert!(r.is_err(), "target_ext {bad:?} should be rejected");
+        }
+        assert_eq!(sanitize_target_ext(" WebM ").unwrap(), "webm");
+        assert_eq!(sanitize_target_ext(".MP4").unwrap(), "mp4");
+    }
+
+    #[test]
+    fn video_probe_writes_report_when_ffmpeg_available() {
+        use std::process::Command;
+        // Skip when the ffmpeg toolchain isn't installed — same probe
+        // style other engine tests use.
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            return;
+        }
+        let root = temp_root();
+        let src = root.join("clip.mp4");
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=1:r=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ])
+            .arg(&src)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !generated || !src.is_file() {
+            std::fs::remove_dir_all(&root).ok();
+            return; // encoder unavailable (e.g. no libx264) — skip
+        }
+
+        probe_video_at(&root, "clip.mp4", DEFAULT_VIDEO_MAX_BYTES).unwrap();
+        let report = root.join("clip.mp4.probe.json");
+        assert!(report.is_file(), "probe report should be written");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+        assert!(parsed.is_object());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

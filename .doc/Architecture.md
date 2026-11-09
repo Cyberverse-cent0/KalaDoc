@@ -160,7 +160,8 @@ to `pending` on every poll tick. The CLI surface lives under
 `kaladoc jobs` (`worker`, `list`, `enqueue`, `cancel`, `retry`,
 `recover`); built-in handlers (`document.ingest`,
 `document.metadata_extract`, `document.index`, `thumbnail.generate`,
-`pdf.inspect`, `storage.gc_staging`, `system.ping`) are registered by
+`pdf.inspect`, `video.probe`, `video.thumbnail`, `video.transcode`,
+`video.trim`, `storage.gc_staging`, `system.ping`) are registered by
 `application::job_handlers::register_builtin`.
 Config: `[jobs]` section / `JOB_*` env vars → `AppConfig::to_job_config`.
 See `.doc/job_engine.md` for usage.
@@ -170,11 +171,24 @@ Document domain model: documents, versions, artifacts, lifecycle
 state machine, metadata, relationships, audit, and organization types.
 Pure domain layer — persistence/execution wiring is still planned.
 
+### `video_engine`
+Video/audio processing engine (`crates/video-engine`) implementing
+`ProcessingEngine` as `name = "video"`, `kind = EngineKind::Video`.
+All operations shell out to external `ffmpeg`/`ffprobe` binaries on
+`PATH` — never bundled — and are exposed via the CLI
+(`kaladoc video probe|thumbnail|trim|transcode|concat|extract-audio`)
+and job kinds (`video.probe`, `video.thumbnail`, `video.transcode`,
+`video.trim`). Registered in `EngineRegistry::builtin()` alongside the
+other engines. See `.doc/video_engine.md`.
+
 ### `deployments::require`
 Standalone deployment prerequisite checker: verifies `rust`, `cargo`, `tar`,
-`zip` are on PATH (`which`/`where`), detects OS via `std::env::consts::OS`
+`zip`, `ffmpeg`, and `ffprobe` are on PATH (`which`/`where`), detects OS via
+`std::env::consts::OS`
 and Linux distro via `/etc/os-release`, and prints per-distro install hints.
-Ships as its own binary (has its own `main`).
+Ships as its own binary (has its own `main`). `ffmpeg`/`ffprobe` are
+external binaries required by the video engine — they are detected, never
+bundled.
 
 ## Design principles
 

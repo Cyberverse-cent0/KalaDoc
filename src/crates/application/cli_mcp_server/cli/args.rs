@@ -54,6 +54,25 @@ pub enum Commands {
     /// cancel, retry, and recover interrupted work.
     #[command(subcommand)]
     Jobs(JobsArgs),
+
+    /// Discover and inspect the built-in processing engines
+    /// (convert, image, pdf, pipeline, security).
+    #[command(subcommand)]
+    Engine(EngineArgs),
+
+    /// Inspect, resize, and convert raster images.
+    #[command(subcommand)]
+    Image(ImageArgs),
+
+    /// List and run built-in processing pipelines.
+    #[command(subcommand)]
+    Pipeline(PipelineArgs),
+
+    /// Probe and process video/audio files with the ffmpeg-backed
+    /// video engine (probe, thumbnail, trim, transcode, concat,
+    /// extract-audio).
+    #[command(subcommand)]
+    Video(VideoArgs),
 }
 
 #[derive(Subcommand)]
@@ -177,6 +196,161 @@ pub enum JobsArgs {
 
     /// Reclaim jobs left in `running` state by a crashed worker.
     Recover,
+}
+
+#[derive(Subcommand)]
+pub enum EngineArgs {
+    /// List registered engines with their advertised capabilities.
+    List,
+
+    /// Show detailed capabilities for one engine.
+    Capabilities {
+        /// Engine name (e.g. `convert`, `image`, `pdf`, `pipeline`,
+        /// `security`, `video`).
+        name: String,
+    },
+
+    /// Run health checks for every registered engine.
+    Health,
+}
+
+#[derive(Subcommand)]
+pub enum ImageArgs {
+    /// Print image metadata (format, dimensions, pixel count, size).
+    Inspect {
+        /// Path to the image file.
+        file: std::path::PathBuf,
+    },
+
+    /// Resize an image to fit within a bounding box, preserving
+    /// aspect ratio. The output keeps the input format.
+    Resize {
+        /// Path to the image file.
+        file: std::path::PathBuf,
+        /// Maximum output width in pixels.
+        #[arg(long)]
+        width: Option<u32>,
+        /// Maximum output height in pixels.
+        #[arg(long)]
+        height: Option<u32>,
+        /// Output path (default: `<stem>.resized.<ext>` next to the
+        /// input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Convert an image to another format
+    /// (png, jpeg/jpg, gif, webp, bmp).
+    Convert {
+        /// Path to the image file.
+        file: std::path::PathBuf,
+        /// Target format: `png`, `jpeg`/`jpg`, `gif`, `webp`, or `bmp`.
+        target: String,
+        /// Output path (default: the input path with the target
+        /// extension).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum VideoArgs {
+    /// Print video metadata (duration, dimensions, fps, codecs,
+    /// container format, size, audio presence).
+    Probe {
+        /// Path to the video file.
+        file: std::path::PathBuf,
+    },
+
+    /// Extract a single PNG frame from a video at a given position.
+    Thumbnail {
+        /// Path to the video file.
+        file: std::path::PathBuf,
+        /// Timestamp in seconds to grab the frame from
+        /// (default: the engine picks a representative frame).
+        #[arg(long)]
+        at: Option<f64>,
+        /// Output PNG path (default: `<stem>.thumb.png` next to the
+        /// input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Trim a video to a time range. Stream-copies by default;
+    /// `--reencode` re-encodes for frame-accurate cuts.
+    Trim {
+        /// Path to the video file.
+        file: std::path::PathBuf,
+        /// Start time in seconds.
+        #[arg(long)]
+        start: f64,
+        /// End time in seconds (default: end of file).
+        #[arg(long)]
+        end: Option<f64>,
+        /// Re-encode instead of stream-copying for frame-accurate
+        /// cuts (slower).
+        #[arg(long)]
+        reencode: bool,
+        /// Output path (default: `<stem>.trimmed<same-ext>` next to
+        /// the input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Transcode a video to another container/codec
+    /// (e.g. `mkv`, `webm`, `mp4`).
+    Transcode {
+        /// Path to the video file.
+        file: std::path::PathBuf,
+        /// Target container/extension, e.g. `mkv` or `webm`.
+        target_ext: String,
+        /// Output path (default: the input path with the target
+        /// extension).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Concatenate two or more videos into a single file.
+    Concat {
+        /// Input video files, in playback order.
+        files: Vec<std::path::PathBuf>,
+        /// Target container/extension for the output, e.g. `mp4`.
+        #[arg(long)]
+        target_ext: String,
+        /// Output path (default: `concat.<ext>` next to the first
+        /// input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Extract the audio track from a video file
+    /// (mp3, wav, aac, m4a, ogg).
+    ExtractAudio {
+        /// Path to the video file.
+        file: std::path::PathBuf,
+        /// Target audio extension: `mp3`, `wav`, `aac`, `m4a`, or
+        /// `ogg`.
+        ext: String,
+        /// Output path (default: the input path with the target
+        /// extension).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PipelineArgs {
+    /// List built-in pipeline definitions.
+    List,
+
+    /// Run a built-in pipeline against a file and print the step
+    /// reports.
+    Run {
+        /// Pipeline name (e.g. `pdf.intake`, `pdf.extract-text`).
+        name: String,
+        /// Path to the input file.
+        file: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]

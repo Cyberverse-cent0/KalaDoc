@@ -1,8 +1,19 @@
-//! Remote storage backend (planned).
+//! Remote storage backend: S3-compatible object stores behind
+//! [`StorageBackend`].
 //!
-//! Will hold object-store / networked storage implementations (S3,
-//! GCS, WebDAV, ...) behind the same interface as
-//! [`crate::crates::storage::local`].
+//! See [`backend::RemoteBackend`] for the implementation and its
+//! design notes. In short:
+//!
+//! - **Protocol**: S3 path-style URLs (`{endpoint}/{bucket}/{key}`)
+//!   signed with AWS Signature Version 4 — covers AWS S3 and
+//!   S3-compatible stores (MinIO, Ceph RGW, Garage, LocalStack).
+//! - **Transport**: synchronous `ureq` (rustls) behind the
+//!   `transport::HttpTransport` trait object, so tests inject a mock
+//!   and never touch the network. Matches the synchronous trait.
+//! - **Configuration**: [`config::RemoteStorageConfig`], populated
+//!   from `KALADOC_REMOTE_*` environment variables via
+//!   [`config::RemoteStorageConfig::from_env`] — credentials are never
+//!   hardcoded.
 //!
 //! Any implementation here must satisfy
 //! [`crate::crates::storage::backend::StorageBackend`]:
@@ -23,9 +34,18 @@
 //! ([`crate::crates::storage::local::create_fs::create_fs_storage`]),
 //! formatting disks, and deterministic fault injection — have no
 //! remote analogue today and are intentionally not part of the trait.
-//! A remote backend should provide its own health-check / retry
-//! policy instead of [`FaultInjectingFs`]'s simulated faults.
+//! [`RemoteBackend`](backend::RemoteBackend) provides its own retry
+//! policy (bounded exponential backoff on transient failures) instead
+//! of [`FaultInjectingFs`]'s simulated faults.
 //!
 //! [`StorageResult`]: crate::crates::storage::local::debug_when_full::StorageResult
 //! [`StorageError`]: crate::crates::storage::local::debug_when_full::StorageError
 //! [`FaultInjectingFs`]: crate::crates::storage::local::debug_when_full::FaultInjectingFs
+
+pub mod backend;
+pub mod config;
+mod sign;
+mod transport;
+
+pub use backend::RemoteBackend;
+pub use config::RemoteStorageConfig;

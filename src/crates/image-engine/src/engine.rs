@@ -124,6 +124,7 @@ impl ProcessingEngine for ImageEngine {
                 max_pages: None,
                 max_pixels: self.limits.max_pixels,
                 max_outputs: None,
+                max_duration_secs: None,
             },
         }
     }
