@@ -3,6 +3,8 @@
 Durable, SQLite-backed job queue. Producers enqueue rows into
 `jobs_tbl`; a `JobEngine` claims due jobs and dispatches them to
 registered `JobHandler`s. Failed jobs retry with exponential backoff.
+A worker process (`kaladoc jobs worker`) owns the run loop; jobs left
+`running` by a crash are recovered on the next engine start.
 
 Source: `src/crates/job_engine/`
 
@@ -10,17 +12,92 @@ Source: `src/crates/job_engine/`
 
 | Piece | Where | Purpose |
 |---|---|---|
-| `jobs_tbl` | `store.rs` | Queue table: `kind`, JSON `payload`, `status` (`pending`/`running`/`succeeded`/`failed`), `priority`, `attempts`/`max_attempts`, `run_at`, `last_error`, `worker_id` |
+| `jobs_tbl` | `store.rs` | Queue table: `kind`, JSON `payload`, `status` (`pending`/`running`/`succeeded`/`failed`/`cancelled`), `priority`, `attempts`/`max_attempts`, `run_at`, `last_error`, `worker_id` |
 | `JobEngine` | `engine.rs` | Owns the pool + handler registry; `run()` is the poll loop |
 | `JobHandler` | `handler.rs` | Trait handlers implement; object-safe boxed-future `handle()` |
 | `JobContext` | `handler.rs` | Shared services handed to handlers (currently the `SqlitePool`) |
 | `NewJob` / `Job` | `job.rs` | Enqueue input / row shape |
+| Built-in handlers | `application/job_handlers.rs` | `document.ingest`, `system.ping`, `pdf.inspect`, `storage.gc_staging` |
 
 Claiming is atomic: `UPDATE ... WHERE id = (SELECT ... pending ...)`
 with `RETURNING`, so two engines can share one database safely.
 Handlers should still be **idempotent** — a crash between claim and
-completion leaves the job `running` until `reap_stale()` returns it to
-`pending` after `stale_after`.
+completion leaves the job `running` until recovery returns it to
+`pending` (see below).
+
+## Crash recovery
+
+Two mechanisms return interrupted work to the queue:
+
+- **Startup recovery** — `JobEngine::run()` calls
+  [`JobEngine::recover`] once before polling: every `running` row is
+  requeued as `pending` (`run_at = now`, `worker_id`/`started_at`
+  cleared, `last_error = 'recovered: interrupted by shutdown'`).
+  Single-engine-per-database is the intended deployment, so any
+  `running` row seen at startup belongs to a dead process. Do not run
+  two engines against the same database concurrently — the second
+  engine's startup recovery would steal the first engine's in-flight
+  jobs.
+- **Stale reaping** — [`JobEngine::reap_stale`] runs on every poll
+  tick and returns `running` jobs older than `stale_after` to
+  `pending`. This covers a live engine whose handler hung or was
+  orphaned without a process restart.
+
+The same primitives back the CLI: `kaladoc jobs recover` requeues
+interrupted jobs on demand, `kaladoc jobs worker` performs startup
+recovery before entering the poll loop.
+
+## CLI
+
+```
+kaladoc jobs worker                       # run the engine poll loop
+kaladoc jobs list [--status S] [--limit N]
+kaladoc jobs enqueue --kind K [--payload JSON] [--priority N]
+                            [--run-at UNIX] [--max-attempts N]
+kaladoc jobs cancel <id>                  # pending|running → cancelled
+kaladoc jobs retry <id>                   # failed → pending (attempts reset)
+kaladoc jobs recover                      # requeue all running jobs now
+```
+
+All commands support `--output json|yaml` via the global flags.
+
+## Built-in handlers
+
+`application::job_handlers::register_builtin` registers every known
+job `kind` on the engine at worker startup:
+
+| Kind | Payload | Behavior |
+|---|---|---|
+| `system.ping` | any (ignored) | No-op success; queue smoke test / health probe. |
+| `document.ingest` | `{document_id, content_b64` or `content`, `file_name?`, `mime_type?}` | Writes payload bytes into storage and registers the document artifact. |
+| `document.metadata_extract` | `{document_id, artifact_id?}` | Sniffs the format and extracts PDF metadata into document metadata. |
+| `document.index` | `{document_id, artifact_id?}` | Extracts searchable text into an `index` metadata field. |
+| `thumbnail.generate` | `{document_id, artifact_id?}` | Extracts an embedded PDF thumbnail image into storage. |
+| `pdf.inspect` | `{ "path": "<relative under storage root>", "max_bytes"?: u64 }` | Size-checks before reading (default cap 100 MiB), validates bytes via `security_engine::validate_pdf`, inspects via `pdf_engine`, writes `<path>.inspect.json` next to the input. Paths are confined to the storage root — absolute paths and `..` are rejected. |
+| `storage.gc_staging` | `{ "retention_secs"?: u64 }` | Deletes `<storage_root>/staging/` entries older than the retention window (default 86400 s). Abandoned staging objects from interrupted uploads are cleaned up here — the issue's crash-recovery requirement. |
+
+The `document.*` handlers share these properties (see the module docs
+in `job_handlers.rs` for the full contract):
+
+- `artifact_id` is optional and selects a specific artifact; when
+  omitted the most recently created artifact is used.
+- Artifact bytes are read through the streaming backend with a hard
+  cap (`MAX_PROCESSING_BYTES`, 64 MiB); larger objects are recorded as
+  `skipped_too_large` rather than read into memory.
+- They are idempotent — deterministic metadata fields and storage
+  object names are overwritten, so job retries and crash-recovery
+  replays are safe.
+- Per-document progress is reported through document metadata custom
+  fields (`processing_status`: `queued` → `running` → `succeeded` /
+  `failed` / `skipped_too_large`) backed by audit events.
+
+Producers should enqueue via the `enqueue_ingest`,
+`enqueue_metadata_extract`, `enqueue_index`, and `enqueue_thumbnail`
+helpers rather than hand-building payloads — they construct the
+documented payload contracts and stamp `processing_status = queued`.
+
+Handlers resolve the storage root via `AppConfig::load_lenient()` →
+`to_storage_config().root_dir`.
 
 ## Wiring it up
 
@@ -32,12 +109,14 @@ use std::sync::Arc;
 // 1. Config → engine
 let app = AppConfig::load()?;
 let pool = init_db::init_db_with(&app.to_db_config()).await?; // creates jobs_tbl
-let engine = Arc::new(JobEngine::new(pool.clone(), app.to_job_config()));
+let mut engine = JobEngine::new(pool.clone(), app.to_job_config());
 
-// 2. Register handlers by kind
-engine.register("document.ingest", Arc::new(DocumentIngestHandler));
+// 2. Register handlers by kind (or all built-ins at once)
+kaladoc::crates::application::job_handlers::register_builtin(&mut engine);
 
-// 3. Spawn the poll loop (abort the JoinHandle on shutdown)
+// 3. Spawn the poll loop — run() recovers interrupted jobs first
+//    (abort the JoinHandle on shutdown)
+let engine = Arc::new(engine);
 let handle = engine.clone().spawn();
 ```
 
@@ -104,21 +183,28 @@ let pending = list_jobs(&pool, Some(JobStatus::Pending), 50).await?;
 let recent  = list_jobs(&pool, None, 50).await?; // newest first
 ```
 
+Or from the shell: `kaladoc jobs list --status running`.
+
 ## Failure semantics
 
 - Handler `Err` → job returns to `pending` with
   `run_at = now + backoff_base * 2^attempts` (cap 1 h) until
   `attempts == max_attempts`, then `failed`.
 - Unknown `kind` → `failed` immediately with "no handler registered".
+- A panicking handler is caught per-poll and recorded as a job failure
+  (`handler panicked: ...`) — the engine keeps running.
 - `run_once()` returns `Ok(false)` when the queue is drained — useful
   in tests; `run()` loops forever on `poll_interval`.
+- `kaladoc jobs retry <id>` resets a `failed` job to `pending` with
+  `attempts = 0` for a fresh budget.
 
 ## Not yet implemented
 
-- No CLI commands for `jobs list/enqueue/cancel` — add under
-  `cli_mcp_server::cli::command` when needed.
-- No priorities beyond the integer column; no per-kind concurrency
-  limits; no dead-letter queue (failed rows stay in `jobs_tbl`).
+- No per-kind concurrency limits; no dead-letter queue (failed rows
+  stay in `jobs_tbl`, inspectable via `kaladoc jobs list`).
+- `jobs worker` has no graceful-drain shutdown — Ctrl+C terminates the
+  process; in-flight jobs are recovered on next start.
 - Single-writer SQLite means one engine per database is the intended
   deployment; multi-engine claiming works but throughput is bounded by
-  SQLite's writer lock.
+  SQLite's writer lock, and concurrent engines' startup recovery can
+  steal each other's `running` jobs.

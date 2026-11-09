@@ -75,6 +75,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::backend::StorageBackend;
@@ -100,7 +101,8 @@ pub const DEFAULT_MAX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 /// *all* bytes under the root. `None` means no per-object cap (the
 /// quota still applies). `max_chunk_bytes` bounds each individual
 /// `write_chunk`/`write` call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StreamLimits {
     /// Maximum total bytes accepted for one uploaded object.
     pub max_object_bytes: Option<u64>,

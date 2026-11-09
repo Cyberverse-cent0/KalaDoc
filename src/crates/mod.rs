@@ -19,3 +19,5 @@ pub mod scheduler;
 pub mod security_engine;
 pub mod shared_public;
 pub mod storage;
+#[path = "conversion-engine/src/lib.rs"]
+pub mod conversion_engine;

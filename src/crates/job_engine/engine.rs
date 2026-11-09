@@ -131,14 +131,18 @@ impl JobEngine {
 
     /// Returns `running` jobs older than `stale_after` to `pending`.
     /// Call periodically (or on startup) to recover from crashes
-    /// between claim and completion. Returns rows reclaimed.
+    /// between claim and completion. `running` rows with a NULL
+    /// `started_at` (e.g. written by an older schema or a manual
+    /// update) have no age to compare, so they are treated as stale.
+    /// Returns rows reclaimed.
     pub async fn reap_stale(&self) -> Result<u64, JobError> {
         let cutoff = now_unix() - self.config.stale_after.as_secs() as i64;
         let done = sqlx::query(
             "UPDATE jobs_tbl
              SET status = 'pending', worker_id = NULL, started_at = NULL,
-                 run_at = ?, last_error = 'reaped: stale running job'
-             WHERE status = 'running' AND started_at < ?",
+                 finished_at = NULL, run_at = ?, last_error = 'reaped: stale running job'
+             WHERE status = 'running'
+               AND (started_at IS NULL OR started_at < ?)",
         )
         .bind(now_unix())
         .bind(cutoff)
@@ -608,5 +612,141 @@ mod tests {
 
         // A second recover finds nothing.
         assert_eq!(eng.recover().await.unwrap(), 0);
+    }
+
+    /// Marks `job_id` as `running` with the given `started_at` (Unix
+    /// seconds; `None` leaves the column NULL).
+    async fn mark_running(pool: &SqlitePool, job_id: i64, started_at: Option<i64>) {
+        sqlx::query(
+            "UPDATE jobs_tbl SET status = 'running', worker_id = 'dead-worker',
+             started_at = ?, attempts = 1 WHERE id = ?",
+        )
+        .bind(started_at)
+        .bind(job_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn enqueue_test_job(eng: &JobEngine) -> Job {
+        eng.enqueue(&NewJob {
+            kind: "x".into(),
+            payload: json!({}),
+            priority: 0,
+            run_at: None,
+            max_attempts: None,
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn reap_stale_requeues_only_jobs_older_than_stale_after() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone()); // stale_after = 60s in test config
+
+        let stale = enqueue_test_job(&eng).await;
+        let fresh = enqueue_test_job(&eng).await;
+        // Engine test config uses stale_after = 60s.
+        mark_running(&pool, stale.id, Some(now_unix() - 120)).await;
+        mark_running(&pool, fresh.id, Some(now_unix())).await;
+
+        assert_eq!(eng.reap_stale().await.unwrap(), 1);
+
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        let by_id = |id: i64| jobs.iter().find(|j| j.id == id).unwrap();
+
+        let stale_job = by_id(stale.id);
+        assert_eq!(stale_job.status, JobStatus::Pending);
+        assert_eq!(stale_job.worker_id, None);
+        assert_eq!(stale_job.started_at, None);
+        assert_eq!(
+            stale_job.last_error.as_deref(),
+            Some("reaped: stale running job")
+        );
+        // Reclaimed jobs are runnable immediately.
+        assert!(stale_job.run_at <= now_unix());
+
+        // A job still within the stale window keeps running — it may
+        // belong to a live peer engine.
+        assert_eq!(by_id(fresh.id).status, JobStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn reap_stale_requeues_running_job_without_started_at() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone());
+        let job = enqueue_test_job(&eng).await;
+        // No started_at — no age to compare, so it must not be stuck
+        // in `running` forever.
+        mark_running(&pool, job.id, None).await;
+
+        assert_eq!(eng.reap_stale().await.unwrap(), 1);
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        assert_eq!(jobs[0].status, JobStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn reap_stale_leaves_terminal_and_pending_jobs_alone() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone());
+        let pending = enqueue_test_job(&eng).await;
+        let done = enqueue_test_job(&eng).await;
+        sqlx::query("UPDATE jobs_tbl SET status = 'succeeded', finished_at = ? WHERE id = ?")
+            .bind(now_unix())
+            .bind(done.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(eng.reap_stale().await.unwrap(), 0);
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        let by_id = |id: i64| jobs.iter().find(|j| j.id == id).unwrap().status;
+        assert_eq!(by_id(pending.id), JobStatus::Pending);
+        assert_eq!(by_id(done.id), JobStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn recover_then_run_once_executes_recovered_job() {
+        // End-to-end crash recovery: a job left `running` by a dead
+        // worker is requeued by recover() and then actually executes.
+        let pool = test_pool().await;
+        let mut eng = engine(pool.clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        struct Spy {
+            calls: Arc<AtomicUsize>,
+        }
+        impl JobHandler for Spy {
+            fn handle<'a>(
+                &'a self,
+                _ctx: &'a JobContext,
+                _job: &'a Job,
+            ) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'a>> {
+                Box::pin(async move {
+                    self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+        eng.register("test.spy", Arc::new(Spy { calls: calls.clone() }));
+
+        let job = eng
+            .enqueue(&NewJob {
+                kind: "test.spy".into(),
+                payload: json!({}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+        // Simulate crash after claim, before completion.
+        mark_running(&pool, job.id, Some(now_unix())).await;
+
+        assert_eq!(eng.recover().await.unwrap(), 1);
+        assert!(eng.run_once().await.unwrap());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        assert_eq!(jobs[0].status, JobStatus::Succeeded);
     }
 }

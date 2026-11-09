@@ -15,6 +15,7 @@ use crate::crates::core::engine::{
     EngineCapabilities, EngineHealth, EngineHealthStatus, EngineKind, EngineOperation,
     ProcessingEngine,
 };
+use crate::crates::conversion_engine::ConversionEngine;
 use crate::crates::pdf_engine::PdfEngine;
 use crate::crates::security_engine::SecurityEngine;
 
@@ -61,13 +62,14 @@ impl EngineRegistry {
         Self::default()
     }
 
-    /// A registry pre-populated with the built-in engines: `pdf` and
-    /// `security`. Additional engines can be added with
+    /// A registry pre-populated with the built-in engines: `pdf`,
+    /// `security`, and `convert`. Additional engines can be added with
     /// [`EngineRegistry::register`].
     pub fn builtin() -> Self {
         let mut registry = Self::new();
         registry.register(Arc::new(PdfEngine::new()));
         registry.register(Arc::new(SecurityEngine::new()));
+        registry.register(Arc::new(ConversionEngine::new()));
         registry
     }
 
@@ -366,7 +368,7 @@ mod tests {
     async fn builtin_engines_report_healthy() {
         let registry = EngineRegistry::builtin();
         let results = registry.health_all().await;
-        assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 3);
         for entry in &results {
             assert_eq!(entry.status, EngineHealthStatus::Healthy);
             assert!(entry.message.is_none());
