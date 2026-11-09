@@ -7,7 +7,7 @@ use crate::crates::core::engine::EngineLimits;
 
 use crate::crates::image_engine::error::{ImageError, ImageResult};
 
-use super::load::{encode, load_image};
+use super::load::{decode, encode};
 
 /// Rotate `input` by `degrees`, which must be exactly 90, 180, or 270.
 /// Returns the encoded bytes in the input format.
@@ -16,7 +16,7 @@ pub fn rotate(
     degrees: u16,
     limits: &EngineLimits,
 ) -> ImageResult<Vec<u8>> {
-    let loaded = load_image(input, limits)?;
+    let loaded = decode(input, limits)?;
     let rotated = match degrees {
         90 => loaded.image.rotate90(),
         180 => loaded.image.rotate180(),
@@ -27,5 +27,5 @@ pub fn rotate(
             )));
         }
     };
-    encode(&rotated, loaded.format, None)
+    encode(&rotated, loaded.format)
 }

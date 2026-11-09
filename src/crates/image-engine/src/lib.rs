@@ -18,15 +18,25 @@
 //!
 //! | Engine operation | Method | Notes |
 //! |---|---|---|
-//! | `inspect` | [`ImageEngine::inspect`] | [`ImageInfo`] report; fully decodes so truncated data is caught |
-//! | `resize`   | [`ImageEngine::resize`] / [`ImageEngine::resize_to`] | Aspect-preserving fit within a bounding box |
-//! | `convert`  | [`ImageEngine::convert`] | Re-encode to another supported format |
+//! | `inspect`          | [`ImageEngine::inspect`] | [`ImageInfo`] report; fully decodes so truncated data is caught |
+//! | `resize`           | [`ImageEngine::resize`] / [`ImageEngine::resize_to`] | Aspect-preserving fit within a bounding box |
+//! | `convert`          | [`ImageEngine::convert`] | Re-encode to another supported format |
+//! | `rotate`           | [`ImageEngine::rotate`] | Quarter turns only (90/180/270) — no arbitrary angles |
+//! | `crop`             | [`ImageEngine::crop`] | Pixel-exact rectangle crop |
+//! | `adjust`           | [`ImageEngine::adjust`] | Brightness, contrast, hue rotation |
+//! | `flip`             | [`ImageEngine::flip`] / [`ImageEngine::flip_mirror`] | Lossless mirror, no resampling |
+//! | `thumbnail`        | [`ImageEngine::thumbnail`] | Aspect-fit thumbnail; never upscales |
+//! | `compress`         | [`ImageEngine::compress`] | Quality/effort re-encode per codec |
+//! | `watermark`        | [`ImageEngine::watermark`] | Image overlay with position/opacity/scale/tile |
+//! | `validate`         | [`ImageEngine::validate`] | Header-only pre-flight check, no pixel decode |
+//! | `extract_metadata` | [`ImageEngine::metadata`] | Descriptive [`ImageMetadata`] report |
 //!
-//! Unsupported operations (`merge`, `split`, `rotate`, `compress`,
-//! `watermark`, `ocr`, `encrypt`, `decrypt`, ...) are **not**
-//! advertised in
-//! [`EngineCapabilities`](crate::crates::core::engine::EngineCapabilities) and have no entry points here — the engine
-//! never silently approximates unsupported behavior.
+//! Operations with no [`EngineOperation`] analogue are still exposed as
+//! methods but only the advertised subset appears in
+//! [`EngineCapabilities`]. Unsupported operations (`merge`, `split`,
+//! `ocr`, `encrypt`, `decrypt`, ...) are **not** advertised and have no
+//! entry points here — the engine never silently approximates
+//! unsupported behavior.
 //!
 //! # Contracts
 //!
@@ -49,4 +59,8 @@ mod tests;
 
 pub use engine::ImageEngine;
 pub use error::{ImageError, ImageResult};
-pub use ops::{ImageFormat, ImageInfo, ResizeOptions, convert, inspect, resize, resize_to};
+pub use ops::{
+    AdjustOptions, CompressOptions, FlipDirection, ImageFormat, ImageInfo, ImageMetadata,
+    ResizeOptions, ValidationReport, WatermarkOptions, WatermarkPosition, convert, flip,
+    flip_mirror, inspect, metadata, resize, resize_to, thumbnail, validate,
+};
