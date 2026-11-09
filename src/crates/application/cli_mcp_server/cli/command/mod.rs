@@ -1,0 +1,14 @@
+//! Command handlers — one module per command group.
+//!
+//! Handlers return the process exit code (`0` on success) or a
+//! [`CliError`]. JSON results go through [`Context::emit_json`]; table
+//! output is printed directly. Diagnostics always go to stderr.
+
+pub mod auth;
+pub mod config;
+pub mod doctor;
+pub mod init;
+pub mod user;
+pub mod version;
+
+pub(crate) use super::{CliError, Context};
