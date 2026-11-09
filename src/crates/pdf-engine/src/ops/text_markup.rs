@@ -285,11 +285,7 @@ impl TextMachine {
         let n = bytes.len() as f64;
         let raw = units * self.fs + self.tc * n + self.tw * spaces + kern;
         let w = raw * (self.tz / 100.0);
-        if w.is_finite() && w > 0.0 {
-            w
-        } else {
-            0.0
-        }
+        if w.is_finite() && w > 0.0 { w } else { 0.0 }
     }
 }
 
@@ -381,11 +377,7 @@ fn tj_measure(machine: &TextMachine, array: &[Object]) -> f64 {
     }
     let raw = units * machine.fs + machine.tc * chars + machine.tw * spaces + kern;
     let w = raw * (machine.tz / 100.0);
-    if w.is_finite() && w > 0.0 {
-        w
-    } else {
-        0.0
-    }
+    if w.is_finite() && w > 0.0 { w } else { 0.0 }
 }
 
 /// Handle one text-showing operator: measure, emit a quad, advance.
@@ -435,10 +427,7 @@ fn handle_quote_show(
 /// Walk one decoded content stream, collecting markup quads in
 /// ctm-relative space. Returns the quads plus the stream's final `cm`
 /// state (needed to express them in end-of-stream user space).
-fn collect_quads(
-    operations: &[Operation],
-    kind: MarkupKind,
-) -> (Vec<[[f64; 2]; 4]>, Mat) {
+fn collect_quads(operations: &[Operation], kind: MarkupKind) -> (Vec<[[f64; 2]; 4]>, Mat) {
     let mut machine = TextMachine::new();
     let mut ctm = Mat::IDENTITY;
     let mut gstack: Vec<Mat> = Vec::new();
@@ -757,7 +746,10 @@ mod tests {
         // Original text still present, markup appended after it.
         let text_pos = content.find("(Hello world)").expect("text present");
         let mark_pos = content.find(" rg").expect("markup color op present");
-        assert!(mark_pos > text_pos, "markup should be appended after content");
+        assert!(
+            mark_pos > text_pos,
+            "markup should be appended after content"
+        );
         assert!(content.contains(" m\n"), "path move present: {content}");
         assert!(content.contains(" h\n"), "path close present");
         assert!(content.contains(" f\n"), "path fill present");
@@ -774,7 +766,7 @@ mod tests {
             .clone();
         let dict = match resources {
             Object::Dictionary(d) => d,
-            Object::Reference(id) => doc.get_object(*id).unwrap().as_dict().unwrap().clone(),
+            Object::Reference(id) => doc.get_object(id).unwrap().as_dict().unwrap().clone(),
             _ => panic!("resources should be a dictionary"),
         };
         assert!(dict.get(b"ExtGState").is_ok(), "ExtGState registered");
@@ -869,7 +861,14 @@ mod tests {
             Operation::new("q", vec![]),
             Operation::new(
                 "cm",
-                vec![2.into(), 0.into(), 0.into(), 2.into(), 50.into(), 100.into()],
+                vec![
+                    2.into(),
+                    0.into(),
+                    0.into(),
+                    2.into(),
+                    50.into(),
+                    100.into(),
+                ],
             ),
             Operation::new("BT", vec![]),
             Operation::new("Tf", vec!["F1".into(), 10.into()]),
@@ -969,7 +968,11 @@ mod tests {
 
     #[test]
     fn kind_bands_are_ordered() {
-        for kind in [MarkupKind::Highlight, MarkupKind::Underline, MarkupKind::Strike] {
+        for kind in [
+            MarkupKind::Highlight,
+            MarkupKind::Underline,
+            MarkupKind::Strike,
+        ] {
             let (y0, y1) = kind_band(kind, 12.0, 0.0);
             assert!(y1 > y0, "{kind:?} band inverted");
         }

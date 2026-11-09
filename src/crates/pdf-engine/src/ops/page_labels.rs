@@ -99,10 +99,7 @@ pub fn set_page_labels(
     }
 
     // Sort by page; duplicates are an input error.
-    let mut sorted: Vec<(u32, &str)> = labels
-        .iter()
-        .map(|(p, l)| (*p, l.as_str()))
-        .collect();
+    let mut sorted: Vec<(u32, &str)> = labels.iter().map(|(p, l)| (*p, l.as_str())).collect();
     sorted.sort_by_key(|(p, _)| *p);
     for pair in sorted.windows(2) {
         if pair[0].0 == pair[1].0 {
@@ -206,16 +203,17 @@ pub fn get_page_labels(input: &[u8], limits: &EngineLimits) -> PdfResult<Vec<Opt
     for (index, slot) in out.iter_mut().enumerate() {
         let page = index as u32 + 1;
         // Last segment whose start is <= this page wins.
-        let segment = segments
-            .iter()
-            .take_while(|s| s.start_page <= page)
-            .last();
+        let segment = segments.iter().take_while(|s| s.start_page <= page).last();
         if let Some(segment) = segment {
             let n = segment.start_num + i64::from(page - segment.start_page);
             let rendered = if segment.style_none {
                 segment.prefix.clone()
             } else {
-                format!("{}{}", segment.prefix, format_label_number(n, segment.style))
+                format!(
+                    "{}{}",
+                    segment.prefix,
+                    format_label_number(n, segment.style)
+                )
             };
             *slot = Some(rendered);
         }
@@ -425,7 +423,9 @@ mod tests {
             _ => panic!("no catalog"),
         };
         let catalog = doc.get_dictionary(catalog_id).unwrap();
-        let (_, labels_obj) = doc.dereference(catalog.get(b"PageLabels").unwrap()).unwrap();
+        let (_, labels_obj) = doc
+            .dereference(catalog.get(b"PageLabels").unwrap())
+            .unwrap();
         let labels_dict = labels_obj.as_dict().unwrap();
         let nums = labels_dict.get(b"Nums").unwrap().as_array().unwrap();
         assert_eq!(nums.len(), 4); // 2 entries × (key, dict)
@@ -458,7 +458,12 @@ mod tests {
         let labelled = set_page_labels(&pdf, &[(1, "One".to_string())], &limits()).unwrap();
         assert!(get_page_labels(&labelled, &limits()).unwrap()[0].is_some());
         let cleared = clear_page_labels(&labelled, &limits()).unwrap();
-        assert!(get_page_labels(&cleared, &limits()).unwrap().iter().all(Option::is_none));
+        assert!(
+            get_page_labels(&cleared, &limits())
+                .unwrap()
+                .iter()
+                .all(Option::is_none)
+        );
         // Idempotent on a label-free document.
         let again = clear_page_labels(&cleared, &limits()).unwrap();
         Document::load_mem(&again).unwrap();
@@ -481,8 +486,7 @@ mod tests {
             let content = lopdf::content::Content {
                 operations: vec![lopdf::content::Operation::new("BT", vec![])],
             };
-            let content_id =
-                doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+            let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
             let page_id = doc.add_object(dictionary! {
                 "Type" => "Page", "Parent" => pages_id,
                 "Contents" => content_id, "Resources" => resources_id,
@@ -554,6 +558,11 @@ mod tests {
         assert!(clear_page_labels(b"junk", &limits()).is_err());
         assert!(get_page_labels(b"junk", &limits()).is_err());
         // Label-free document reads as all-None.
-        assert!(get_page_labels(&pdf, &limits()).unwrap().iter().all(Option::is_none));
+        assert!(
+            get_page_labels(&pdf, &limits())
+                .unwrap()
+                .iter()
+                .all(Option::is_none)
+        );
     }
 }

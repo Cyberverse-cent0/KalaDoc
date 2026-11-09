@@ -17,6 +17,7 @@ use crate::crates::core::engine::{
     ProcessingEngine,
 };
 use crate::crates::image_engine::ImageEngine;
+use crate::crates::multimedia_engine::MediaEngine;
 use crate::crates::pdf_engine::PdfEngine;
 use crate::crates::pipeline_engine::PipelineEngine;
 use crate::crates::security_engine::SecurityEngine;
@@ -71,6 +72,7 @@ impl EngineRegistry {
         let mut registry = Self::new();
         registry.register(Arc::new(ConversionEngine::new()));
         registry.register(Arc::new(ImageEngine::new()));
+        registry.register(Arc::new(MediaEngine::new()));
         registry.register(Arc::new(PdfEngine::new()));
         registry.register(Arc::new(PipelineEngine::new()));
         registry.register(Arc::new(SecurityEngine::new()));
@@ -330,14 +332,17 @@ mod tests {
     #[test]
     fn builtin_registers_all_engines() {
         let registry = EngineRegistry::builtin();
-        assert_eq!(registry.len(), 5);
-        for name in ["convert", "image", "pdf", "pipeline", "security"] {
+        assert_eq!(registry.len(), 6);
+        for name in ["convert", "image", "multimedia", "pdf", "pipeline", "security"] {
             assert!(registry.get(name).is_some(), "missing {name}");
         }
 
         let infos = registry.list();
         let names: Vec<&str> = infos.iter().map(|info| info.name.as_str()).collect();
-        assert_eq!(names, ["convert", "image", "pdf", "pipeline", "security"]);
+        assert_eq!(
+            names,
+            ["convert", "image", "multimedia", "pdf", "pipeline", "security"]
+        );
     }
 
     #[tokio::test]

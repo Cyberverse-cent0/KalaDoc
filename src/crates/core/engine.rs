@@ -20,6 +20,7 @@ pub enum EngineKind {
     Conversion,
     Security,
     Pipeline,
+    Multimedia,
 }
 
 /// Operations an engine can perform.

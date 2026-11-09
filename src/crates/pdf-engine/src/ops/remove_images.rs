@@ -111,7 +111,10 @@ pub fn remove_images(
 /// `/Resources` → `/XObject` dictionary, writing a fresh (page-private)
 /// resources dictionary. Returns the removed resource names (raw name
 /// bytes, no leading slash); empty when the page has no image XObjects.
-fn remove_page_images(doc: &mut Document, page_id: lopdf::ObjectId) -> PdfResult<BTreeSet<Vec<u8>>> {
+fn remove_page_images(
+    doc: &mut Document,
+    page_id: lopdf::ObjectId,
+) -> PdfResult<BTreeSet<Vec<u8>>> {
     let Some(mut resources) = effective_resources_dict(doc, page_id) else {
         return Ok(BTreeSet::new());
     };
@@ -287,10 +290,17 @@ mod tests {
         let content = lopdf::content::Content {
             operations: vec![
                 Operation::new("q", vec![]),
-                Operation::new("cm", vec![
-                    Object::Real(10.0), Object::Real(0.0), Object::Real(0.0),
-                    Object::Real(10.0), Object::Real(50.0), Object::Real(700.0),
-                ]),
+                Operation::new(
+                    "cm",
+                    vec![
+                        Object::Real(10.0),
+                        Object::Real(0.0),
+                        Object::Real(0.0),
+                        Object::Real(10.0),
+                        Object::Real(50.0),
+                        Object::Real(700.0),
+                    ],
+                ),
                 Operation::new("Do", vec![Object::Name(b"Im1".to_vec())]),
                 Operation::new("Q", vec![]),
                 Operation::new("BT", vec![]),
@@ -365,7 +375,9 @@ mod tests {
         for stream_id in doc.get_page_contents(page1) {
             let obj = doc.get_object(stream_id).unwrap();
             let stream = obj.as_stream().unwrap();
-            let raw = stream.decompressed_content().unwrap_or_else(|_| stream.content.clone());
+            let raw = stream
+                .decompressed_content()
+                .unwrap_or_else(|_| stream.content.clone());
             if let Ok(content) = Content::decode(&raw) {
                 saw_do |= content.operations.iter().any(|op| {
                     op.operator == "Do"
@@ -386,7 +398,12 @@ mod tests {
         let report = remove_images(&pdf, Some("2"), &limits()).unwrap();
         assert_eq!(report.images_removed, 0);
         assert!(report.pages_affected.is_empty());
-        assert_eq!(extract_images(&report.bytes, None, &limits()).unwrap().len(), 1);
+        assert_eq!(
+            extract_images(&report.bytes, None, &limits())
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

@@ -3248,6 +3248,10 @@ mod tests {
             THUMBNAIL_GENERATE_KIND,
             Arc::new(ThumbnailGenerateHandler::with_storage_config(storage())),
         );
+        eng.register(
+            PDF_OP_KIND,
+            Arc::new(PdfOpHandler::with_storage_config(storage())),
+        );
         eng
     }
 
@@ -3848,5 +3852,138 @@ mod tests {
         let meta = metadata_of(&pool, &doc_id).await;
         assert_eq!(meta.custom_fields["index_status"], json!("indexed"));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -----------------------------------------------------------------
+    // document.pdf_op
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pdf_op_page_count_reports_inline() {
+        let pool = test_pool().await;
+        let root = temp_root();
+        let doc_id = make_document(&pool).await;
+        let eng = full_engine(pool.clone(), &root);
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "report.pdf",
+            "application/pdf",
+        )
+        .await;
+
+        enqueue_pdf_op(&pool, &doc_id, None, "page_count", json!({}))
+            .await
+            .unwrap();
+        assert!(eng.run_once().await.unwrap());
+
+        let meta = metadata_of(&pool, &doc_id).await;
+        assert_eq!(meta.custom_fields["page_count_status"], json!("succeeded"));
+        assert_eq!(meta.custom_fields["processing_status"], json!("succeeded"));
+        let entry = &meta.custom_fields["pdf_ops"]["page_count"];
+        assert_eq!(entry["status"], json!("succeeded"));
+        assert_eq!(entry["result"], json!(1));
+        assert_eq!(entry["outputs"], json!([]));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn pdf_op_rotate_writes_output_artifact() {
+        let pool = test_pool().await;
+        let root = temp_root();
+        let doc_id = make_document(&pool).await;
+        let eng = full_engine(pool.clone(), &root);
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "report.pdf",
+            "application/pdf",
+        )
+        .await;
+
+        enqueue_pdf_op(
+            &pool,
+            &doc_id,
+            None,
+            "rotate",
+            json!({ "degrees": 90, "pages": "all" }),
+        )
+        .await
+        .unwrap();
+        assert!(eng.run_once().await.unwrap());
+
+        // The rotated PDF landed as a second artifact under outputs/.
+        let arts = list_artifacts(&pool, &doc_id).await.unwrap();
+        assert_eq!(arts.len(), 2);
+        let out = arts
+            .iter()
+            .find(|a| a.storage_uri.contains("/outputs/"))
+            .expect("output artifact");
+        assert!(out.storage_uri.ends_with(".pdf"));
+        assert_eq!(out.mime_type.as_deref(), Some("application/pdf"));
+        let object_name = out.storage_uri.strip_prefix("local://").unwrap();
+        assert!(root.join(object_name).is_file());
+        // Output bytes really are a PDF.
+        let bytes = std::fs::read(root.join(object_name)).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+
+        let meta = metadata_of(&pool, &doc_id).await;
+        assert_eq!(meta.custom_fields["rotate_status"], json!("succeeded"));
+        let entry = &meta.custom_fields["pdf_ops"]["rotate"];
+        assert_eq!(entry["status"], json!("succeeded"));
+        assert_eq!(entry["outputs"][0]["artifact_id"], json!(out.id));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn pdf_op_bad_params_record_error_not_job_failure() {
+        let pool = test_pool().await;
+        let root = temp_root();
+        let doc_id = make_document(&pool).await;
+        let eng = full_engine(pool.clone(), &root);
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "report.pdf",
+            "application/pdf",
+        )
+        .await;
+
+        // rotate without degrees → deterministic param error; the job
+        // still succeeds and the document records the failure.
+        enqueue_pdf_op(&pool, &doc_id, None, "rotate", json!({}))
+            .await
+            .unwrap();
+        assert!(eng.run_once().await.unwrap());
+
+        let meta = metadata_of(&pool, &doc_id).await;
+        assert_eq!(meta.custom_fields["rotate_status"], json!("error"));
+        assert_eq!(
+            meta.custom_fields["processing_status"],
+            json!("failed")
+        );
+        assert_eq!(meta.custom_fields["pdf_ops"]["rotate"]["status"], json!("error"));
+        let jobs = list_jobs(&pool, Some(JobStatus::Succeeded), 10)
+            .await
+            .unwrap();
+        assert_eq!(jobs.len(), 2); // ingest + pdf_op
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn pdf_op_rejects_unknown_op_at_enqueue() {
+        let pool = test_pool().await;
+        let doc_id = make_document(&pool).await;
+        assert!(
+            enqueue_pdf_op(&pool, &doc_id, None, "explode", json!({}))
+                .await
+                .is_err()
+        );
     }
 }

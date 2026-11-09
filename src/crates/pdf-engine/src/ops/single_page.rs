@@ -65,10 +65,7 @@ pub fn single_page(
     let forms = import_as_forms(&mut doc, &numbers)?;
 
     let n = forms.len();
-    let cols = cols.map_or_else(
-        || (n as f64).sqrt().ceil() as u32,
-        |c| c.min(n as u32),
-    );
+    let cols = cols.map_or_else(|| (n as f64).sqrt().ceil() as u32, |c| c.min(n as u32));
     let rows = n.div_ceil(cols as usize) as u32;
 
     // Uniform cell size = largest source page extent.

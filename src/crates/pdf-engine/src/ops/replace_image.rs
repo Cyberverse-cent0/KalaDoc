@@ -217,9 +217,7 @@ pub fn replace_image(
 
     // Resolve the page's effective /Resources → /XObject entry.
     let resources = effective_resources_dict(&doc, page_id).ok_or_else(|| {
-        PdfError::InvalidInput(format!(
-            "page {page} has no /Resources dictionary"
-        ))
+        PdfError::InvalidInput(format!("page {page} has no /Resources dictionary"))
     })?;
     let xobjects_obj = resources.get(b"XObject").map_err(|_| {
         PdfError::InvalidInput(format!(
@@ -227,22 +225,16 @@ pub fn replace_image(
              cannot find image {xobject_name:?}"
         ))
     })?;
-    let (_, xobjects_resolved) = doc
-        .dereference(xobjects_obj)
-        .map_err(lopdf_err)?;
+    let (_, xobjects_resolved) = doc.dereference(xobjects_obj).map_err(lopdf_err)?;
     let xobjects = xobjects_resolved.as_dict().map_err(|_| {
         PdfError::InvalidInput("/XObject resource entry is not a dictionary".to_string())
     })?;
 
     let name_bytes = xobject_name.as_bytes();
     let value = xobjects.get(name_bytes).map_err(|_| {
-        PdfError::InvalidInput(format!(
-            "page {page} has no XObject named {xobject_name:?}"
-        ))
+        PdfError::InvalidInput(format!("page {page} has no XObject named {xobject_name:?}"))
     })?;
-    let (target_id, target) = doc
-        .dereference(value)
-        .map_err(lopdf_err)?;
+    let (target_id, target) = doc.dereference(value).map_err(lopdf_err)?;
     let original_stream = target.as_stream().map_err(|_| {
         PdfError::InvalidInput(format!(
             "XObject {xobject_name:?} on page {page} is not a stream"
@@ -353,9 +345,7 @@ mod tests {
             "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
         });
         // 2x2 RGB: red, green, blue, white.
-        let pixels = vec![
-            255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255,
-        ];
+        let pixels = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
         let image_id = doc.add_object(LopStream::new(
             dictionary! {
                 "Type" => "XObject",
@@ -437,7 +427,9 @@ mod tests {
         let stream_id = doc.get_page_contents(page)[0];
         let obj = doc.get_object(stream_id).unwrap();
         let stream = obj.as_stream().unwrap();
-        let raw = stream.decompressed_content().unwrap_or_else(|_| stream.content.clone());
+        let raw = stream
+            .decompressed_content()
+            .unwrap_or_else(|_| stream.content.clone());
         let content = lopdf::content::Content::decode(&raw).unwrap();
         assert!(content.operations.iter().any(|op| {
             op.operator == "Do"
@@ -469,7 +461,14 @@ mod tests {
         let pdf = pdf_with_rgb_image();
         // Name not present on the page.
         assert!(matches!(
-            replace_image(&pdf, 1, "Nope", &red_png(), ImageInputFormat::Auto, &limits()),
+            replace_image(
+                &pdf,
+                1,
+                "Nope",
+                &red_png(),
+                ImageInputFormat::Auto,
+                &limits()
+            ),
             Err(PdfError::InvalidInput(_))
         ));
         // A font resource name is not an XObject at all — still a clean
@@ -480,7 +479,14 @@ mod tests {
         ));
         // Page out of range.
         assert!(matches!(
-            replace_image(&pdf, 7, "Im1", &red_png(), ImageInputFormat::Auto, &limits()),
+            replace_image(
+                &pdf,
+                7,
+                "Im1",
+                &red_png(),
+                ImageInputFormat::Auto,
+                &limits()
+            ),
             Err(PdfError::InvalidPageRange(_))
         ));
     }
@@ -522,14 +528,28 @@ mod tests {
         doc.save_to(&mut buf).unwrap();
 
         assert!(matches!(
-            replace_image(&buf, 1, "Fm1", &red_png(), ImageInputFormat::Auto, &limits()),
+            replace_image(
+                &buf,
+                1,
+                "Fm1",
+                &red_png(),
+                ImageInputFormat::Auto,
+                &limits()
+            ),
             Err(PdfError::InvalidInput(_))
         ));
 
         // Undecodable replacement image on the image fixture.
         let pdf = pdf_with_rgb_image();
         assert!(matches!(
-            replace_image(&pdf, 1, "Im1", b"not an image", ImageInputFormat::Auto, &limits()),
+            replace_image(
+                &pdf,
+                1,
+                "Im1",
+                b"not an image",
+                ImageInputFormat::Auto,
+                &limits()
+            ),
             Err(PdfError::InvalidInput(_))
         ));
         // A GIF would decode via the image crate but is not accepted.
@@ -557,13 +577,27 @@ mod tests {
             ));
         }
         assert!(matches!(
-            replace_image(b"junk", 1, "Im1", &red_png(), ImageInputFormat::Auto, &limits()),
+            replace_image(
+                b"junk",
+                1,
+                "Im1",
+                &red_png(),
+                ImageInputFormat::Auto,
+                &limits()
+            ),
             Err(_)
         ));
         // A text-only document has no XObject resources at all.
         let text_pdf = pdf_with_pages(&["hello"]);
         assert!(matches!(
-            replace_image(&text_pdf, 1, "Im1", &red_png(), ImageInputFormat::Auto, &limits()),
+            replace_image(
+                &text_pdf,
+                1,
+                "Im1",
+                &red_png(),
+                ImageInputFormat::Auto,
+                &limits()
+            ),
             Err(PdfError::InvalidInput(_))
         ));
     }

@@ -197,10 +197,7 @@ pub fn set_outline(
     // in sorted order, so a reverse pass computes counts bottom-up).
     let mut descendant_count = vec![0i64; items.len()];
     for pos in (0..items.len()).rev() {
-        descendant_count[pos] = children[pos]
-            .iter()
-            .map(|&c| 1 + descendant_count[c])
-            .sum();
+        descendant_count[pos] = children[pos].iter().map(|&c| 1 + descendant_count[c]).sum();
     }
     let roots: Vec<usize> = (0..items.len()).filter(|&p| parent[p].is_none()).collect();
 
@@ -517,9 +514,7 @@ fn outline_item_page(
             .and_then(|o| doc.dereference(o).ok())
             .and_then(|(_, o)| o.as_name().ok())
             .is_some_and(|name| name == b"GoTo");
-        if is_goto
-            && let Ok(d) = action_dict.get(b"D")
-        {
+        if is_goto && let Ok(d) = action_dict.get(b"D") {
             return dest_page_number(doc, catalog, d, page_count, page_ids, 0);
         }
         // /GoToR, /URI and friends carry no local page.
@@ -550,12 +545,11 @@ fn dest_page_number(
                 Object::Reference(id) => page_ids.get(id).copied(),
                 // Some writers emit the page number directly.
                 Object::Integer(n) if *n >= 1 && *n <= i64::from(page_count) => Some(*n as u32),
-                Object::String(..) | Object::Name(_) => {
-                    dest_name(first).and_then(|name| {
-                        named_destination(doc, catalog, &name)
-                            .and_then(|obj| dest_page_number(doc, catalog, obj, page_count, page_ids, depth + 1))
+                Object::String(..) | Object::Name(_) => dest_name(first).and_then(|name| {
+                    named_destination(doc, catalog, &name).and_then(|obj| {
+                        dest_page_number(doc, catalog, obj, page_count, page_ids, depth + 1)
                     })
-                }
+                }),
                 _ => None,
             }
         }
@@ -618,9 +612,12 @@ fn named_destination<'a>(
         && let Ok(items) = pairs_obj.as_array()
     {
         for pair in items.chunks_exact(2) {
-            let key_text = decode_text_string(&pair[0])
-                .ok()
-                .or_else(|| pair[0].as_str().ok().map(|b| String::from_utf8_lossy(b).into_owned()));
+            let key_text = decode_text_string(&pair[0]).ok().or_else(|| {
+                pair[0]
+                    .as_str()
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+            });
             if key_text.as_deref() == Some(name) {
                 return Some(&pair[1]);
             }
@@ -659,8 +656,14 @@ mod tests {
     fn set_then_list_roundtrip() {
         let pdf = pdf_with_pages(&["p1", "p2", "p3"]);
         let items = vec![
-            OutlineItemSpec { bold: true, ..spec("Chapter 1", 1, 0) },
-            OutlineItemSpec { italic: true, ..spec("Section 1.1", 2, 1) },
+            OutlineItemSpec {
+                bold: true,
+                ..spec("Chapter 1", 1, 0)
+            },
+            OutlineItemSpec {
+                italic: true,
+                ..spec("Section 1.1", 2, 1)
+            },
             spec("Chapter 2", 3, 0),
         ];
         let out = set_outline(&pdf, &items, &limits()).unwrap();
@@ -713,7 +716,12 @@ mod tests {
             .collect();
         assert_eq!(
             titles,
-            vec!["on page 1 first", "on page 1 second", "on page 2", "on page 3"]
+            vec![
+                "on page 1 first",
+                "on page 1 second",
+                "on page 2",
+                "on page 3"
+            ]
         );
     }
 

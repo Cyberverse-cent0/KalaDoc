@@ -185,8 +185,7 @@ pub fn sign(
         ));
     }
 
-    let workdir = tempfile::tempdir()
-        .map_err(|e| PdfError::Io(std::io::Error::other(e)))?;
+    let workdir = tempfile::tempdir().map_err(|e| PdfError::Io(std::io::Error::other(e)))?;
     let material = prepare_signer(credentials, &tool, workdir.path())?;
 
     let (field_id, sig_id) = add_signature_field(&mut doc, options)?;
@@ -218,8 +217,7 @@ pub fn sign(
 
     Err(PdfError::ExternalTool {
         tool: OPENSSL_TOOL.to_string(),
-        detail: "CMS signature size did not converge with the /Contents placeholder"
-            .to_string(),
+        detail: "CMS signature size did not converge with the /Contents placeholder".to_string(),
     })
 }
 
@@ -358,12 +356,10 @@ fn prepare_signer(
                     .arg("-passin")
                     .arg(format!("env:{SIGN_PASSPHRASE_ENV}"));
             }
-            let status = cmd
-                .status()
-                .map_err(|e| PdfError::ExternalTool {
-                    tool: OPENSSL_TOOL.to_string(),
-                    detail: format!("failed to spawn: {e}"),
-                })?;
+            let status = cmd.status().map_err(|e| PdfError::ExternalTool {
+                tool: OPENSSL_TOOL.to_string(),
+                detail: format!("failed to spawn: {e}"),
+            })?;
             check_status("openssl pkcs12", status)?;
             // The combined PEM holds both certificate and key; `cms
             // -sign` accepts it for -signer and -inkey alike.
@@ -433,7 +429,10 @@ fn check_status(tool: &str, status: std::process::ExitStatus) -> PdfResult<()> {
 
 /// Add the signature field + signature value dictionary and register
 /// the field in the AcroForm. Returns `(field_id, sig_dict_id)`.
-fn add_signature_field(doc: &mut Document, options: &SignOptions) -> PdfResult<(ObjectId, ObjectId)> {
+fn add_signature_field(
+    doc: &mut Document,
+    options: &SignOptions,
+) -> PdfResult<(ObjectId, ObjectId)> {
     // Widget goes on the first page.
     let page_id = *doc
         .get_pages()
@@ -457,7 +456,10 @@ fn add_signature_field(doc: &mut Document, options: &SignOptions) -> PdfResult<(
     );
     sig.set(
         "Contents",
-        Object::String(marker_bytes(INITIAL_PLACEHOLDER_LEN), StringFormat::Hexadecimal),
+        Object::String(
+            marker_bytes(INITIAL_PLACEHOLDER_LEN),
+            StringFormat::Hexadecimal,
+        ),
     );
     sig.set("M", Object::string_literal(pdf_date_now()));
     if let Some(reason) = &options.reason {
@@ -612,7 +614,9 @@ fn signature_rect(doc: &Document, page_id: ObjectId) -> [f32; 4] {
                 None
             }
         });
-    let [x0, y0, x1, y1] = media_box.unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    let [x0, y0, x1, y1]: [f32; 4] = media_box
+        .and_then(|v| <[f32; 4]>::try_from(v.as_slice()).ok())
+        .unwrap_or([0.0, 0.0, 612.0, 792.0]);
     let w = (x1 - x0).max(1.0);
     let h = (y1 - y0).max(1.0);
     [x0, y0, x0 + w.min(120.0), y0 + h.min(24.0)]
@@ -625,11 +629,7 @@ fn signature_rect(doc: &Document, page_id: ObjectId) -> [f32; 4] {
 /// Set the `/Contents` placeholder of the signature dictionary to
 /// `len` decoded marker bytes (written as a hex string of `2*len`
 /// digits).
-fn set_signature_placeholder(
-    doc: &mut Document,
-    sig_id: ObjectId,
-    len: usize,
-) -> PdfResult<()> {
+fn set_signature_placeholder(doc: &mut Document, sig_id: ObjectId, len: usize) -> PdfResult<()> {
     let dict = doc.get_dictionary_mut(sig_id).map_err(lopdf_err)?;
     dict.set(
         "Contents",
@@ -666,12 +666,7 @@ fn serialize_locate(
             )));
         };
         let ce = pos + needle.len();
-        let actual = [
-            0,
-            pos as i64,
-            ce as i64,
-            (bytes.len() - ce) as i64,
-        ];
+        let actual = [0, pos as i64, ce as i64, (bytes.len() - ce) as i64];
         if actual == guess {
             return Ok((bytes, pos, ce));
         }
@@ -863,12 +858,7 @@ fn prune_field(
 /// Collect every object id in a dropped signature subtree that could
 /// appear in a page `/Annots` array: the field itself plus all `/Kids`
 /// descendants (widget annotations).
-fn collect_widget_ids(
-    doc: &Document,
-    obj: &Object,
-    removed: &mut HashSet<ObjectId>,
-    depth: usize,
-) {
+fn collect_widget_ids(doc: &Document, obj: &Object, removed: &mut HashSet<ObjectId>, depth: usize) {
     if depth > MAX_FIELD_DEPTH {
         return;
     }
@@ -1032,11 +1022,9 @@ mod tests {
         let input = pdf_with_pages(&["Hello"]);
         let out = remove_signatures(&input, &unlimited()).unwrap();
         // Re-written but still a valid PDF with the same page count.
-        let report = crate::crates::pdf_engine::ops::verify_signature::verify_signatures(
-            &out,
-            &unlimited(),
-        )
-        .unwrap();
+        let report =
+            crate::crates::pdf_engine::ops::verify_signature::verify_signatures(&out, &unlimited())
+                .unwrap();
         assert_eq!(report.signature_count, 0);
     }
 
