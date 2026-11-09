@@ -4,6 +4,7 @@ use crate::config::ConfigError;
 use crate::crates::application::Organization::auth_user::AuthError;
 use crate::crates::application::Organization::init_db::DbError;
 use crate::crates::application::Organization::session::SessionError;
+use crate::crates::job_engine::JobError;
 
 /// Every failure a command can produce. `exit_code()`/`code()` implement
 /// the documented contract; do not add variants without assigning both.
@@ -45,6 +46,9 @@ pub enum CliError {
     /// Session service error.
     #[error(transparent)]
     Session(#[from] SessionError),
+    /// Job engine/store error.
+    #[error(transparent)]
+    Job(#[from] JobError),
     /// Local I/O (credentials file, prompts, artifacts).
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -98,7 +102,7 @@ impl CliError {
                 AuthError::DuplicateUserName(_) | AuthError::DuplicateEmail(_),
             ) => "conflict",
             Self::Auth(_) => "internal",
-            Self::Db(_) | Self::Session(_) => "internal",
+            Self::Db(_) | Self::Session(_) | Self::Job(_) => "internal",
             Self::Io(_) => "io_error",
             Self::Json(_) | Self::Yaml(_) | Self::Mcp(_) | Self::Internal(_) => "internal",
         }
@@ -106,6 +110,9 @@ impl CliError {
 
     /// Whether a retry could plausibly succeed (spec §5.3 `retryable`).
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::Db(_) | Self::Session(_) | Self::Io(_))
+        matches!(
+            self,
+            Self::Db(_) | Self::Session(_) | Self::Io(_) | Self::Job(JobError::Db(_))
+        )
     }
 }

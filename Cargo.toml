@@ -18,6 +18,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 directories = "5"
 dotenvy = "0.15"
+lopdf = "0.47.0"
 rand_core = { version = "0.6", features = ["getrandom"] }
 rmcp = { version = "=3.8.0", features = ["server", "macros", "schemars", "transport-io"] }
 rpassword = "7"

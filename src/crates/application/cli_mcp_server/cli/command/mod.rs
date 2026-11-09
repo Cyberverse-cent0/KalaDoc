@@ -8,6 +8,7 @@ pub mod auth;
 pub mod config;
 pub mod doctor;
 pub mod init;
+pub mod jobs;
 pub mod user;
 pub mod version;
 

@@ -65,6 +65,7 @@ async fn dispatch(cli: &Cli, ctx: Context) -> Result<i32, CliError> {
         Commands::Config(args) => command::config::run(&ctx, args),
         Commands::Auth(args) => command::auth::run(&ctx, args).await,
         Commands::User(args) => command::user::run(&ctx, args).await,
+        Commands::Jobs(args) => command::jobs::run(&ctx, args).await,
     }
 }
 
