@@ -9,8 +9,12 @@ use crate::crates::document_engine::ids::DocumentId;
 use super::{StoreResult, enum_parse, enum_str, gen_id, now_rfc3339};
 
 /// Appends an audit event for a document. Called internally by the
-/// mutating operations in the sibling store modules.
-pub(crate) async fn record_event(
+/// mutating operations in the sibling store modules; public so external
+/// services (share flows, import pipelines, ...) can record events such
+/// as [`DocumentAuditEventType::Shared`] or [`DocumentAuditEventType::Imported`].
+/// The `document_audit_tbl` foreign key rejects events for unknown
+/// documents.
+pub async fn record_event(
     pool: &SqlitePool,
     document_id: &DocumentId,
     actor_id: Option<&str>,

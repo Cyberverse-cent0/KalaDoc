@@ -443,3 +443,28 @@ pub async fn restore_document(pool: &SqlitePool, id: &DocumentId) -> StoreResult
         .ok_or_else(|| StoreError::not_found("document", id))
 }
 
+/// Permanently deletes a document: the row is removed and
+/// `ON DELETE CASCADE` takes its artifacts, versions, revisions, tags,
+/// permissions, and audit history with it. Only trashed documents can
+/// be purged — restore them first otherwise. Returns `true` when a row
+/// was removed, `false` when the document does not exist.
+pub async fn purge_document(pool: &SqlitePool, id: &DocumentId) -> StoreResult<bool> {
+    let existing = fetch_document(pool, id).await?;
+    match existing {
+        None => return Ok(false),
+        Some(doc) if doc.status != DocumentStatus::Trashed => {
+            return Err(StoreError::validation(
+                "status",
+                "only trashed documents can be permanently deleted",
+            ));
+        }
+        Some(_) => {}
+    }
+
+    let done = sqlx::query("DELETE FROM documents_tbl WHERE id = ?")
+        .bind(id.as_str())
+        .execute(pool)
+        .await?;
+    Ok(done.rows_affected() > 0)
+}
+

@@ -4,11 +4,14 @@
 //! writing the actual bytes is the storage engine's job; `storage_uri`
 //! is the hand-off point.
 
+use serde_json::json;
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 
 use crate::crates::document_engine::artifact::{DocumentArtifact, DocumentChecksum};
+use crate::crates::document_engine::audit::DocumentAuditEventType;
 use crate::crates::document_engine::ids::DocumentId;
 
+use super::history::record_event;
 use super::{StoreError, StoreResult, enum_parse, enum_str, gen_id, now_rfc3339};
 
 /// Input for [`upload_artifact`]. `id` is generated when empty.
@@ -101,7 +104,8 @@ pub async fn upload_artifact(pool: &SqlitePool, new: &NewArtifact) -> StoreResul
 
 /// Fetches artifact metadata by id — this is what a "download" operation
 /// resolves before handing `storage_uri` to the storage engine. Returns
-/// `None` when no such artifact exists.
+/// `None` when no such artifact exists. Each successful resolution
+/// records an `accessed` audit event on the owning document.
 pub async fn download_artifact(
     pool: &SqlitePool,
     artifact_id: &str,
@@ -110,7 +114,18 @@ pub async fn download_artifact(
         .bind(artifact_id)
         .fetch_optional(pool)
         .await?;
-    row.map(|r| artifact_from_row(&r)).transpose()
+    let artifact = row.map(|r| artifact_from_row(&r)).transpose()?;
+    if let Some(art) = &artifact {
+        record_event(
+            pool,
+            &art.document_id,
+            None,
+            DocumentAuditEventType::Accessed,
+            Some(&json!({ "artifact_id": art.id })),
+        )
+        .await?;
+    }
+    Ok(artifact)
 }
 
 /// Lists all artifacts belonging to a document, oldest first.
