@@ -63,9 +63,7 @@ pub async fn upsert_schedule(
         ));
     }
     if new.interval_secs == 0 {
-        return Err(SchedulerError::Invalid(
-            "interval_secs must be >= 1".into(),
-        ));
+        return Err(SchedulerError::Invalid("interval_secs must be >= 1".into()));
     }
 
     let now = now_unix();
@@ -270,9 +268,9 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crates::job_engine::{create_jobs_table, list_jobs as job_list};
     use serde_json::json;
     use sqlx::sqlite::SqlitePoolOptions;
-    use crate::crates::job_engine::{create_jobs_table, list_jobs as job_list};
 
     async fn test_pool() -> SqlitePool {
         let pool = SqlitePoolOptions::new()
@@ -429,9 +427,7 @@ mod tests {
         // The next tick job is scheduled ~60s out, not due yet.
         let future_tick = jobs
             .iter()
-            .find(|j| {
-                j.kind == SCHEDULER_TICK_KIND && j.status == JobStatus::Pending
-            })
+            .find(|j| j.kind == SCHEDULER_TICK_KIND && j.status == JobStatus::Pending)
             .unwrap();
         assert!(future_tick.run_at > now + 30);
     }

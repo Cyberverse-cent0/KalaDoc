@@ -61,4 +61,11 @@ mod tests;
 
 pub use engine::VideoEngine;
 pub use error::{VideoError, VideoResult};
-pub use model::VideoInfo;
+pub use model::{
+    CaptureDevice, ChapterInfo, EncodeProfile, FitMode, FramesSpec, LoudnessReport, MediaAnalysis,
+    MediaFile, MediaOutput, QualityReport, StreamFilter, StreamInfo, StreamSelection,
+    SubtitleStyle, VideoInfo,
+};
+pub use ops::av_visual::VisualStyle;
+pub use ops::filters::FilterPreset;
+pub use runtime::MediaCapabilities;

@@ -299,7 +299,10 @@ mod tests {
 
         assert!(delete_relationship(&pool, &rel.id).await.unwrap());
         assert!(!delete_relationship(&pool, &rel.id).await.unwrap());
-        assert_eq!(list_outgoing_relationships(&pool, &a).await.unwrap().len(), 1);
+        assert_eq!(
+            list_outgoing_relationships(&pool, &a).await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -330,13 +333,11 @@ mod tests {
         // Missing source/target rejected.
         let missing = DocumentId::new("doc-missing");
         assert!(matches!(
-            create_relationship(&pool, &missing, &b, DocumentRelationshipType::Related, None)
-                .await,
+            create_relationship(&pool, &missing, &b, DocumentRelationshipType::Related, None).await,
             Err(StoreError::NotFound { .. })
         ));
         assert!(matches!(
-            create_relationship(&pool, &a, &missing, DocumentRelationshipType::Related, None)
-                .await,
+            create_relationship(&pool, &a, &missing, DocumentRelationshipType::Related, None).await,
             Err(StoreError::NotFound { .. })
         ));
     }
@@ -357,13 +358,17 @@ mod tests {
 
         let related = related_documents(&pool, &a).await.unwrap();
         assert_eq!(related.len(), 2);
-        let by_id: std::collections::HashMap<_, _> = related
-            .iter()
-            .map(|r| (r.document.id.clone(), r))
-            .collect();
-        assert_eq!(by_id[&b].relationship_type, DocumentRelationshipType::Attachment);
+        let by_id: std::collections::HashMap<_, _> =
+            related.iter().map(|r| (r.document.id.clone(), r)).collect();
+        assert_eq!(
+            by_id[&b].relationship_type,
+            DocumentRelationshipType::Attachment
+        );
         assert!(by_id[&b].outgoing);
-        assert_eq!(by_id[&c].relationship_type, DocumentRelationshipType::Supersedes);
+        assert_eq!(
+            by_id[&c].relationship_type,
+            DocumentRelationshipType::Supersedes
+        );
         assert!(!by_id[&c].outgoing);
 
         assert!(related_documents(&pool, &b).await.unwrap().len() == 1);
@@ -384,11 +389,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let remaining: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM document_relationships_tbl")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM document_relationships_tbl")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(remaining, 0);
     }
 }

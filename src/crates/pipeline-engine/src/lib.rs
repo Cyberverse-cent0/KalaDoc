@@ -41,9 +41,9 @@
 //! definition. Definitions are plain serde types — JSON/YAML configs
 //! can describe custom pipelines.
 
-mod builtin;
 /// Base64 helpers for byte artifacts in JSON output.
 mod b64_serde;
+mod builtin;
 mod engine;
 mod error;
 mod limits;

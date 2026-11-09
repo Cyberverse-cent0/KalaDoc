@@ -1,7 +1,7 @@
 //! Clap command tree. Only commands backed by real services exist —
 //! per spec, no placeholders or fake success responses.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use super::global::GlobalOpts;
 
@@ -69,8 +69,8 @@ pub enum Commands {
     Pipeline(PipelineArgs),
 
     /// Probe and process video/audio files with the ffmpeg-backed
-    /// video engine (probe, thumbnail, trim, transcode, concat,
-    /// extract-audio).
+    /// video engine (probe, geometry, audio, frames, subtitles,
+    /// analysis, packaging, and runtime inspection).
     #[command(subcommand)]
     Video(VideoArgs),
 }
@@ -268,7 +268,7 @@ pub enum VideoArgs {
         file: std::path::PathBuf,
         /// Timestamp in seconds to grab the frame from
         /// (default: the engine picks a representative frame).
-        #[arg(long)]
+        #[arg(allow_negative_numbers = true, long)]
         at: Option<f64>,
         /// Output PNG path (default: `<stem>.thumb.png` next to the
         /// input).
@@ -336,6 +336,1043 @@ pub enum VideoArgs {
         #[arg(long = "output-file")]
         output_file: Option<std::path::PathBuf>,
     },
+
+    // ------------------------------------------------------------------
+    // Containers / remux / encode profiles
+    // ------------------------------------------------------------------
+    /// Remux a file into another container, copying all streams
+    /// without re-encoding.
+    Remux {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Target container/extension, e.g. `mkv` or `mp4`.
+        target_ext: String,
+        /// Output path (default: `<stem>.<ext>` next to the input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Transcode with a named encode preset (see `kaladoc video
+    /// presets`).
+    Encode {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Encode preset name (e.g. `h264-crf23`, `prores`, ...).
+        profile: String,
+        /// Target container/extension (default: `mp4`).
+        ext: Option<String>,
+        /// Output path (default: `<stem>.<ext>` next to the input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// List the named encode presets this engine can honor.
+    Presets,
+
+    // ------------------------------------------------------------------
+    // Geometry
+    // ------------------------------------------------------------------
+    /// Resize the video to a target box.
+    Resize {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Target width in pixels.
+        #[arg(long)]
+        width: u32,
+        /// Target height in pixels.
+        #[arg(long)]
+        height: u32,
+        /// Fit mode: `fit` (inside, keep AR), `cover` (fill, crop),
+        /// `contain` (inside, pad), `stretch` (exact box).
+        #[arg(long, value_enum, default_value_t = FitArg::Fit)]
+        fit: FitArg,
+        /// Output path (default: `<stem>.resized<same-ext>` next to
+        /// the input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Crop the video to a pixel rectangle.
+    Crop {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Crop origin X in pixels.
+        #[arg(long)]
+        x: u32,
+        /// Crop origin Y in pixels.
+        #[arg(long)]
+        y: u32,
+        /// Crop width in pixels.
+        #[arg(long)]
+        width: u32,
+        /// Crop height in pixels.
+        #[arg(long)]
+        height: u32,
+        /// Output path (default: `<stem>.cropped<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Pad the video frame by the given pixel amounts.
+    Pad {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Pixels added on the left.
+        #[arg(long, default_value_t = 0)]
+        left: u32,
+        /// Pixels added on the right.
+        #[arg(long, default_value_t = 0)]
+        right: u32,
+        /// Pixels added on the top.
+        #[arg(long, default_value_t = 0)]
+        top: u32,
+        /// Pixels added on the bottom.
+        #[arg(long, default_value_t = 0)]
+        bottom: u32,
+        /// Pad color (ffmpeg color name or `0xRRGGBB`).
+        #[arg(long)]
+        color: Option<String>,
+        /// Output path (default: `<stem>.padded<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Rotate the video by an arbitrary angle (re-encoded).
+    Rotate {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Rotation angle in degrees.
+        #[arg(allow_negative_numbers = true, long)]
+        degrees: f64,
+        /// Output path (default: `<stem>.rotated<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Mirror the video horizontally (default) or vertically.
+    Flip {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Flip vertically instead of horizontally.
+        #[arg(long)]
+        vertical: bool,
+        /// Output path (default: `<stem>.flipped<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Letterbox the video into a target box (black bars top/bottom).
+    Letterbox {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Target width in pixels.
+        #[arg(long)]
+        width: u32,
+        /// Target height in pixels.
+        #[arg(long)]
+        height: u32,
+        /// Output path (default: `<stem>.letterbox<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Pillarbox the video into a target box (black bars left/right).
+    Pillarbox {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Target width in pixels.
+        #[arg(long)]
+        width: u32,
+        /// Target height in pixels.
+        #[arg(long)]
+        height: u32,
+        /// Output path (default: `<stem>.pillarbox<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Auto-detect and crop black borders.
+    Autocrop {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Output path (default: `<stem>.autocrop<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Rotate 90 degrees (transpose axes).
+    Transpose {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Rotate counter-clockwise instead of clockwise.
+        #[arg(long)]
+        counter_clockwise: bool,
+        /// Output path (default: `<stem>.transpose<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Force landscape or portrait orientation.
+    Orient {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Target orientation.
+        #[arg(long, value_enum)]
+        orientation: OrientArg,
+        /// Output path (default: `<stem>.orient<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    // ------------------------------------------------------------------
+    // Tempo / time ops
+    // ------------------------------------------------------------------
+    /// Change playback speed (`--factor 2` = twice as fast).
+    Speed {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Speed factor (> 0; 1.0 = unchanged).
+        #[arg(allow_negative_numbers = true, long)]
+        factor: f64,
+        /// Output path (default: `<stem>.speed<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Reverse the clip.
+    Reverse {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Output path (default: `<stem>.reversed<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Loop the clip `--count` additional times.
+    Loop {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Additional loop count (0 = no change).
+        #[arg(long)]
+        count: u32,
+        /// Output path (default: `<stem>.looped<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Freeze the frame at `--at` for `--duration` seconds.
+    Freeze {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Timestamp in seconds of the frame to freeze.
+        #[arg(allow_negative_numbers = true, long)]
+        at: f64,
+        /// Freeze duration in seconds.
+        #[arg(long)]
+        duration: f64,
+        /// Output path (default: `<stem>.freeze<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    // ------------------------------------------------------------------
+    // Audio processing
+    // ------------------------------------------------------------------
+    /// Apply a gain in dB to the audio track.
+    Volume {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Gain in decibels (negative attenuates).
+        #[arg(allow_negative_numbers = true, long)]
+        gain_db: f64,
+        /// Output path (default: `<stem>.volume<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// EBU R128 loudness normalization.
+    Normalize {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Target loudness in LUFS (default: engine's -23 LUFS).
+        #[arg(allow_negative_numbers = true, long)]
+        lufs: Option<f64>,
+        /// Output path (default: `<stem>.normalized<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Mix the audio tracks of several files into one.
+    AudioMerge {
+        /// Input media files (audio is extracted and mixed).
+        files: Vec<std::path::PathBuf>,
+        /// Output path (default: `<stem>.merged<same-ext>` next to
+        /// the first input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Concatenate audio files into one output container.
+    AudioConcat {
+        /// Input audio files, in playback order.
+        files: Vec<std::path::PathBuf>,
+        /// Target container/extension, e.g. `mp3` or `m4a`.
+        ext: String,
+        /// Output path (default: `concat.<ext>` next to the first
+        /// input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Fade the audio in and/or out.
+    Fade {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Fade-in duration in seconds.
+        #[arg(allow_negative_numbers = true, long = "in", default_value_t = 0.0)]
+        fade_in: f64,
+        /// Fade-out duration in seconds.
+        #[arg(allow_negative_numbers = true, long = "out", default_value_t = 0.0)]
+        fade_out: f64,
+        /// Output path (default: `<stem>.fade<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Remove all audio streams.
+    RemoveAudio {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Output path (default: `<stem>.noaudio<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Convert to a different channel count/layout.
+    Channels {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Target channel count (1 = mono, 2 = stereo, ...).
+        #[arg(long)]
+        count: u32,
+        /// Output path (default: `<stem>.channels<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// 3-band equalizer (bass/mid/treble in dB).
+    Eq {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Bass gain in dB.
+        #[arg(allow_negative_numbers = true, long)]
+        bass: f64,
+        /// Treble gain in dB.
+        #[arg(allow_negative_numbers = true, long)]
+        treble: f64,
+        /// Mid gain in dB (optional).
+        #[arg(allow_negative_numbers = true, long)]
+        mid: Option<f64>,
+        /// Output path (default: `<stem>.eq<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Spectral noise reduction.
+    Denoise {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Denoise strength (0.0–1.0+; higher removes more).
+        #[arg(allow_negative_numbers = true, long)]
+        strength: f64,
+        /// Output path (default: `<stem>.denoise<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Dynamic-range compression.
+    CompressAudio {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Compression threshold in dB.
+        #[arg(allow_negative_numbers = true, long)]
+        threshold: f64,
+        /// Compression ratio (e.g. 4 = 4:1).
+        #[arg(allow_negative_numbers = true, long)]
+        ratio: f64,
+        /// Output path (default: `<stem>.compress<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Pitch-shift the audio by semitones (duration preserved).
+    Pitch {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Shift in semitones (negative lowers pitch).
+        #[arg(allow_negative_numbers = true, long)]
+        semitones: f64,
+        /// Output path (default: `<stem>.pitch<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Render a spectrogram PNG of the audio track.
+    Spectrogram {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Image width in pixels (default: engine default).
+        #[arg(long)]
+        width: Option<u32>,
+        /// Image height in pixels (default: engine default).
+        #[arg(long)]
+        height: Option<u32>,
+        /// Output PNG path (required).
+        #[arg(long = "output-file")]
+        output_file: std::path::PathBuf,
+    },
+
+    /// Weighted mix of several audio-bearing files.
+    Mix {
+        /// Input media files to mix.
+        files: Vec<std::path::PathBuf>,
+        /// Comma-separated per-input weights, e.g. `0.5,0.5`
+        /// (must match the number of inputs).
+        #[arg(long)]
+        weights: String,
+        /// Do not normalize the mixed levels.
+        #[arg(long)]
+        no_normalize: bool,
+        /// Output path (default: `<stem>.mix<same-ext>` next to the
+        /// first input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Crossfade between two or more files.
+    Crossfade {
+        /// Input media files, in playback order (at least two).
+        files: Vec<std::path::PathBuf>,
+        /// Crossfade duration in seconds.
+        #[arg(long)]
+        duration: f64,
+        /// Output path (default: `<stem>.crossfade<same-ext>` next
+        /// to the first input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Delay the audio track by milliseconds (negative = earlier).
+    Delay {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Delay offset in milliseconds.
+        #[arg(allow_negative_numbers = true, long)]
+        ms: i64,
+        /// Output path (default: `<stem>.delay<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    // ------------------------------------------------------------------
+    // Frames / images
+    // ------------------------------------------------------------------
+    /// Extract still frames from a video into a directory.
+    ///
+    /// Select frames with exactly one of `--every`, `--fps`,
+    /// `--all`, or `--keyframes`. `--output-dir` defaults to
+    /// `<stem>-frames/` next to the input; files are written with
+    /// sanitized basenames.
+    Frames {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// One frame every N seconds.
+        #[arg(long)]
+        every: Option<f64>,
+        /// Frame sampling rate (frames per second).
+        #[arg(long)]
+        fps: Option<f64>,
+        /// Extract every frame.
+        #[arg(long)]
+        all: bool,
+        /// Extract only keyframes (I-frames).
+        #[arg(long)]
+        keyframes: bool,
+        /// Frame image format: `png` or `jpg`.
+        #[arg(long, default_value = "png")]
+        format: String,
+        /// Output directory (default: `<stem>-frames/` next to the
+        /// input).
+        #[arg(long = "output-dir")]
+        output_dir: Option<std::path::PathBuf>,
+    },
+
+    /// Extract every frame as a numbered image sequence.
+    ImageSequence {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Image format: `png` or `jpg`.
+        #[arg(long, default_value = "png")]
+        format: String,
+        /// Output directory (default: `<stem>-seq/` next to the
+        /// input).
+        #[arg(long = "output-dir")]
+        output_dir: Option<std::path::PathBuf>,
+    },
+
+    /// Build a contact-sheet grid PNG from sampled frames.
+    ContactSheet {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Grid columns.
+        #[arg(long)]
+        cols: u32,
+        /// Grid rows.
+        #[arg(long)]
+        rows: u32,
+        /// Thumbnail width in pixels (default: engine default).
+        #[arg(long)]
+        thumb_width: Option<u32>,
+        /// Sample interval in seconds (default: engine picks).
+        #[arg(long)]
+        interval: Option<f64>,
+        /// Output PNG path (default: `<stem>.sheet.png`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Extract one frame per detected scene change into a
+    /// directory.
+    SceneFrames {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Scene-change threshold (default: engine default).
+        #[arg(allow_negative_numbers = true, long)]
+        threshold: Option<f64>,
+        /// Output directory (default: `<stem>-scenes/` next to the
+        /// input).
+        #[arg(long = "output-dir")]
+        output_dir: Option<std::path::PathBuf>,
+    },
+
+    /// Turn still images into a video slideshow.
+    Slideshow {
+        /// Input image files, in playback order.
+        files: Vec<std::path::PathBuf>,
+        /// Frames per second (also sets per-image duration).
+        #[arg(long)]
+        fps: f64,
+        /// Per-image duration in seconds (overrides `--fps`).
+        #[arg(long)]
+        duration: Option<f64>,
+        /// Target container/extension, e.g. `mp4` or `webm`.
+        ext: String,
+        /// Output path (default: `slideshow.<ext>` next to the
+        /// first input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Convert a video to an animated GIF.
+    ToGif {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Output frame rate (default: engine default).
+        #[arg(long)]
+        fps: Option<f64>,
+        /// Output width in pixels (height scaled; default: engine
+        /// default).
+        #[arg(long)]
+        width: Option<u32>,
+        /// Output path (default: `<stem>.gif`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Convert a video to an animated WebP.
+    ToWebp {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Output frame rate (default: engine default).
+        #[arg(long)]
+        fps: Option<f64>,
+        /// Output path (default: `<stem>.webp`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Convert a video to an APNG.
+    ToApng {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Output frame rate (default: engine default).
+        #[arg(long)]
+        fps: Option<f64>,
+        /// Output path (default: `<stem>.apng`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Turn an audio file into a video with a waveform/spectrum
+    /// visualization.
+    AudioToVideo {
+        /// Path to the input audio file.
+        file: std::path::PathBuf,
+        /// Visualization style.
+        #[arg(long, value_enum, default_value_t = VisualStyleArg::Both)]
+        style: VisualStyleArg,
+        /// Video width in pixels.
+        #[arg(long)]
+        width: u32,
+        /// Video height in pixels.
+        #[arg(long)]
+        height: u32,
+        /// Output path (default: `<stem>.audiovid.mp4`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Convert an animated GIF to a real video container.
+    GifToVideo {
+        /// Path to the input GIF file.
+        file: std::path::PathBuf,
+        /// Target container/extension, e.g. `mp4` or `webm`.
+        ext: String,
+        /// Output path (default: the input path with the target
+        /// extension).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Replace the audio track of a video without re-encoding the
+    /// video stream.
+    ReplaceAudio {
+        /// Path to the video file.
+        video: std::path::PathBuf,
+        /// Path to the audio file to mux in.
+        audio: std::path::PathBuf,
+        /// Output path (default: `<stem>.replaced<same-ext>` next
+        /// to the video).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    // ------------------------------------------------------------------
+    // Extraction / subtitles
+    // ------------------------------------------------------------------
+    /// Extract embedded streams (subtitles, attachments, cover
+    /// art, chapters, data) into a directory.
+    ExtractStreams {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Extract subtitle streams (as `--subtitle-format` text).
+        #[arg(long)]
+        subtitles: bool,
+        /// Extract binary attachments.
+        #[arg(long)]
+        attachments: bool,
+        /// Extract the attached cover art.
+        #[arg(long)]
+        cover: bool,
+        /// Export chapters as a JSON sidecar.
+        #[arg(long)]
+        chapters: bool,
+        /// Extract data/other streams (best-effort).
+        #[arg(long)]
+        data: bool,
+        /// Subtitle text format: `srt`, `ass`, or `vtt`.
+        #[arg(long, default_value = "srt")]
+        subtitle_format: String,
+        /// Output directory (default: `<stem>-streams/` next to
+        /// the input). `--output-dir` is recommended.
+        #[arg(long = "output-dir")]
+        output_dir: Option<std::path::PathBuf>,
+    },
+
+    /// Extract a subtitle track as a text file.
+    Subtitles {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Subtitle track number (0-based across subtitle streams;
+        /// default: first).
+        #[arg(long)]
+        track: Option<u32>,
+        /// Output subtitle format: `srt`, `ass`, or `vtt`.
+        #[arg(long, default_value = "srt")]
+        format: String,
+        /// Output path (default: `<stem>.<format>` next to the
+        /// input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Convert a subtitle file between `srt`, `ass`, and `vtt`.
+    SubsConvert {
+        /// Path to the subtitle file.
+        file: std::path::PathBuf,
+        /// Source format (default: guessed from the extension).
+        #[arg(long)]
+        from: Option<String>,
+        /// Target format: `srt`, `ass`, or `vtt`.
+        #[arg(long)]
+        to: String,
+        /// Output path (default: `<stem>.<to>` next to the input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Shift all subtitle cue times by an offset.
+    SubsShift {
+        /// Path to the subtitle file.
+        file: std::path::PathBuf,
+        /// Time offset in seconds (negative shifts earlier).
+        #[arg(allow_negative_numbers = true, long)]
+        offset: f64,
+        /// Subtitle format: `srt`, `ass`, or `vtt`.
+        #[arg(long, default_value = "srt")]
+        format: String,
+        /// Output path (default: `<stem>.shifted.<format>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Burn a subtitle file into the video.
+    BurnSubs {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Path to the subtitle file (srt/ass/vtt).
+        subs_file: std::path::PathBuf,
+        /// Optional styling as a JSON object with keys
+        /// `font_name`, `font_size`, `primary_color`,
+        /// `outline_color`, `outline_width`, `shadow_offset`,
+        /// `margin_v`, `alignment`.
+        #[arg(long)]
+        style: Option<String>,
+        /// Output path (default: `<stem>.burned<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    // ------------------------------------------------------------------
+    // Filters / overlays / stream ops
+    // ------------------------------------------------------------------
+    /// Apply raw ffmpeg `-vf`/`-af` filter chains (re-encodes).
+    /// Prefer `kaladoc video filters` presets for common effects.
+    Filter {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Video filter chain (`-vf`), e.g. `hflip,eq=brightness=0.1`.
+        #[arg(long)]
+        vf: Option<String>,
+        /// Audio filter chain (`-af`), e.g. `volume=2.0`.
+        #[arg(long)]
+        af: Option<String>,
+        /// Output path (default: `<stem>.filtered<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// List the named filter presets the engine advertises.
+    Filters,
+
+    /// Overlay an image onto the video at a position.
+    Overlay {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Path to the overlay image file.
+        image: std::path::PathBuf,
+        /// X position in pixels.
+        #[arg(allow_negative_numbers = true, long)]
+        x: i32,
+        /// Y position in pixels.
+        #[arg(allow_negative_numbers = true, long)]
+        y: i32,
+        /// Overlay opacity 0.0–1.0 (default: fully opaque).
+        #[arg(long)]
+        opacity: Option<f64>,
+        /// Output path (default: `<stem>.overlay<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Draw text onto the video.
+    Text {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Text to draw.
+        #[arg(long)]
+        text: String,
+        /// X position in pixels.
+        #[arg(allow_negative_numbers = true, long)]
+        x: i32,
+        /// Y position in pixels.
+        #[arg(allow_negative_numbers = true, long)]
+        y: i32,
+        /// Font size in pixels (default: 24).
+        #[arg(long)]
+        size: Option<u32>,
+        /// Text color `0xRRGGBB` (default: engine default).
+        #[arg(long)]
+        color: Option<String>,
+        /// Output path (default: `<stem>.text<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Chroma-key composite a foreground video over a background.
+    ChromaKey {
+        /// Path to the foreground (keyed) video file.
+        foreground: std::path::PathBuf,
+        /// Path to the background video file.
+        background: std::path::PathBuf,
+        /// Key color `0xRRGGBB` or ffmpeg color name.
+        #[arg(long)]
+        color: String,
+        /// Color-match similarity threshold (default: 0.3).
+        #[arg(allow_negative_numbers = true, long)]
+        similarity: Option<f64>,
+        /// Edge blend amount (default: 0.1).
+        #[arg(allow_negative_numbers = true, long)]
+        blend: Option<f64>,
+        /// Output path (default: `<stem>.keyed<same-ext>` next to
+        /// the foreground input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Select which streams are kept and remux into a container.
+    SelectStreams {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Target container/extension, e.g. `mp4` or `mkv`.
+        ext: String,
+        /// Drop the video stream.
+        #[arg(long)]
+        no_video: bool,
+        /// Audio stream ordinals to keep, comma-separated
+        /// (e.g. `0,1`; default: keep all).
+        #[arg(long)]
+        audio: Option<String>,
+        /// Subtitle stream ordinals to keep, comma-separated
+        /// (default: keep all).
+        #[arg(long)]
+        subs: Option<String>,
+        /// Output path (default: `<stem>.<ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Merge an audio file into a video container.
+    MergeAv {
+        /// Path to the video file.
+        video: std::path::PathBuf,
+        /// Path to the audio file to merge in.
+        audio: std::path::PathBuf,
+        /// Target container/extension (default: the video's
+        /// extension).
+        ext: Option<String>,
+        /// Output path (default: `<stem>.merged<same-ext>` next to
+        /// the video).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Set container metadata tags (`--tag key=value`, repeatable).
+    SetMetadata {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Tags as `key=value` pairs (repeatable).
+        #[arg(long = "tag", required = true)]
+        tags: Vec<String>,
+        /// Output path (default: `<stem>.tagged<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Strip all container metadata.
+    StripMetadata {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Target container/extension (default: the input's
+        /// extension).
+        ext: Option<String>,
+        /// Output path (default: `<stem>.stripped.<ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Attach/replace cover art on an audio container.
+    CoverArt {
+        /// Path to the audio file.
+        file: std::path::PathBuf,
+        /// Path to the cover image file.
+        image: std::path::PathBuf,
+        /// Output path (default: `<stem>.cover<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    // ------------------------------------------------------------------
+    // Analysis / loudness / quality
+    // ------------------------------------------------------------------
+    /// Run the full media analysis report (black/freeze/silence
+    /// segments, scenes, loudness, metrics).
+    Analyze {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+    },
+
+    /// List detected scene-change timestamps and scores.
+    Scenes {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Scene-change threshold (default: engine default).
+        #[arg(allow_negative_numbers = true, long)]
+        threshold: Option<f64>,
+    },
+
+    /// Detect black-frame intervals.
+    BlackFrames {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+    },
+
+    /// Detect freeze-frame intervals.
+    FreezeFrames {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+    },
+
+    /// Detect silence intervals in the audio track.
+    Silences {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+    },
+
+    /// Measure EBU R128 loudness of the audio track.
+    Loudness {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+    },
+
+    /// Normalize loudness to a target LUFS value.
+    NormalizeLufs {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Target loudness in LUFS (default: engine's -23 LUFS).
+        #[arg(allow_negative_numbers = true, long)]
+        lufs: Option<f64>,
+        /// Output path (default: `<stem>.loudnorm<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Print audio statistics (levels, DC offset, etc.).
+    AudioStats {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+    },
+
+    /// Objective quality comparison between a reference and a
+    /// distorted file (PSNR/SSIM/VMAF).
+    Quality {
+        /// Path to the reference (original) file.
+        reference: std::path::PathBuf,
+        /// Path to the distorted (processed) file.
+        distorted: std::path::PathBuf,
+        /// Comma-separated metrics: `psnr`, `ssim`, `vmaf`
+        /// (default: all supported).
+        #[arg(long)]
+        metrics: Option<String>,
+    },
+
+    // ------------------------------------------------------------------
+    // Packaging
+    // ------------------------------------------------------------------
+    /// Package the video as an HLS stream (`index.m3u8` +
+    /// segments) into a directory.
+    Hls {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Output directory (default: `<stem>-hls/` next to the
+        /// input).
+        #[arg(long = "output-dir")]
+        output_dir: Option<std::path::PathBuf>,
+    },
+
+    /// Package the video as MPEG-DASH (`manifest.mpd` + segments)
+    /// into a directory.
+    Dash {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Output directory (default: `<stem>-dash/` next to the
+        /// input).
+        #[arg(long = "output-dir")]
+        output_dir: Option<std::path::PathBuf>,
+    },
+
+    /// Remux an MP4 for faststart (moov atom up front).
+    Faststart {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Output path (default: `<stem>.faststart.mp4`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    // ------------------------------------------------------------------
+    // Runtime inspection
+    // ------------------------------------------------------------------
+    /// List capture devices/sources known to this ffmpeg build.
+    Devices,
+
+    /// List input/output protocols.
+    Protocols,
+
+    /// List hardware accelerations.
+    Hwaccels,
+
+    /// Print a JSON capability snapshot of the installed
+    /// ffmpeg/ffprobe build (versions, detected hwaccel, device,
+    /// protocol, and hwaccel lists).
+    Capabilities,
+
+    /// Print ffmpeg/ffprobe versions and the detected hardware
+    /// accelerator.
+    Versions,
+}
+
+/// Fit modes for `kaladoc video resize`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum FitArg {
+    /// Preserve aspect ratio; fit entirely inside the box.
+    Fit,
+    /// Preserve aspect ratio; fill the box, cropping overflow.
+    Cover,
+    /// Preserve aspect ratio; fit inside and pad the remainder.
+    Contain,
+    /// Ignore aspect ratio; stretch to exactly the box.
+    Stretch,
+}
+
+/// Orientations for `kaladoc video orient`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OrientArg {
+    /// Width >= height orientation.
+    Landscape,
+    /// Height > width orientation.
+    Portrait,
+}
+
+/// Visualization styles for `kaladoc video audio-to-video`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum VisualStyleArg {
+    /// Oscilloscope waveform.
+    Waveform,
+    /// Frequency spectrum.
+    Spectrum,
+    /// Waveform and spectrum stacked.
+    Both,
 }
 
 #[derive(Subcommand)]

@@ -21,14 +21,14 @@ pub(crate) mod analysis;
 pub(crate) mod audio;
 pub(crate) mod audio_fx;
 pub(crate) mod audio_mix;
-pub(crate) mod av_visual;
-pub(crate) mod capture;
+pub mod av_visual;
+pub mod capture;
 pub(crate) mod concat;
 pub(crate) mod contact_sheet;
 pub(crate) mod encode;
 pub(crate) mod extract;
 pub(crate) mod extract_audio;
-pub(crate) mod filters;
+pub mod filters;
 pub(crate) mod frames;
 pub(crate) mod geometry;
 pub(crate) mod geometry_adv;
@@ -377,7 +377,9 @@ pub(crate) fn ext_for_format(format_name: &str) -> Option<&'static str> {
     // Prefer the most common/compatible token when a demuxer lists
     // several aliases (mov,mp4,m4a,... all describe the ISO-BMFF
     // family; "mp4" is the safest output extension).
-    for preferred in ["mp4", "matroska", "webm", "avi", "mpegts", "mpeg", "ogg", "flv", "asf"] {
+    for preferred in [
+        "mp4", "matroska", "webm", "avi", "mpegts", "mpeg", "ogg", "flv", "asf",
+    ] {
         if tokens.iter().any(|t| *t == preferred) {
             return Some(match preferred {
                 "matroska" => "mkv",
@@ -401,9 +403,7 @@ pub(crate) fn ext_for_format(format_name: &str) -> Option<&'static str> {
 /// Normalize a caller-supplied target extension: lowercase, trimmed,
 /// leading dot stripped.
 pub(crate) fn normalize_ext(ext: &str) -> String {
-    ext.trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase()
+    ext.trim().trim_start_matches('.').to_ascii_lowercase()
 }
 
 /// Validate `ext` against `allowed` (already-normalized lowercase
@@ -507,18 +507,13 @@ pub(crate) fn encoder_available(name: &str) -> bool {
         let Ok(program) = find_tool(FFMPEG) else {
             return Vec::new();
         };
-        let args = vec![
-            "-hide_banner".to_string(),
-            "-encoders".to_string(),
-        ];
+        let args = vec!["-hide_banner".to_string(), "-encoders".to_string()];
         match run_capture(&program, &args, PROBE_TIMEOUT) {
-            Ok(output) if output.status.success() => {
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter_map(|line| line.split_whitespace().nth(1))
-                    .map(str::to_string)
-                    .collect()
-            }
+            Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_whitespace().nth(1))
+                .map(str::to_string)
+                .collect(),
             _ => Vec::new(),
         }
     });

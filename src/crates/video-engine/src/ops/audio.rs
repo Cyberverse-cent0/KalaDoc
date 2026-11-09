@@ -13,9 +13,11 @@ pub(crate) fn audio_volume(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, gain_db, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_volume not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_volume not implemented".to_string(),
+        ),
+    )
 }
 
 /// Normalize loudness toward the EBU R128 target (-23 LUFS
@@ -27,9 +29,11 @@ pub(crate) fn audio_normalize(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, target_lufs, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_normalize not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_normalize not implemented".to_string(),
+        ),
+    )
 }
 
 /// Mix `inputs` (audio files or containers with audio) into one
@@ -37,9 +41,11 @@ pub(crate) fn audio_normalize(
 /// format — ffmpeg resamples where possible.
 pub(crate) fn audio_merge(inputs: &[Vec<u8>], limits: &EngineLimits) -> VideoResult<Vec<u8>> {
     let _ = (inputs, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_merge not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_merge not implemented".to_string(),
+        ),
+    )
 }
 
 /// Concatenate `inputs` end-to-end into `target_ext` (`mp3`, `wav`,
@@ -51,9 +57,11 @@ pub(crate) fn audio_concat(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (inputs, target_ext, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_concat not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_concat not implemented".to_string(),
+        ),
+    )
 }
 
 /// Apply fade-in over `fade_in_secs` and fade-out over
@@ -65,18 +73,22 @@ pub(crate) fn audio_fade(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, fade_in_secs, fade_out_secs, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_fade not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_fade not implemented".to_string(),
+        ),
+    )
 }
 
 /// Strip all audio streams, keeping video/subtitle streams; output
 /// container follows the input.
 pub(crate) fn remove_audio(input: &[u8], limits: &EngineLimits) -> VideoResult<Vec<u8>> {
     let _ = (input, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "remove_audio not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "remove_audio not implemented".to_string(),
+        ),
+    )
 }
 
 /// Convert channel layout: `channels = 1` downmixes to mono, `2`
@@ -87,7 +99,9 @@ pub(crate) fn channel_convert(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, channels, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "channel_convert not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "channel_convert not implemented".to_string(),
+        ),
+    )
 }

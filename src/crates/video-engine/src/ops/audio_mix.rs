@@ -13,9 +13,11 @@ pub(crate) fn audio_mix_weighted(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (inputs, weights, normalize, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_mix_weighted not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_mix_weighted not implemented".to_string(),
+        ),
+    )
 }
 
 /// Crossfade between two inputs over `duration_secs` (`acrossfade`).
@@ -26,9 +28,11 @@ pub(crate) fn audio_crossfade(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (inputs, duration_secs, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_crossfade not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_crossfade not implemented".to_string(),
+        ),
+    )
 }
 
 /// Shift the audio track by `offset_ms` (positive = later; uses
@@ -39,7 +43,9 @@ pub(crate) fn audio_delay(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, offset_ms, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_delay not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_delay not implemented".to_string(),
+        ),
+    )
 }

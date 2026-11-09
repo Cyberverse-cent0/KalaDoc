@@ -14,9 +14,11 @@ pub(crate) fn audio_eq(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, bass_db, mid_db, treble_db, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_eq not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_eq not implemented".to_string(),
+        ),
+    )
 }
 
 /// Spectral noise reduction via `afftdn`; `strength` (0.0–1.0) maps
@@ -27,9 +29,11 @@ pub(crate) fn audio_denoise(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, strength, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_denoise not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_denoise not implemented".to_string(),
+        ),
+    )
 }
 
 /// Dynamic-range compression via `acompressor` with the given
@@ -41,9 +45,11 @@ pub(crate) fn audio_compress(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, threshold_db, ratio, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_compress not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_compress not implemented".to_string(),
+        ),
+    )
 }
 
 /// Shift pitch by `semitones` without changing duration
@@ -54,9 +60,11 @@ pub(crate) fn audio_pitch(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, semitones, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_pitch not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_pitch not implemented".to_string(),
+        ),
+    )
 }
 
 /// Render the audio as a spectrogram PNG via `showspectrumpic`.
@@ -68,7 +76,9 @@ pub(crate) fn audio_spectrogram(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, width, height, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "audio_spectrogram not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "audio_spectrogram not implemented".to_string(),
+        ),
+    )
 }

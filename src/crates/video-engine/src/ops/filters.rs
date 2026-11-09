@@ -19,14 +19,16 @@ pub(crate) fn apply_filters(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, video_filter, audio_filter, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "apply_filters not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "apply_filters not implemented".to_string(),
+        ),
+    )
 }
 
 /// A named, vetted filter preset: `name` → (video filter, audio
 /// filter). Both may be empty for analysis-only presets.
-pub(crate) struct FilterPreset {
+pub struct FilterPreset {
     /// Stable preset identifier (CLI/API surface).
     pub name: &'static str,
     /// ffmpeg `-vf` chain, `""` for none.

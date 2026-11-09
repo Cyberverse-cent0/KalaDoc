@@ -5,12 +5,13 @@
 //! `-filters`, ...) through the shared [`crate::crates::video_engine::ops`]
 //! helpers — no media is processed here.
 
-pub(crate) mod capabilities;
+pub mod capabilities;
 pub(crate) mod discovery;
 pub(crate) mod hardware;
 pub(crate) mod version;
 
-pub(crate) use capabilities::{MediaCapabilities, capabilities};
+pub use capabilities::{MediaCapabilities, capabilities};
+
 pub(crate) use discovery::{ToolPaths, discover};
 pub(crate) use hardware::detect_hwaccel;
 pub(crate) use version::{ffmpeg_version, ffprobe_version};

@@ -23,3 +23,27 @@ pub(crate) fn discover() -> VideoResult<ToolPaths> {
         ffprobe: find_tool(FFPROBE)?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_finds_both_tools_on_path() {
+        // ffmpeg/ffprobe are required dev dependencies of this engine;
+        // they are installed in CI/dev images, so discovery must succeed.
+        let paths = discover().expect("ffmpeg and ffprobe are installed");
+        assert_eq!(paths.ffmpeg.file_name().unwrap(), FFMPEG);
+        assert_eq!(paths.ffprobe.file_name().unwrap(), FFPROBE);
+        assert!(paths.ffmpeg.is_file());
+        assert!(paths.ffprobe.is_file());
+    }
+
+    #[test]
+    fn discover_is_deterministic() {
+        let a = discover().unwrap();
+        let b = discover().unwrap();
+        assert_eq!(a.ffmpeg, b.ffmpeg);
+        assert_eq!(a.ffprobe, b.ffprobe);
+    }
+}

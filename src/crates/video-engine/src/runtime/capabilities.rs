@@ -9,15 +9,13 @@ use std::sync::OnceLock;
 
 use crate::crates::video_engine::error::VideoResult;
 use crate::crates::video_engine::model::CaptureDevice;
-use crate::crates::video_engine::ops::{
-    FFMPEG, PROBE_TIMEOUT, find_tool, run_tool,
-};
+use crate::crates::video_engine::ops::{FFMPEG, PROBE_TIMEOUT, find_tool, run_tool};
 
 /// Everything one ffmpeg/ffprobe build advertises. Names are the
 /// exact tokens ffmpeg prints (encoder `libx264`, filter `scale`,
 /// muxer `mp4`, protocol `https`, ...).
-#[derive(Debug, Clone, Default)]
-pub(crate) struct MediaCapabilities {
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct MediaCapabilities {
     /// Video encoders (`ffmpeg -encoders`, video-only entries).
     pub video_encoders: Vec<String>,
     /// Audio encoders.
@@ -66,7 +64,7 @@ impl MediaCapabilities {
 /// Full capability snapshot of the installed ffmpeg build. Cached
 /// after the first call; `MissingTool` propagates when ffmpeg is
 /// absent.
-pub(crate) fn capabilities() -> VideoResult<MediaCapabilities> {
+pub fn capabilities() -> VideoResult<MediaCapabilities> {
     // Surface MissingTool eagerly so callers can distinguish "ffmpeg
     // absent" from "ffmpeg present but probing failed".
     find_tool(FFMPEG)?;
@@ -186,10 +184,7 @@ pub(crate) fn devices() -> Vec<CaptureDevice> {
     let Ok(program) = find_tool(FFMPEG) else {
         return Vec::new();
     };
-    let args = vec![
-        "-hide_banner".to_string(),
-        "-devices".to_string(),
-    ];
+    let args = vec!["-hide_banner".to_string(), "-devices".to_string()];
     let Ok(out) = run_tool(FFMPEG, &program, &args, PROBE_TIMEOUT) else {
         return Vec::new();
     };
@@ -206,7 +201,9 @@ pub(crate) fn devices() -> Vec<CaptureDevice> {
             let t = line.trim();
             let (kind, rest) = t.split_once(' ')?;
             let name = rest.split_whitespace().next()?.to_string();
-            let desc = rest.split_once(char::is_whitespace).map(|(_, d)| d.trim().to_string());
+            let desc = rest
+                .split_once(char::is_whitespace)
+                .map(|(_, d)| d.trim().to_string());
             Some(CaptureDevice {
                 kind: "device".to_string(),
                 name: format!("{kind} {name}"),

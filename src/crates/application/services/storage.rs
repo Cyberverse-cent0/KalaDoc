@@ -331,10 +331,7 @@ mod tests {
         assert_eq!(receipt.name, "streamed.bin");
         assert_eq!(receipt.bytes, payload.len() as u64);
         // The commit receipt carries the SHA-256 of the published bytes.
-        assert_eq!(
-            receipt.sha256,
-            format!("{:x}", Sha256::digest(&payload))
-        );
+        assert_eq!(receipt.sha256, format!("{:x}", Sha256::digest(&payload)));
 
         // The committed object is readable through both APIs.
         assert_eq!(svc.get("streamed.bin").unwrap(), payload);

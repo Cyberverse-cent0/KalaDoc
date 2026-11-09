@@ -14,9 +14,11 @@ pub(crate) fn extract_subtitles(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, track, format, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "extract_subtitles not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "extract_subtitles not implemented".to_string(),
+        ),
+    )
 }
 
 /// Convert subtitle text between `srt`, `ass`/`ssa`, and `vtt`.
@@ -30,9 +32,11 @@ pub(crate) fn convert_subtitles(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (subtitle_bytes, from_format, to_format, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "convert_subtitles not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "convert_subtitles not implemented".to_string(),
+        ),
+    )
 }
 
 /// Shift every cue by `offset_secs` (negative = earlier). `format`
@@ -44,9 +48,11 @@ pub(crate) fn shift_subtitles(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (subtitle_bytes, offset_secs, format, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "shift_subtitles not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "shift_subtitles not implemented".to_string(),
+        ),
+    )
 }
 
 /// Burn `subtitle_bytes` into `input` as hard subtitles via the
@@ -59,7 +65,9 @@ pub(crate) fn burn_subtitles(
     limits: &EngineLimits,
 ) -> VideoResult<Vec<u8>> {
     let _ = (input, subtitle_bytes, style, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "burn_subtitles not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "burn_subtitles not implemented".to_string(),
+        ),
+    )
 }

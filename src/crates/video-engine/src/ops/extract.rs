@@ -23,9 +23,11 @@ pub(crate) fn extract_streams(
     limits: &EngineLimits,
 ) -> VideoResult<MediaOutput> {
     let _ = (input, selection, subtitle_format, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "extract_streams not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "extract_streams not implemented".to_string(),
+        ),
+    )
 }
 
 /// Export chapters as a JSON document matching the probe model

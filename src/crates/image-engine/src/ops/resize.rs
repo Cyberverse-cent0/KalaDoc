@@ -23,11 +23,7 @@ pub struct ResizeOptions {
 
 /// Resize `input` to fit within `options`, preserving aspect ratio.
 /// Returns the encoded bytes in the input format.
-pub fn resize(
-    input: &[u8],
-    options: ResizeOptions,
-    limits: &EngineLimits,
-) -> ImageResult<Vec<u8>> {
+pub fn resize(input: &[u8], options: ResizeOptions, limits: &EngineLimits) -> ImageResult<Vec<u8>> {
     if options.max_width.is_none() && options.max_height.is_none() {
         return Err(ImageError::InvalidInput(
             "at least one of max_width or max_height must be given".to_string(),

@@ -157,9 +157,7 @@ impl RemoteBackend {
         let url = format!("{}{}", self.endpoint, path);
 
         let mut headers: Vec<(String, String)> = Vec::new();
-        let authorization =
-            self.signer
-                .sign(method.as_str(), &url, &mut headers, body);
+        let authorization = self.signer.sign(method.as_str(), &url, &mut headers, body);
         headers.push(("authorization".to_string(), authorization));
 
         let request = HttpRequest {
@@ -241,9 +239,7 @@ fn normalize_endpoint(endpoint: &str) -> io::Result<String> {
         .strip_prefix("https://")
         .map(|r| ("https", r))
         .or_else(|| trimmed.strip_prefix("http://").map(|r| ("http", r)))
-        .ok_or_else(|| {
-            invalid_input("remote endpoint must start with http:// or https://")
-        })?;
+        .ok_or_else(|| invalid_input("remote endpoint must start with http:// or https://"))?;
     let (scheme, rest) = rest;
     // Reject a path component — object keys live under the bucket.
     let authority = match rest.find('/') {
@@ -407,11 +403,9 @@ mod tests {
             let path = req
                 .url
                 .split_once("://")
-                .map(|(_, rest)| {
-                    match rest.find('/') {
-                        Some(i) => rest[i..].to_string(),
-                        None => String::new(),
-                    }
+                .map(|(_, rest)| match rest.find('/') {
+                    Some(i) => rest[i..].to_string(),
+                    None => String::new(),
                 })
                 .unwrap_or_default();
 
@@ -492,21 +486,24 @@ mod tests {
         // Requests went under /test-bucket/kaladoc/ (prefix confinement).
         let st = state.borrow();
         assert!(!st.requests.is_empty());
-        assert!(st
-            .requests
-            .iter()
-            .all(|(_, u)| u.contains("/test-bucket/kaladoc/")));
+        assert!(
+            st.requests
+                .iter()
+                .all(|(_, u)| u.contains("/test-bucket/kaladoc/"))
+        );
         // PUT/GET/HEAD/DELETE all targeted the object path.
         for m in [Method::Put, Method::Get, Method::Delete] {
-            assert!(st
-                .requests
-                .iter()
-                .any(|(rm, u)| *rm == m && u.ends_with("/docs/report.pdf")));
+            assert!(
+                st.requests
+                    .iter()
+                    .any(|(rm, u)| *rm == m && u.ends_with("/docs/report.pdf"))
+            );
         }
-        assert!(st
-            .requests
-            .iter()
-            .any(|(m, u)| *m == Method::Head && u.ends_with("/docs/missing.pdf")));
+        assert!(
+            st.requests
+                .iter()
+                .any(|(m, u)| *m == Method::Head && u.ends_with("/docs/missing.pdf"))
+        );
     }
 
     #[test]
@@ -521,14 +518,7 @@ mod tests {
     #[test]
     fn confinement_rejects_traversal_and_absolute() {
         let (mut b, state) = backend();
-        for bad in [
-            "../escape",
-            "a/../../escape",
-            "/abs/path",
-            "..",
-            ".",
-            "",
-        ] {
+        for bad in ["../escape", "a/../../escape", "/abs/path", "..", ".", ""] {
             assert!(
                 matches!(
                     b.write(bad, b"x"),
@@ -540,9 +530,13 @@ mod tests {
         // "a/../b" normalizes to "b" and stays inside the prefix.
         b.write("a/../b", b"ok").unwrap();
         assert_eq!(b.read("b").unwrap(), b"ok");
-        assert!(state.borrow().requests.iter().all(|(_, u)| {
-            u.contains("/test-bucket/kaladoc/") && !u.contains("..")
-        }));
+        assert!(
+            state
+                .borrow()
+                .requests
+                .iter()
+                .all(|(_, u)| { u.contains("/test-bucket/kaladoc/") && !u.contains("..") })
+        );
     }
 
     #[test]
@@ -567,10 +561,7 @@ mod tests {
                 st.scripted.push_back(500);
             }
         }
-        assert!(matches!(
-            b.read("x"),
-            Err(StorageError::Io { .. })
-        ));
+        assert!(matches!(b.read("x"), Err(StorageError::Io { .. })));
         // 1 initial + 3 retries.
         assert_eq!(state.borrow().requests.len(), 4);
     }
@@ -625,10 +616,7 @@ mod tests {
         // them — instead verify via a second mock that records.
         struct Recording(Rc<RefCell<Vec<Vec<(String, String)>>>>);
         impl HttpTransport for Recording {
-            fn request(
-                &mut self,
-                req: &HttpRequest,
-            ) -> Result<HttpResponse, TransportError> {
+            fn request(&mut self, req: &HttpRequest) -> Result<HttpResponse, TransportError> {
                 self.0.borrow_mut().push(req.headers.clone());
                 Ok(HttpResponse {
                     status: 200,
@@ -637,11 +625,9 @@ mod tests {
             }
         }
         let seen = Rc::new(RefCell::new(Vec::new()));
-        let mut b2 = RemoteBackend::with_transport(
-            test_config(),
-            Box::new(Recording(Rc::clone(&seen))),
-        )
-        .unwrap();
+        let mut b2 =
+            RemoteBackend::with_transport(test_config(), Box::new(Recording(Rc::clone(&seen))))
+                .unwrap();
         let _ = b2.write("k", b"v");
         let headers = seen.borrow();
         let flat: Vec<&str> = headers[0].iter().map(|(k, _)| k.as_str()).collect();
@@ -659,19 +645,21 @@ mod tests {
 
     #[test]
     fn invalid_config_rejected() {
-        assert!(RemoteBackend::new(
-            RemoteStorageConfig::new("ftp://bad", "b")
-                .with_credentials("a", "s")
-        )
-        .is_err());
-        assert!(RemoteBackend::new(
-            RemoteStorageConfig::new("http://h/base/path", "b")
-                .with_credentials("a", "s")
-        )
-        .is_err());
-        assert!(RemoteBackend::new(
-            RemoteStorageConfig::new("http://h", "").with_credentials("a", "s")
-        )
-        .is_err());
+        assert!(
+            RemoteBackend::new(
+                RemoteStorageConfig::new("ftp://bad", "b").with_credentials("a", "s")
+            )
+            .is_err()
+        );
+        assert!(
+            RemoteBackend::new(
+                RemoteStorageConfig::new("http://h/base/path", "b").with_credentials("a", "s")
+            )
+            .is_err()
+        );
+        assert!(
+            RemoteBackend::new(RemoteStorageConfig::new("http://h", "").with_credentials("a", "s"))
+                .is_err()
+        );
     }
 }

@@ -78,9 +78,7 @@ fn run_named(ctx: &Context, name: &str, file: &Path) -> Result<i32, CliError> {
     let output = engine.run_named(name, &input).map_err(map_pipeline_error)?;
 
     let (artifact_kind, artifact_bytes, artifact_count) = match &output.artifact {
-        crate::crates::pipeline_engine::PipelineArtifact::Bytes(b) => {
-            ("bytes", b.len() as u64, 1)
-        }
+        crate::crates::pipeline_engine::PipelineArtifact::Bytes(b) => ("bytes", b.len() as u64, 1),
         crate::crates::pipeline_engine::PipelineArtifact::Multiple(v) => {
             ("multiple", output.artifact.len_bytes(), v.len())
         }
@@ -117,7 +115,10 @@ fn run_named(ctx: &Context, name: &str, file: &Path) -> Result<i32, CliError> {
         artifact_count,
         if artifact_count == 1 { "" } else { "s" }
     );
-    println!("{:<4} {:<20} {:<22} report", "idx", "step", "engine.operation");
+    println!(
+        "{:<4} {:<20} {:<22} report",
+        "idx", "step", "engine.operation"
+    );
     for s in &steps {
         println!(
             "{:<4} {:<20} {:<22} {}",
@@ -139,9 +140,7 @@ fn run_named(ctx: &Context, name: &str, file: &Path) -> Result<i32, CliError> {
 /// resource limits and step failures are validation failures.
 fn map_pipeline_error(e: PipelineError) -> CliError {
     match &e {
-        PipelineError::PipelineNotFound(name) => {
-            CliError::NotFound(format!("pipeline {name:?}"))
-        }
+        PipelineError::PipelineNotFound(name) => CliError::NotFound(format!("pipeline {name:?}")),
         PipelineError::UnsupportedOperation { .. } => CliError::Unsupported(e.to_string()),
         _ => CliError::Validation(e.to_string()),
     }

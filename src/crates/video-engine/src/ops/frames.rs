@@ -16,9 +16,11 @@ pub(crate) fn extract_frames(
     limits: &EngineLimits,
 ) -> VideoResult<MediaOutput> {
     let _ = (input, spec, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "extract_frames not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "extract_frames not implemented".to_string(),
+        ),
+    )
 }
 
 /// Extract every frame as a numbered image sequence
@@ -29,7 +31,9 @@ pub(crate) fn video_to_image_sequence(
     limits: &EngineLimits,
 ) -> VideoResult<MediaOutput> {
     let _ = (input, format, limits);
-    Err(crate::crates::video_engine::error::VideoError::InvalidInput(
-        "video_to_image_sequence not implemented".to_string(),
-    ))
+    Err(
+        crate::crates::video_engine::error::VideoError::InvalidInput(
+            "video_to_image_sequence not implemented".to_string(),
+        ),
+    )
 }
