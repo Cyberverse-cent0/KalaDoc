@@ -68,7 +68,7 @@ pub struct Job {
     pub worker_id: Option<String>,
 }
 
-/// Input for [`crate::job_engine::enqueue`].
+/// Input for [`crate::crates::job_engine::enqueue`].
 #[derive(Debug, Clone)]
 pub struct NewJob {
     pub kind: String,

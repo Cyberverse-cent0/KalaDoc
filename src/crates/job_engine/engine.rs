@@ -100,7 +100,12 @@ impl JobEngine {
         };
 
         let result = match self.handlers.get(&job.kind) {
-            Some(handler) => handler.handle(&self.ctx, &job).await,
+            Some(handler) => {
+                // A panicking handler must not take down the whole
+                // engine task — convert the panic into a job failure
+                // so the job retries (or fails) like any other error.
+                handle_catching_panic(handler, &self.ctx, &job).await
+            }
             None => Err(JobError::NoHandler(job.kind.clone())),
         };
 
@@ -162,6 +167,42 @@ impl JobEngine {
     /// Spawns [`JobEngine::run`] on the Tokio runtime.
     pub fn spawn(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move { self.run().await })
+    }
+}
+
+/// Drives `handler.handle(...)` to completion, turning a panic during
+/// any poll into `Err(JobError::Failed)` instead of unwinding through
+/// the engine's run loop.
+async fn handle_catching_panic(
+    handler: &SharedHandler,
+    ctx: &JobContext,
+    job: &Job,
+) -> Result<(), JobError> {
+    let mut fut = handler.handle(ctx, job);
+    std::future::poll_fn(|cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            std::future::Future::poll(fut.as_mut(), cx)
+        })) {
+            Ok(std::task::Poll::Ready(res)) => std::task::Poll::Ready(res),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(payload) => std::task::Poll::Ready(Err(JobError::Failed(format!(
+                "handler panicked: {}",
+                panic_message(&*payload)
+            )))),
+        }
+    })
+    .await
+}
+
+/// Extracts a readable message from a panic payload (`String` or
+/// `&'static str` are the usual shapes; anything else is opaque).
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
     }
 }
 
@@ -312,6 +353,65 @@ mod tests {
         let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
         assert_eq!(jobs[0].status, JobStatus::Failed);
         assert!(jobs[0].last_error.as_deref().unwrap().contains("no handler"));
+    }
+
+    struct PanickingHandler;
+
+    impl JobHandler for PanickingHandler {
+        fn handle<'a>(
+            &'a self,
+            _ctx: &'a JobContext,
+            _job: &'a Job,
+        ) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'a>> {
+            Box::pin(async move { panic!("handler exploded") })
+        }
+    }
+
+    #[tokio::test]
+    async fn panicking_handler_fails_job_without_killing_engine() {
+        let pool = test_pool().await;
+        let mut eng = engine(pool.clone());
+        eng.register("test.panic", Arc::new(PanickingHandler));
+
+        eng.enqueue(&NewJob {
+            kind: "test.panic".into(),
+            payload: json!({}),
+            priority: 0,
+            run_at: None,
+            max_attempts: Some(1),
+        })
+        .await
+        .unwrap();
+
+        // The panic is caught per-poll and recorded as a job failure;
+        // the engine keeps running and can process the next job.
+        assert!(eng.run_once().await.unwrap());
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        assert_eq!(jobs[0].status, JobStatus::Failed);
+        assert!(jobs[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("handler panicked"));
+
+        // Engine still works afterwards.
+        eng.register(
+            "test.after",
+            Arc::new(CountingHandler {
+                calls: AtomicUsize::new(0),
+                fail_times: 0,
+            }),
+        );
+        eng.enqueue(&NewJob {
+            kind: "test.after".into(),
+            payload: json!({}),
+            priority: 0,
+            run_at: None,
+            max_attempts: None,
+        })
+        .await
+        .unwrap();
+        assert!(eng.run_once().await.unwrap());
     }
 
     #[tokio::test]
