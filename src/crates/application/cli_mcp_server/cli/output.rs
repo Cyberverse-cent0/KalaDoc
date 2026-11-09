@@ -14,10 +14,20 @@ pub enum OutputFormat {
     Table,
     /// A single pretty-printed JSON document on stdout.
     Json,
+    /// A single YAML document on stdout.
+    Yaml,
 }
 
 impl OutputFormat {
     pub fn is_json(self) -> bool {
         matches!(self, Self::Json)
+    }
+
+    pub fn is_yaml(self) -> bool {
+        matches!(self, Self::Yaml)
+    }
+
+    pub fn is_table(self) -> bool {
+        matches!(self, Self::Table)
     }
 }

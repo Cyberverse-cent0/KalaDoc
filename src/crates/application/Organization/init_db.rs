@@ -76,6 +76,7 @@ pub async fn init_db_with(config: &DbConfig) -> Result<SqlitePool, DbError> {
     create_users_table(&pool).await?;
     create_sessions_table(&pool).await?;
     crate::crates::job_engine::create_jobs_table(&pool).await?;
+    crate::crates::document_engine::store::schema::init_document_store(&pool).await?;
     Ok(pool)
 }
 

@@ -47,6 +47,29 @@ impl Context {
         Ok(())
     }
 
+    /// Emit a YAML document on stdout when `--output yaml` was selected.
+    pub fn emit_yaml<T: Serialize>(&self, value: &T) -> Result<(), CliError> {
+        println!("{}", serde_yaml::to_string(value).map_err(CliError::Yaml)?);
+        Ok(())
+    }
+
+    /// Emit `value` in the selected structured format. Returns `true`
+    /// when JSON/YAML output was written; `false` means the command
+    /// should render its table output.
+    pub fn emit_structured<T: Serialize>(&self, value: &T) -> Result<bool, CliError> {
+        match self.output {
+            OutputFormat::Json => {
+                self.emit_json(value)?;
+                Ok(true)
+            }
+            OutputFormat::Yaml => {
+                self.emit_yaml(value)?;
+                Ok(true)
+            }
+            OutputFormat::Table => Ok(false),
+        }
+    }
+
     /// Strict config load — fails when required secret env vars
     /// (`APP_SECRET_KEY`, `APP_DB_USER`, `APP_DB_PASSWORD`) are missing.
     pub fn config(&self) -> Result<AppConfig, CliError> {

@@ -51,6 +51,15 @@ pub enum CliError {
     /// JSON serialization failure.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    /// YAML serialization failure.
+    #[error(transparent)]
+    Yaml(#[from] serde_yaml::Error),
+    /// MCP server/runtime failure.
+    #[error("MCP server error: {0}")]
+    Mcp(String),
+    /// Unexpected internal failure.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl CliError {
@@ -91,7 +100,7 @@ impl CliError {
             Self::Auth(_) => "internal",
             Self::Db(_) | Self::Session(_) => "internal",
             Self::Io(_) => "io_error",
-            Self::Json(_) => "internal",
+            Self::Json(_) | Self::Yaml(_) | Self::Mcp(_) | Self::Internal(_) => "internal",
         }
     }
 

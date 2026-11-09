@@ -22,11 +22,10 @@ pub fn run(ctx: &Context) -> Result<i32, CliError> {
         },
     };
 
-    if ctx.json() {
-        ctx.emit_json(&info)?;
-    } else {
-        println!("{} {}", info.name, info.version);
-        println!("build: {}", info.build);
+    if ctx.emit_structured(&info)? {
+        return Ok(0);
     }
+    println!("{} {}", info.name, info.version);
+    println!("build: {}", info.build);
     Ok(0)
 }

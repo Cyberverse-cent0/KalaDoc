@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::crates::shared_public::platform::{Platform, platform};
-use crate::crates::storage::config::StorageConfig;
+use super::config::StorageConfig;
 
 /// A probed description of a target storage device/partition.
 ///

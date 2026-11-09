@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::crates::application::Organization::init_db::{DbConfig, SessionConfig};
-use crate::crates::storage::config::StorageConfig;
+use crate::crates::storage::local::config::StorageConfig;
 
 /// Fully resolved application configuration.
 #[derive(Debug, Clone)]

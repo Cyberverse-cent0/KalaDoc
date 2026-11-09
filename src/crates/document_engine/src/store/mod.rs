@@ -1,9 +1,9 @@
 //! SQLite-backed persistence for the document engine.
 //!
 //! Tables mirror the domain objects in the parent module: documents,
-//! folders, artifacts, versions, tags, permissions, audit events, and a
-//! generic `jobs_tbl` for tracking asynchronous operations (imports,
-//! exports, conversions, ...).
+//! folders, artifacts, versions, tags, permissions, and audit events.
+//! The generic job queue lives in the sibling `job_engine` crate
+//! (`jobs_tbl` is owned by it — do not create a second jobs table here).
 //!
 //! Conventions follow `application::Organization`: functions take
 //! `&SqlitePool`, return [`StoreResult`], and never `unwrap()` on
@@ -14,7 +14,6 @@ pub mod artifacts;
 pub mod documents;
 pub mod folders;
 pub mod history;
-pub mod jobs;
 pub mod permissions;
 pub mod schema;
 pub mod tags;
@@ -25,7 +24,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use sqlx::SqlitePool;
 
 pub type StoreResult<T> = Result<T, StoreError>;
 

@@ -1,7 +1,7 @@
 //! Schema creation for the document store. Idempotent — safe to call on
 //! every startup, like `create_users_table` in `application::Organization`.
 
-use sqlx::SqlitePool;
+use sqlx::{Executor, SqlitePool};
 
 /// Creates all document-engine tables and indexes. Returns `sqlx::Error`
 /// on failure; callers wrap it in their own error type.
@@ -13,7 +13,6 @@ pub async fn init_document_store(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     create_tags_tables(pool).await?;
     create_permissions_table(pool).await?;
     create_audit_table(pool).await?;
-    create_jobs_table(pool).await?;
     Ok(())
 }
 
@@ -202,33 +201,6 @@ async fn create_audit_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// Creates the generic job table used by asynchronous document
-/// operations (imports, exports, conversions, bulk edits, ...).
-///
-/// `payload`/`result` are JSON documents whose shape is defined by the
-/// `job_type`. `attempts` counts how many times a worker has picked the
-/// job up; `status` is one of `pending`, `running`, `completed`, `failed`.
-async fn create_jobs_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    pool.execute(
-        r#"
-        CREATE TABLE IF NOT EXISTS jobs_tbl (
-            id          TEXT PRIMARY KEY,
-            job_type    TEXT NOT NULL,
-            payload     TEXT,
-            status      TEXT NOT NULL DEFAULT 'pending',
-            result      TEXT,
-            error       TEXT,
-            attempts    INTEGER NOT NULL DEFAULT 0,
-            created_at  TEXT NOT NULL,
-            started_at  TEXT,
-            finished_at TEXT
-        );
-        "#,
-    )
-    .await?;
-    pool.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs_tbl(status);")
-        .await?;
-    pool.execute("CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs_tbl(job_type);")
-        .await?;
-    Ok(())
-}
+// `jobs_tbl` is owned by `crate::crates::job_engine` — its
+// `create_jobs_table` is called from `init_db_with` alongside this
+// function. Do not define a second jobs table here.

@@ -5,7 +5,7 @@ use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 
 use crate::crates::document_engine::audit::DocumentAuditEventType;
 use crate::crates::document_engine::document::{
-    Document, DocumentName, DocumentOrigin, DocumentSource, DocumentStatus, DocumentType,
+    Document, DocumentName, DocumentSource, DocumentStatus, DocumentType,
 };
 use crate::crates::document_engine::ids::{DocumentId, FolderId};
 

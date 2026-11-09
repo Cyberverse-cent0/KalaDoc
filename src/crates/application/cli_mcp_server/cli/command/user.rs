@@ -84,11 +84,10 @@ async fn create(
         email: email.to_string(),
     };
 
-    if ctx.json() {
-        ctx.emit_json(&report)?;
-    } else {
-        println!("created user '{}' (id {})", report.user_name, report.user_id);
+    if ctx.emit_structured(&report)? {
+        return Ok(0);
     }
+    println!("created user '{}' (id {})", report.user_name, report.user_id);
     Ok(0)
 }
 

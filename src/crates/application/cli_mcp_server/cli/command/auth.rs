@@ -106,12 +106,12 @@ async fn login(ctx: &Context, username_arg: Option<&str>) -> Result<i32, CliErro
         expires_at: sess.expires_at,
     };
 
-    if ctx.json() {
-        ctx.emit_json(&report)?;
-    } else {
-        println!("logged in as {}", report.user_name);
-        println!("session {} expires at {}", report.session_id, report.expires_at);
+    if ctx.emit_structured(&report)? {
+        pool.close().await;
+        return Ok(0);
     }
+    println!("logged in as {}", report.user_name);
+    println!("session {} expires at {}", report.session_id, report.expires_at);
 
     pool.close().await;
     Ok(0)
@@ -119,9 +119,7 @@ async fn login(ctx: &Context, username_arg: Option<&str>) -> Result<i32, CliErro
 
 async fn logout(ctx: &Context) -> Result<i32, CliError> {
     let Some(creds) = credentials::load()? else {
-        if ctx.json() {
-            ctx.emit_json(&serde_json::json!({ "logged_out": false }))?;
-        } else {
+        if !ctx.emit_structured(&serde_json::json!({ "logged_out": false }))? {
             println!("not logged in");
         }
         return Ok(0);
@@ -138,9 +136,7 @@ async fn logout(ctx: &Context) -> Result<i32, CliError> {
 
     let removed = credentials::clear()?;
 
-    if ctx.json() {
-        ctx.emit_json(&serde_json::json!({ "logged_out": removed }))?;
-    } else {
+    if !ctx.emit_structured(&serde_json::json!({ "logged_out": removed }))? {
         println!("logged out");
     }
     Ok(0)
@@ -166,9 +162,10 @@ async fn status(ctx: &Context) -> Result<i32, CliError> {
         },
     };
 
-    if ctx.json() {
-        ctx.emit_json(&report)?;
-    } else if report.authenticated {
+    if ctx.emit_structured(&report)? {
+        return Ok(0);
+    }
+    if report.authenticated {
         println!(
             "authenticated as {} (session {}, expires {})",
             report.user_name.as_deref().unwrap_or("?"),
@@ -195,12 +192,13 @@ async fn whoami(ctx: &Context) -> Result<i32, CliError> {
         last_name: user.last_name,
     };
 
-    if ctx.json() {
-        ctx.emit_json(&report)?;
-    } else {
-        println!("{} <{}>", report.user_name, report.email);
-        println!("{} {}", report.first_name, report.last_name);
+    if ctx.emit_structured(&report)? {
+        auth.pool.close().await;
+        return Ok(0);
     }
+    println!("{} <{}>", report.user_name, report.email);
+    println!("{} {}", report.first_name, report.last_name);
+    auth.pool.close().await;
     Ok(0)
 }
 
@@ -223,17 +221,18 @@ async fn session_list(ctx: &Context) -> Result<i32, CliError> {
         })
         .collect();
 
-    if ctx.json() {
-        ctx.emit_json(&views)?;
-    } else {
-        for v in &views {
-            let mark = if v.current { "*" } else { " " };
-            println!(
-                "{mark} {}  created={} expires={} last_seen={}",
-                v.id, v.created_at, v.expires_at, v.last_seen_at
-            );
-        }
+    if ctx.emit_structured(&views)? {
+        auth.pool.close().await;
+        return Ok(0);
     }
+    for v in &views {
+        let mark = if v.current { "*" } else { " " };
+        println!(
+            "{mark} {}  created={} expires={} last_seen={}",
+            v.id, v.created_at, v.expires_at, v.last_seen_at
+        );
+    }
+    auth.pool.close().await;
     Ok(0)
 }
 
@@ -255,11 +254,12 @@ async fn session_revoke(ctx: &Context, id: i64) -> Result<i32, CliError> {
         return Err(CliError::NotFound(format!("session {id}")));
     }
 
-    if ctx.json() {
-        ctx.emit_json(&serde_json::json!({ "revoked": id }))?;
-    } else {
-        println!("revoked session {id}");
+    if ctx.emit_structured(&serde_json::json!({ "revoked": id }))? {
+        auth.pool.close().await;
+        return Ok(0);
     }
+    println!("revoked session {id}");
+    auth.pool.close().await;
     Ok(0)
 }
 

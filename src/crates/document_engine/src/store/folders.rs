@@ -74,9 +74,9 @@ pub async fn get_folder(pool: &SqlitePool, id: &FolderId) -> StoreResult<Option<
     fetch_folder(pool, id).await
 }
 
-/// Lists folders, optionally filtered by owner and/or direct parent.
-/// Passing `parent_id: None` lists folders at every level; callers
-/// build the tree from `parent_id` links.
+/// Lists folders, optionally filtered by owner. `parent_id` selects
+/// direct children of that folder; `None` lists only root-level
+/// folders. Callers build deeper trees by walking `parent_id` links.
 pub async fn list_folders(
     pool: &SqlitePool,
     owner_id: Option<&str>,
@@ -88,11 +88,10 @@ pub async fn list_folders(
     if let Some(owner) = owner_id {
         qb.push(" AND owner_id = ").push_bind(owner);
     }
-    match parent_id {
-        Some(parent) => {
-            qb.push(" AND parent_id = ").push_bind(parent.as_str());
-        }
-        None => qb.push(" AND parent_id IS NULL"),
+    if let Some(parent) = parent_id {
+        qb.push(" AND parent_id = ").push_bind(parent.as_str());
+    } else {
+        qb.push(" AND parent_id IS NULL");
     }
     qb.push(" ORDER BY name");
     let rows = qb.build().fetch_all(pool).await?;

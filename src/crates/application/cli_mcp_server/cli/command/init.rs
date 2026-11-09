@@ -30,16 +30,16 @@ pub async fn run(ctx: &Context) -> Result<i32, CliError> {
         expired_sessions_removed: removed,
     };
 
-    if ctx.json() {
-        ctx.emit_json(&report)?;
-    } else {
-        println!(
-            "database ready: {} ({} max connections)",
-            report.database, report.max_connections
-        );
-        if removed > 0 {
-            println!("removed {removed} expired session(s)");
-        }
+    if ctx.emit_structured(&report)? {
+        pool.close().await;
+        return Ok(0);
+    }
+    println!(
+        "database ready: {} ({} max connections)",
+        report.database, report.max_connections
+    );
+    if removed > 0 {
+        println!("removed {removed} expired session(s)");
     }
 
     pool.close().await;
