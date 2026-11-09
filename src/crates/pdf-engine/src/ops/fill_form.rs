@@ -51,8 +51,8 @@ use crate::crates::core::engine::EngineLimits;
 use crate::crates::pdf_engine::error::{PdfError, PdfResult};
 
 use super::form_fields::{
-    acroform_dict_id, collect_fields, ensure_helv_font, escape_pdf_literal,
-    normalize_acroform, set_need_appearances, FieldEntry,
+    FieldEntry, acroform_dict_id, collect_fields, ensure_helv_font, escape_pdf_literal,
+    normalize_acroform, set_need_appearances,
 };
 use super::load::{load_pdf, lopdf_err, reject_encrypted, save_pdf};
 
@@ -63,14 +63,18 @@ use super::load::{load_pdf, lopdf_err, reject_encrypted, save_pdf};
 /// name. When several fields share a name, the first in document
 /// order is filled. Duplicate `(name, value)` pairs are applied in
 /// order (last write wins).
-pub fn fill_form(input: &[u8], values: &[(String, String)], limits: &EngineLimits) -> PdfResult<Vec<u8>> {
+pub fn fill_form(
+    input: &[u8],
+    values: &[(String, String)],
+    limits: &EngineLimits,
+) -> PdfResult<Vec<u8>> {
     let mut doc = load_pdf(input, limits)?;
     reject_encrypted(&doc)?;
 
     if values.is_empty() {
         return Ok(input.to_vec());
     }
-    let acro_id = match acroform_dict_id(&doc)? {
+    let acro_id = match acroform_dict_id(&mut doc)? {
         Some(id) => id,
         None => {
             return Err(PdfError::InvalidInput(
@@ -91,7 +95,7 @@ pub fn fill_form(input: &[u8], values: &[(String, String)], limits: &EngineLimit
             .iter()
             .find(|e| e.name == *name && (e.type_name == "Tx" || e.type_name == "Ch"))
         else {
-            missing.push(name);
+            missing.push(name.as_str());
             continue;
         };
         if entry.type_name == "Ch"
@@ -122,7 +126,9 @@ pub fn fill_form(input: &[u8], values: &[(String, String)], limits: &EngineLimit
     // Pass 2 — write /V and regenerate widget appearances.
     let mut helv: Option<ObjectId> = None;
     for (entry, value) in ops {
-        let field_id = entry.id.expect("checked in pass 1");
+        let Some(field_id) = entry.id else {
+            continue;
+        };
         doc.get_object_mut(field_id)
             .map_err(lopdf_err)?
             .as_dict_mut()
@@ -148,7 +154,7 @@ pub fn clear_form(input: &[u8], limits: &EngineLimits) -> PdfResult<Vec<u8>> {
     let mut doc = load_pdf(input, limits)?;
     reject_encrypted(&doc)?;
 
-    let Some(acro_id) = acroform_dict_id(&doc)? else {
+    let Some(acro_id) = acroform_dict_id(&mut doc)? else {
         return Ok(input.to_vec());
     };
     normalize_acroform(&mut doc)?;
@@ -158,7 +164,8 @@ pub fn clear_form(input: &[u8], limits: &EngineLimits) -> PdfResult<Vec<u8>> {
         let Some(field_id) = entry.id else {
             continue;
         };
-        doc.get_object_mut(field_id)
+        let _ = doc
+            .get_object_mut(field_id)
             .map_err(lopdf_err)?
             .as_dict_mut()
             .map_err(lopdf_err)?
@@ -173,7 +180,7 @@ pub fn clear_form(input: &[u8], limits: &EngineLimits) -> PdfResult<Vec<u8>> {
 /// appearance stream showing `value`, but only when the widget
 /// already has an `/AP` entry (widgets without one are left for the
 /// viewer to generate via `/NeedAppearances`).
-fn regenerate_appearance(
+pub(crate) fn regenerate_appearance(
     doc: &mut Document,
     acro_id: ObjectId,
     helv: &mut Option<ObjectId>,
@@ -239,7 +246,7 @@ fn regenerate_appearance(
         .as_dict_mut()
         .map_err(lopdf_err)?;
     dict.set("AP", dictionary! { "N" => stream_id });
-    dict.remove(b"AS");
+    let _ = dict.remove(b"AS");
     Ok(())
 }
 
@@ -249,7 +256,7 @@ fn regenerate_appearance(
 
 #[cfg(test)]
 mod tests {
-    use lopdf::{Document, Object, dictionary};
+    use lopdf::{Document, Object, Stream, dictionary, text_string};
 
     use super::*;
     use crate::crates::pdf_engine::ops::form_fields::{
@@ -297,10 +304,7 @@ mod tests {
         let catalog = doc.catalog().unwrap();
         let (_, af) = doc.dereference(catalog.get(b"AcroForm").unwrap()).unwrap();
         let af = af.as_dict().unwrap();
-        assert_eq!(
-            af.get(b"NeedAppearances").unwrap().as_bool().unwrap(),
-            true
-        );
+        assert_eq!(af.get(b"NeedAppearances").unwrap().as_bool().unwrap(), true);
 
         let cleared = clear_form(&filled, &limits()).unwrap();
         assert_eq!(field_value(&cleared, "name"), None);
@@ -313,7 +317,11 @@ mod tests {
         let base = pdf_with_pages(&["p"]);
         let created = create_text_field(&base, &text_spec("a", None), &limits()).unwrap();
         assert!(matches!(
-            fill_form(&created, &[("missing".to_string(), "x".to_string())], &limits()),
+            fill_form(
+                &created,
+                &[("missing".to_string(), "x".to_string())],
+                &limits()
+            ),
             Err(PdfError::InvalidInput(_))
         ));
         // Empty values list is a no-op.
@@ -364,12 +372,8 @@ mod tests {
         doc.save_to(&mut buf).unwrap();
 
         // Export value "red" (first of the pair) is accepted.
-        let filled = fill_form(
-            &buf,
-            &[("color".to_string(), "red".to_string())],
-            &limits(),
-        )
-        .unwrap();
+        let filled =
+            fill_form(&buf, &[("color".to_string(), "red".to_string())], &limits()).unwrap();
         assert_eq!(field_value(&filled, "color").as_deref(), Some("red"));
 
         // Display text and unknown values are rejected.
@@ -388,16 +392,11 @@ mod tests {
 
         // Give the merged widget a stale /AP stream, as a real producer would.
         let mut doc = Document::load_mem(&created).unwrap();
-        let fields = list_form_fields(&created, &limits()).unwrap();
-        let field_name = fields[0].name.clone();
-        let _ = field_name;
         // Find the field object id via the AcroForm /Fields array.
         let catalog = doc.catalog().unwrap();
         let (_, af) = doc.dereference(catalog.get(b"AcroForm").unwrap()).unwrap();
         let af = af.as_dict().unwrap();
-        let (_, fields_arr) = doc
-            .dereference(af.get(b"Fields").unwrap())
-            .unwrap();
+        let (_, fields_arr) = doc.dereference(af.get(b"Fields").unwrap()).unwrap();
         let first = fields_arr.as_array().unwrap()[0].as_reference().unwrap();
         let ap_id = doc.add_object(Stream::new(
             dictionary! {

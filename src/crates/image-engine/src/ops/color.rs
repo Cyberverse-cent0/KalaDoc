@@ -24,12 +24,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use image::{ColorType, DynamicImage, Pixel};
+use image::{DynamicImage, Pixel};
 
 use crate::crates::core::engine::EngineLimits;
 use crate::crates::image_engine::error::{ImageError, ImageResult};
 
-use super::load::{decode, encode};
+use super::load::{decode, encode, normalize_8bit};
 
 /// Parameters for [`color`]. Every field is optional; unset fields are
 /// skipped. At least one adjustment must be enabled.
@@ -128,21 +128,7 @@ pub fn color(input: &[u8], options: &ColorOptions, limits: &EngineLimits) -> Ima
     let decoded = decode(input, limits)?;
     // Normalize to 8-bit RGB(A), exactly like `adjust`: other color
     // types gain an RGB(A) type and alpha-carrying formats keep alpha.
-    let mut image = match decoded.image {
-        DynamicImage::ImageRgb8(buf) => DynamicImage::ImageRgb8(buf),
-        DynamicImage::ImageRgba8(buf) => DynamicImage::ImageRgba8(buf),
-        other => {
-            let has_alpha = matches!(
-                other.color(),
-                ColorType::La8 | ColorType::La16 | ColorType::Rgba16 | ColorType::Rgba32F
-            );
-            if has_alpha {
-                DynamicImage::ImageRgba8(other.to_rgba8())
-            } else {
-                DynamicImage::ImageRgb8(other.to_rgb8())
-            }
-        }
-    };
+    let mut image = normalize_8bit(decoded.image);
 
     if let Some(channels) = options.channels {
         apply_channel_adjust(&mut image, &channels);
@@ -176,12 +162,12 @@ fn validate(options: &ColorOptions) -> ImageResult<()> {
             "at least one color adjustment must be enabled".to_string(),
         ));
     }
-    if let Some(s) = options.saturation {
-        if !s.is_finite() || !(-100.0..=100.0).contains(&s) {
-            return Err(ImageError::InvalidInput(format!(
-                "saturation must be a finite value in -100.0..=100.0, got {s}"
-            )));
-        }
+    if let Some(s) = options.saturation
+        && (!s.is_finite() || !(-100.0..=100.0).contains(&s))
+    {
+        return Err(ImageError::InvalidInput(format!(
+            "saturation must be a finite value in -100.0..=100.0, got {s}"
+        )));
     }
     if let Some(channels) = options.channels {
         if channels.is_empty() {
@@ -194,19 +180,19 @@ fn validate(options: &ColorOptions) -> ImageResult<()> {
             ("green", channels.green_gain, channels.green_offset),
             ("blue", channels.blue_gain, channels.blue_offset),
         ] {
-            if let Some(g) = gain {
-                if !g.is_finite() || !(0.0..=4.0).contains(&g) {
-                    return Err(ImageError::InvalidInput(format!(
-                        "{name}_gain must be a finite value in 0.0..=4.0, got {g}"
-                    )));
-                }
+            if let Some(g) = gain
+                && (!g.is_finite() || !(0.0..=4.0).contains(&g))
+            {
+                return Err(ImageError::InvalidInput(format!(
+                    "{name}_gain must be a finite value in 0.0..=4.0, got {g}"
+                )));
             }
-            if let Some(o) = offset {
-                if !(-255..=255).contains(&o) {
-                    return Err(ImageError::InvalidInput(format!(
-                        "{name}_offset must be in -255..=255, got {o}"
-                    )));
-                }
+            if let Some(o) = offset
+                && !(-255..=255).contains(&o)
+            {
+                return Err(ImageError::InvalidInput(format!(
+                    "{name}_offset must be in -255..=255, got {o}"
+                )));
             }
         }
     }
@@ -216,7 +202,7 @@ fn validate(options: &ColorOptions) -> ImageResult<()> {
 /// Calls `f` with a mutable slice of the first three (color) channels
 /// of every pixel. Only valid on the normalized `Rgb8`/`Rgba8` forms;
 /// the alpha channel (index 3) is never included.
-fn for_each_color_channel(img: &mut DynamicImage, mut f: impl FnMut(&mut [u8])) {
+pub(crate) fn for_each_color_channel(img: &mut DynamicImage, mut f: impl FnMut(&mut [u8])) {
     match img {
         DynamicImage::ImageRgb8(buf) => {
             for pixel in buf.pixels_mut() {
@@ -233,7 +219,7 @@ fn for_each_color_channel(img: &mut DynamicImage, mut f: impl FnMut(&mut [u8])) 
 }
 
 /// Read-only counterpart of [`for_each_color_channel`].
-fn for_each_color_channel_ref(img: &DynamicImage, mut f: impl FnMut(&[u8])) {
+pub(crate) fn for_each_color_channel_ref(img: &DynamicImage, mut f: impl FnMut(&[u8])) {
     match img {
         DynamicImage::ImageRgb8(buf) => {
             for pixel in buf.pixels() {
@@ -322,17 +308,18 @@ fn apply_high_contrast(img: &mut DynamicImage, per_channel: bool) {
 /// Inputs outside the range clamp to 0/255; `lo == hi` is identity.
 fn levels_lut(lo: u8, hi: u8) -> [u8; 256] {
     let mut lut = [0u8; 256];
+    for (i, v) in lut.iter_mut().enumerate() {
+        *v = i as u8;
+    }
     let lo = u32::from(lo);
     let hi = u32::from(hi);
     let range = hi.saturating_sub(lo);
+    if range == 0 {
+        return lut;
+    }
     for (i, v) in lut.iter_mut().enumerate() {
-        let x = i as u32;
-        *v = if range == 0 {
-            i as u8
-        } else {
-            let clamped = x.clamp(lo, hi) - lo;
-            ((clamped * 255 + range / 2) / range).min(255) as u8
-        };
+        let clamped = (i as u32).clamp(lo, hi) - lo;
+        *v = ((clamped * 255 + range / 2) / range).min(255) as u8;
     }
     lut
 }

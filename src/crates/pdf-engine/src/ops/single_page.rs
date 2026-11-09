@@ -9,8 +9,9 @@
 //!
 //! # Documented choices and limitations
 //!
-//! - `cols`, when given, must be in `1..=1024` and is clamped to the
-//!   page count; `None` picks `ceil(sqrt(n))`.
+//! - `cols`, when given, must be in `1..=1024`; values larger than the
+//!   page count leave trailing empty cells. `None` picks
+//!   `ceil(sqrt(n))`.
 //! - The output page size is `cols * max_page_w` × `rows * max_page_h`
 //!   where `max_page_w`/`max_page_h` are the largest selected-page
 //!   MediaBox extents. Both dimensions are capped at
@@ -65,7 +66,7 @@ pub fn single_page(
     let forms = import_as_forms(&mut doc, &numbers)?;
 
     let n = forms.len();
-    let cols = cols.map_or_else(|| (n as f64).sqrt().ceil() as u32, |c| c.min(n as u32));
+    let cols = cols.unwrap_or_else(|| (n as f64).sqrt().ceil() as u32);
     let rows = n.div_ceil(cols as usize) as u32;
 
     // Uniform cell size = largest source page extent.

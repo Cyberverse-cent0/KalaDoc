@@ -10,10 +10,12 @@
 //! All ops return [`ImageError`] on malformed input and never panic.
 
 mod adjust;
+mod cmyk;
 mod color;
 mod compress;
 mod convert;
 mod crop;
+mod effects;
 mod flip;
 mod format;
 mod info;
@@ -26,10 +28,14 @@ mod validate;
 mod watermark;
 
 pub use adjust::{AdjustOptions, adjust};
+pub use cmyk::cmyk;
 pub use color::{ChannelAdjust, ColorOptions, HighContrastOptions, color};
 pub use compress::{CompressOptions, compress};
 pub use convert::convert;
 pub use crop::crop;
+pub use effects::{
+    ColorReplaceOptions, LevelsOptions, PhotocopyOptions, levels, photocopy, replace_color,
+};
 pub use flip::{FlipDirection, flip, flip_mirror};
 pub use format::ImageFormat;
 pub use info::{ImageInfo, inspect};

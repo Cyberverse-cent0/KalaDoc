@@ -405,6 +405,17 @@ mod tests {
     }
 
     #[test]
+    fn duplicates_before_anchor() {
+        let pdf = pdf_with_pages(&["one", "two", "three"]);
+        let (out, numbers) =
+            duplicate_pages(&pdf, "3", 1, DupPos::Before(2), &EngineLimits::default()).unwrap();
+        assert_eq!(test_page_count(&out), 4);
+        assert_eq!(numbers, vec![2]);
+        assert!(page_text(&out, 2).contains("three"));
+        assert!(page_text(&out, 3).contains("two"));
+    }
+
+    #[test]
     fn duplicates_in_place_and_multiple_copies() {
         let pdf = pdf_with_pages(&["one", "two", "three"]);
         let (out, numbers) =

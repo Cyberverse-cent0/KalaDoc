@@ -357,7 +357,11 @@ mod tests {
         let pdf = pdf_with_invoked_image();
         assert_eq!(extract_images(&pdf, None, &limits()).unwrap().len(), 1);
 
-        let report = remove_images(&pdf, None, &limits()).unwrap();
+        // Select only page 1: page 2 shares the same /Resources object
+        // and legitimately exposes /Im1 too, so a whole-document
+        // removal would strip it from both pages. Scoping to page 1 is
+        // what exercises the page-private-resources isolation below.
+        let report = remove_images(&pdf, Some("1"), &limits()).unwrap();
         assert_eq!(report.images_removed, 1);
         assert_eq!(report.pages_affected, vec![1]);
 
@@ -395,15 +399,16 @@ mod tests {
     #[test]
     fn page_range_limits_removal() {
         let pdf = pdf_with_invoked_image();
+        // Page 2 shares the page-1 /Resources object, so its effective
+        // resources also expose /Im1: selecting page 2 removes that
+        // page's resource entry (counts once per page, per the op
+        // contract) while page 1 keeps its image.
         let report = remove_images(&pdf, Some("2"), &limits()).unwrap();
-        assert_eq!(report.images_removed, 0);
-        assert!(report.pages_affected.is_empty());
-        assert_eq!(
-            extract_images(&report.bytes, None, &limits())
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(report.images_removed, 1);
+        assert_eq!(report.pages_affected, vec![2]);
+        let images = extract_images(&report.bytes, None, &limits()).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].page, 1);
     }
 
     #[test]

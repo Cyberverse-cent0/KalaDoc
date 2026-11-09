@@ -17,8 +17,8 @@ mod store;
 pub use engine::{JobEngine, JobEngineConfig};
 pub use error::JobError;
 pub use handler::{JobContext, JobHandler, SharedHandler};
-pub use job::{Job, JobStatus, NewJob};
+pub use job::{BatchProgress, Job, JobStatus, NewJob};
 pub use store::{
-    cancel_job, claim_next, complete, create_jobs_table, enqueue, list_jobs, requeue_running,
-    retry_job,
+    batch_jobs, batch_progress, cancel_batch, cancel_job, claim_next, complete, create_jobs_table,
+    enqueue, enqueue_batch, list_jobs, report_progress, requeue_running, retry_job, skip_job,
 };

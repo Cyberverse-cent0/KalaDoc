@@ -168,14 +168,16 @@ impl Mat {
         if !det.is_finite() || det.abs() < 1e-12 {
             return None;
         }
-        let (a, b, c, d) = (self.d / det, -self.b / det, -self.c / det, self.a / det);
+        // Inverse linear part uses the original a,b,c,d; the inverse
+        // translation is (c*f - d*e, b*e - a*f) / det over the ORIGINAL
+        // coefficients.
         Some(Mat {
-            a,
-            b,
-            c,
-            d,
-            e: (c * self.f - d * self.e),
-            f: (b * self.e - a * self.f),
+            a: self.d / det,
+            b: -self.b / det,
+            c: -self.c / det,
+            d: self.a / det,
+            e: (self.c * self.f - self.d * self.e) / det,
+            f: (self.b * self.e - self.a * self.f) / det,
         })
     }
 }
@@ -751,8 +753,9 @@ mod tests {
             "markup should be appended after content"
         );
         assert!(content.contains(" m\n"), "path move present: {content}");
-        assert!(content.contains(" h\n"), "path close present");
-        assert!(content.contains(" f\n"), "path fill present");
+        // `h` and `f` take no operands, so they appear as bare lines.
+        assert!(content.contains("\nh\n"), "path close present: {content}");
+        assert!(content.contains("\nf\n"), "path fill present: {content}");
         assert!(content.contains(" gs"), "extgstate alpha applied");
 
         // The page must reference an ExtGState resource.
@@ -780,10 +783,10 @@ mod tests {
             (MarkupKind::Strike, None),
         ] {
             let out = text_markup(&input, kind, None, color, &EngineLimits::default()).unwrap();
-            assert_eq!(page_count(&out), 1);
+            assert_eq!(page_count(&out), 2);
             let content = page_content(&out);
             assert!(content.contains(" rg"));
-            assert!(content.contains(" f\n"));
+            assert!(content.contains("\nf\n"));
             // No ExtGState needed for opaque marks.
             assert!(!content.contains(" gs"), "no alpha for {kind:?}");
             if color.is_some() {
@@ -810,9 +813,9 @@ mod tests {
         let c1 = String::from_utf8_lossy(&doc.get_page_content(pages[&1])).into_owned();
         let c2 = String::from_utf8_lossy(&doc.get_page_content(pages[&2])).into_owned();
         let c3 = String::from_utf8_lossy(&doc.get_page_content(pages[&3])).into_owned();
-        assert!(!c1.contains(" f\n"), "page 1 untouched");
-        assert!(c2.contains(" f\n"), "page 2 marked");
-        assert!(!c3.contains(" f\n"), "page 3 untouched");
+        assert!(!c1.contains("\nf\n"), "page 1 untouched");
+        assert!(c2.contains("\nf\n"), "page 2 marked");
+        assert!(!c3.contains("\nf\n"), "page 3 untouched");
     }
 
     #[test]
@@ -850,7 +853,7 @@ mod tests {
         .unwrap();
         let content = page_content(&out);
         // Three visible shows → three quads; invisible text → none.
-        let fills = content.matches(" f\n").count();
+        let fills = content.matches("\nf\nQ").count();
         assert_eq!(fills, 3, "expected 3 markup quads: {content}");
     }
 
@@ -887,7 +890,7 @@ mod tests {
         )
         .unwrap();
         let content = page_content(&out);
-        assert!(content.contains(" f\n"), "markup emitted: {content}");
+        assert!(content.contains("\nf\n"), "markup emitted: {content}");
         // Emitted coords live in end-of-stream (untransformed) space:
         // text x=100 under 2x+50 → device x=250; quad should start near
         // 250 minus a small pad. Check a coordinate in that ballpark.

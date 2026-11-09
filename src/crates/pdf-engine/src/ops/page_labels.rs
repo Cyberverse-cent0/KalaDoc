@@ -112,7 +112,14 @@ pub fn set_page_labels(
 
     // Merge runs of identical consecutive labels into single /Nums
     // segments: key = 0-based start page index, value = label dict.
-    let mut nums: Vec<Object> = Vec::new();
+    struct Run<'a> {
+        /// 1-based first page of the run.
+        start: u32,
+        /// 1-based last page of the run.
+        end: u32,
+        label: &'a str,
+    }
+    let mut runs: Vec<Run> = Vec::new();
     let mut iter = sorted.iter().peekable();
     while let Some(&(page, label)) = iter.next() {
         // Extend the run while the next page is consecutive AND carries
@@ -127,12 +134,32 @@ pub fn set_page_labels(
                 break;
             }
         }
+        runs.push(Run {
+            start: page,
+            end: end_page,
+            label,
+        });
+    }
+
+    let mut nums: Vec<Object> = Vec::new();
+    for (i, run) in runs.iter().enumerate() {
         let label_dict = dictionary! {
-            "P" => label_string_object(label),
+            "P" => label_string_object(run.label),
             "S" => "None",
         };
-        nums.push(Object::Integer(i64::from(page - 1)));
+        nums.push(Object::Integer(i64::from(run.start - 1)));
         nums.push(Object::Dictionary(label_dict));
+        // A /Nums segment implicitly extends until the next key, so
+        // unlabeled pages between this run and the next labeled page
+        // (or EOF) need an explicit "breaker" entry — an /S /None dict
+        // with no /P renders as no label.
+        let next_start = runs.get(i + 1).map(|r| r.start).unwrap_or(page_count + 1);
+        if run.end + 1 < next_start {
+            nums.push(Object::Integer(i64::from(run.end)));
+            nums.push(Object::Dictionary(dictionary! {
+                "S" => "None",
+            }));
+        }
     }
 
     let labels_id = doc
@@ -215,7 +242,11 @@ pub fn get_page_labels(input: &[u8], limits: &EngineLimits) -> PdfResult<Vec<Opt
                     format_label_number(n, segment.style)
                 )
             };
-            *slot = Some(rendered);
+            // An empty rendered label (e.g. a breaker's /S /None dict
+            // with no /P) means "no label" — leave the slot as None.
+            if !rendered.is_empty() {
+                *slot = Some(rendered);
+            }
         }
     }
     Ok(out)

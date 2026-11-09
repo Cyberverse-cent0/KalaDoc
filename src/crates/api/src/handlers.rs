@@ -795,6 +795,12 @@ pub async fn process_document(
         .await?
         .ok_or_else(|| ApiError::not_found("document", id.clone()))?;
 
+    if let Some(params) = &body.params
+        && !params.is_object()
+    {
+        return Err(ApiError::bad_request("params must be a JSON object"));
+    }
+
     let artifact_id = body.artifact_id.as_deref();
     let pool = state.services.pool();
     let op = body.op.trim();

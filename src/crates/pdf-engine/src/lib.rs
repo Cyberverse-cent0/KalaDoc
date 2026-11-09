@@ -81,22 +81,4 @@ mod tests;
 
 pub use engine::PdfEngine;
 pub use error::{PdfError, PdfResult};
-pub use ops::{
-    AnnotFilter, AnnotationInfo, BlankReport, ColorReport, CommentIcon, CommentSpec,
-    CompareMode, CompareReport, ConvertTarget, CryptoSignatureInfo, CryptoSignatureReport,
-    DiffEntry, DiffKind, DrawTextSpec, DupPos, EmbeddedImage, FreeTextSpec, GcReport,
-    HeaderFooterSpec, InsertPos, LinearizeReport, MarkPosition, PageImage, PageImageReport,
-    PageNumberStyle, PageSize, PageText, PdfDate, PdfInfo, PdfMetadata, PdfPermissions, PdfaLevel,
-    PdfaReport, RemoveObjectsReport, RenderFormat, RepairReport, ResizeSpec, RotateDegrees,
-    SignCredentials, SignOptions, SignatureInfo, SignatureReport, StampOptions,
-    ValidationReport, WatermarkOptions, XmpMetadata, add_comment, add_freetext,
-    add_page_numbers, compare, compress, convert, crop, decrypt, draw_text, duplicate_pages,
-    encrypt, extract_images, extract_metadata, extract_pages, extract_text, flatten,
-    garbage_collect, get_xmp, grayscale, headers_footers, insert_blank, inspect, interleave,
-    invert_colors, linearize, list_annotations, merge, ocr, ocr_languages, overlay, page_count,
-    parse_page_range, redact, remove_annotations,
-    remove_blank_pages, remove_embedded_files, remove_javascript_names, remove_named_objects,
-    remove_pages, remove_signatures, render, repair, resize, rotate, sanitize, scale_content,
-    set_xmp, sign, split, stamp, to_pdfa, validate, verify_signatures,
-    verify_signatures_crypto, watermark,
-};
+pub use ops::*;

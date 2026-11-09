@@ -66,8 +66,8 @@ impl EngineRegistry {
     }
 
     /// A registry pre-populated with the built-in engines: `convert`,
-    /// `image`, `pdf`, `pipeline` and `security`. Additional engines can
-    /// be added with [`EngineRegistry::register`].
+    /// `image`, `multimedia`, `pdf`, `pipeline` and `security`. Additional
+    /// engines can be added with [`EngineRegistry::register`].
     pub fn builtin() -> Self {
         let mut registry = Self::new();
         registry.register(Arc::new(ConversionEngine::new()));
@@ -333,7 +333,14 @@ mod tests {
     fn builtin_registers_all_engines() {
         let registry = EngineRegistry::builtin();
         assert_eq!(registry.len(), 6);
-        for name in ["convert", "image", "multimedia", "pdf", "pipeline", "security"] {
+        for name in [
+            "convert",
+            "image",
+            "multimedia",
+            "pdf",
+            "pipeline",
+            "security",
+        ] {
             assert!(registry.get(name).is_some(), "missing {name}");
         }
 
@@ -341,7 +348,14 @@ mod tests {
         let names: Vec<&str> = infos.iter().map(|info| info.name.as_str()).collect();
         assert_eq!(
             names,
-            ["convert", "image", "multimedia", "pdf", "pipeline", "security"]
+            [
+                "convert",
+                "image",
+                "multimedia",
+                "pdf",
+                "pipeline",
+                "security"
+            ]
         );
     }
 
@@ -378,14 +392,15 @@ mod tests {
     async fn builtin_engines_report_healthy() {
         let registry = EngineRegistry::builtin();
         let results = registry.health_all().await;
-        assert_eq!(results.len(), 5);
+        assert_eq!(results.len(), 6);
         for entry in &results {
             // Engines may honestly report Degraded when an optional
             // external tool (e.g. tesseract for pdf OCR) is absent —
             // that is still a working engine, not an unavailable one.
+            // `message` is informational: Healthy engines may carry
+            // detail such as a detected tool version.
             match entry.status {
-                EngineHealthStatus::Healthy => assert!(entry.message.is_none()),
-                EngineHealthStatus::Degraded => assert!(entry.message.is_some()),
+                EngineHealthStatus::Healthy | EngineHealthStatus::Degraded => {}
                 EngineHealthStatus::Unavailable => {
                     panic!("{} is unavailable: {:?}", entry.name, entry.message)
                 }

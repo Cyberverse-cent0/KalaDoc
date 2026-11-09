@@ -329,7 +329,7 @@ fn remove_outline_tree(doc: &mut Document) {
         .catalog()
         .ok()
         .and_then(|c| c.get(b"Outlines").ok().cloned());
-    if let Some(catalog) = doc.catalog_mut().ok() {
+    if let Ok(catalog) = doc.catalog_mut() {
         catalog.remove(b"Outlines");
     }
     let Some(outlines_obj) = outlines_obj else {
@@ -449,10 +449,10 @@ fn walk_outline_chain(
             return;
         };
         // Cycle guard for indirect items.
-        if let Ok(id) = obj.as_reference() {
-            if !visited.insert(id) {
-                return;
-            }
+        if let Ok(id) = obj.as_reference()
+            && !visited.insert(id)
+        {
+            return;
         }
 
         let title = dict
@@ -611,7 +611,7 @@ fn named_destination<'a>(
         && let Ok((_, pairs_obj)) = doc.dereference(pairs)
         && let Ok(items) = pairs_obj.as_array()
     {
-        for pair in items.chunks_exact(2) {
+        for pair in items.as_chunks::<2>().0 {
             let key_text = decode_text_string(&pair[0]).ok().or_else(|| {
                 pair[0]
                     .as_str()

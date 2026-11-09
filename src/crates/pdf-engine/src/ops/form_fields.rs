@@ -284,7 +284,13 @@ pub fn delete_form_field(input: &[u8], name: &str, limits: &EngineLimits) -> Pdf
     };
     let (array_loc, index, field_id) = (node.loc.clone(), node.index, node.id);
     let mut widget_ids = Vec::new();
-    collect_subtree_widgets(&doc, field_id, is_widget_dict(&doc, &node.dict), &mut widget_ids, 0);
+    collect_subtree_widgets(
+        &doc,
+        field_id,
+        is_widget_dict(&doc, &node.dict),
+        &mut widget_ids,
+        0,
+    );
 
     // Best effort: drop the widget annotations from every page.
     for widget_id in widget_ids {
@@ -325,9 +331,7 @@ pub(crate) fn object_text(doc: &Document, obj: &Object) -> Option<String> {
 
 /// `/T` partial field name.
 fn partial_name(doc: &Document, dict: &lopdf::Dictionary) -> Option<String> {
-    dict.get(b"T")
-        .ok()
-        .and_then(|o| object_text(doc, o))
+    dict.get(b"T").ok().and_then(|o| object_text(doc, o))
 }
 
 /// `/FT` field type name (`Tx`, `Btn`, ...).
@@ -349,9 +353,7 @@ fn field_flags(doc: &Document, dict: &lopdf::Dictionary) -> Option<i64> {
 
 /// `/V` field value decoded as text (names decode too, for `Btn`).
 fn field_value(doc: &Document, dict: &lopdf::Dictionary) -> Option<String> {
-    dict.get(b"V")
-        .ok()
-        .and_then(|o| object_text(doc, o))
+    dict.get(b"V").ok().and_then(|o| object_text(doc, o))
 }
 
 /// `/Opt` choice options — export values only (first element of
@@ -638,9 +640,7 @@ pub(crate) fn acroform_dict_id(doc: &mut Document) -> PdfResult<Option<ObjectId>
                 .map_err(lopdf_err)?
         };
         let id = doc.add_object(Object::Dictionary(dict));
-        doc.catalog_mut()
-            .map_err(lopdf_err)?
-            .set("AcroForm", id);
+        doc.catalog_mut().map_err(lopdf_err)?.set("AcroForm", id);
         return Ok(Some(id));
     }
 
@@ -669,9 +669,7 @@ fn ensure_acroform(doc: &mut Document) -> PdfResult<ObjectId> {
     };
     if !exists {
         let id = doc.add_object(dictionary! {});
-        doc.catalog_mut()
-            .map_err(lopdf_err)?
-            .set("AcroForm", id);
+        doc.catalog_mut().map_err(lopdf_err)?.set("AcroForm", id);
         return Ok(id);
     }
     acroform_dict_id(doc)?.ok_or_else(|| {
@@ -687,11 +685,7 @@ fn ensure_fields_array(doc: &mut Document, acro_id: ObjectId) -> PdfResult<()> {
             Err(_) => 0,
             Ok(v) => {
                 let (_, resolved) = doc.dereference(v).map_err(lopdf_err)?;
-                if resolved.as_array().is_ok() {
-                    1
-                } else {
-                    2
-                }
+                if resolved.as_array().is_ok() { 1 } else { 2 }
             }
         }
     };
@@ -730,7 +724,7 @@ pub(crate) fn ensure_helv_font(doc: &mut Document, acro_id: ObjectId) -> PdfResu
             {
                 font = Some(font_dict.clone());
                 if let Ok(helv_obj) = font_dict.get(b"Helv")
-                    && let Ok((hid, helv_res)) = doc.dereference(helv_obj)
+                    && let Ok((Some(hid), helv_res)) = doc.dereference(helv_obj)
                     && helv_res.as_dict().is_ok()
                 {
                     helv = Some(hid);
@@ -798,7 +792,7 @@ pub(crate) fn escape_pdf_literal(text: &str) -> Vec<u8> {
 /// Address of an array that lives either as a standalone indirect
 /// object or inline inside a dictionary.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum ArrayLoc {
+enum ArrayLoc {
     /// The array is the object with this id.
     Obj(ObjectId),
     /// The array is stored directly under `key` of the dictionary
@@ -841,10 +835,7 @@ fn read_array_clone(doc: &Document, loc: &ArrayLoc) -> PdfResult<Vec<Object>> {
             let dict = doc.get_dictionary(*id).map_err(lopdf_err)?;
             let value = dict.get(key).map_err(lopdf_err)?;
             let (_, resolved) = doc.dereference(value).map_err(lopdf_err)?;
-            resolved
-                .as_array()
-                .map(|a| a.clone())
-                .map_err(lopdf_err)
+            resolved.as_array().map(|a| a.clone()).map_err(lopdf_err)
         }
     }
 }
@@ -1023,7 +1014,7 @@ fn scan_fields(doc: &Document, acro_id: ObjectId) -> PdfResult<Vec<ScannedNode>>
     let Some(loc) = named_array_loc(doc, acro_id, b"Fields") else {
         return Ok(out);
     };
-    scan_array(doc, &loc, "", None, 0, &mut out)?;
+    scan_array(doc, &loc, "", None, 0, 0, &mut out)?;
     Ok(out)
 }
 
@@ -1033,9 +1024,10 @@ fn scan_array(
     path: &str,
     inherited_ft: Option<&str>,
     inherited_ff: i64,
+    depth: usize,
     out: &mut Vec<ScannedNode>,
 ) -> PdfResult<()> {
-    if out.len() >= MAX_FIELDS {
+    if depth > MAX_FIELD_DEPTH || out.len() >= MAX_FIELDS {
         return Ok(());
     }
     let elements = read_array_clone(doc, loc)?;
@@ -1086,7 +1078,7 @@ fn scan_array(
         });
 
         for kids_loc in sub_locs {
-            scan_array(doc, &kids_loc, &name, ft.as_deref(), own_ff, out)?;
+            scan_array(doc, &kids_loc, &name, ft.as_deref(), own_ff, depth + 1, out)?;
         }
     }
     Ok(())
@@ -1144,7 +1136,11 @@ fn remove_annot_from_pages(doc: &mut Document, widget_id: ObjectId) {
     }
 }
 
-fn remove_annot_from_page(doc: &mut Document, page_id: ObjectId, widget_id: ObjectId) -> PdfResult<()> {
+fn remove_annot_from_page(
+    doc: &mut Document,
+    page_id: ObjectId,
+    widget_id: ObjectId,
+) -> PdfResult<()> {
     // Clone the entries and decide whether anything matches.
     let (entries, kind) = {
         let dict = doc.get_dictionary(page_id).map_err(lopdf_err)?;
@@ -1165,11 +1161,7 @@ fn remove_annot_from_page(doc: &mut Document, page_id: ObjectId, widget_id: Obje
     let mut kept = Vec::with_capacity(entries.len());
     let mut changed = false;
     for entry in entries {
-        let matches = doc
-            .dereference(&entry)
-            .ok()
-            .and_then(|(id, _)| id)
-            == Some(widget_id);
+        let matches = doc.dereference(&entry).ok().and_then(|(id, _)| id) == Some(widget_id);
         if matches {
             changed = true;
         } else {
@@ -1192,7 +1184,7 @@ fn remove_annot_from_page(doc: &mut Document, page_id: ObjectId, widget_id: Obje
         ArrayLoc::Dict(_, _) => {
             let dict = doc.get_dictionary_mut(page_id).map_err(lopdf_err)?;
             if kept.is_empty() {
-                dict.remove(b"Annots");
+                let _ = dict.remove(b"Annots");
             } else {
                 dict.get_mut(b"Annots")
                     .map_err(lopdf_err)?
@@ -1249,7 +1241,7 @@ fn prune_empty_fields(doc: &mut Document) -> PdfResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use lopdf::{Document, dictionary};
+    use lopdf::{Document, Object, dictionary, text_string};
 
     use super::*;
     use crate::crates::pdf_engine::ops::test_utils::pdf_with_pages;

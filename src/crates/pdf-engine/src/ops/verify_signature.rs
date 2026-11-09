@@ -707,4 +707,83 @@ mod tests {
         assert!(report.signatures.is_empty());
         assert!(report.issues.iter().any(|i| i.contains("no signatures")));
     }
+
+    /// `true` when `openssl` is on `PATH` — certificate-dependent tests
+    /// are gated on this like the raster/OCR/sign tests.
+    fn openssl_available() -> bool {
+        find_tool(OPENSSL_TOOL).is_ok()
+    }
+
+    /// Create a self-signed PEM cert+key in `dir` via `openssl req` and
+    /// return `(cert_pem_bytes, SignCredentials)` for `ops::sign`.
+    fn self_signed_credentials(
+        dir: &std::path::Path,
+    ) -> (
+        Vec<u8>,
+        crate::crates::pdf_engine::ops::sign::SignCredentials,
+    ) {
+        use std::process::{Command, Stdio};
+
+        let tool = find_tool(OPENSSL_TOOL).unwrap();
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+        let status = Command::new(tool)
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-keyout"])
+            .arg(&key)
+            .args(["-out"])
+            .arg(&cert)
+            .args(["-days", "1", "-nodes", "-subj", "/CN=Crypto Verify Test"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "openssl req failed: {status}");
+        let cert_pem = std::fs::read(&cert).unwrap();
+        let creds = crate::crates::pdf_engine::ops::sign::SignCredentials::Pem {
+            certificate: cert,
+            private_key: key,
+            private_key_password: None,
+        };
+        (cert_pem, creds)
+    }
+
+    #[test]
+    fn crypto_verify_reports_digest_and_chain() {
+        if !openssl_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (cert_pem, creds) = self_signed_credentials(dir.path());
+        let input = pdf_with_pages(&["verify me cryptographically"]);
+        let signed = crate::crates::pdf_engine::ops::sign::sign(
+            &input,
+            &creds,
+            &crate::crates::pdf_engine::ops::sign::SignOptions::default(),
+            &unlimited(),
+        )
+        .unwrap();
+
+        // Without trust anchors: digest validates, chain is not attempted.
+        let report = verify_signatures_crypto(&signed, &unlimited(), None).unwrap();
+        assert_eq!(report.signature_count, 1);
+        assert_eq!(report.signatures[0].digest_valid, Some(true));
+        assert_eq!(report.signatures[0].chain_verified, None);
+        assert!(report.signatures[0].signer_subject.is_some());
+
+        // With the self-signed cert as its own trust anchor: chain
+        // verification succeeds (`openssl verify` accepts a self-signed
+        // cert present in the CAfile).
+        let report = verify_signatures_crypto(&signed, &unlimited(), Some(&cert_pem)).unwrap();
+        assert_eq!(report.signatures[0].digest_valid, Some(true));
+        assert_eq!(report.signatures[0].chain_verified, Some(true));
+
+        // An unrelated trust anchor must fail chain verification —
+        // never silently pass.
+        let dir2 = tempfile::tempdir().unwrap();
+        let (other_ca, _) = self_signed_credentials(dir2.path());
+        let report = verify_signatures_crypto(&signed, &unlimited(), Some(&other_ca)).unwrap();
+        assert_eq!(report.signatures[0].digest_valid, Some(true));
+        assert_eq!(report.signatures[0].chain_verified, Some(false));
+    }
 }

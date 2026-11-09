@@ -456,10 +456,14 @@ struct LabelSegment {
     start_page: u32,
     /// `/P` prefix string.
     prefix: String,
-    /// `/S` style: `D`, `R`, `r`, `A`, `a` (default `D`).
+    /// `/S` style: `D`, `R`, `r`, `A`, `a` (default `D`). Ignored
+    /// when `style_none` is set.
     style: u8,
     /// `/St` start number (default 1).
     start_num: i64,
+    /// `/S` was `/None` or absent — the label is the `/P` string alone,
+    /// with no numeric suffix (mirrors `page_labels::get_page_labels`).
+    style_none: bool,
 }
 
 fn collect_page_labels(
@@ -490,12 +494,17 @@ fn collect_page_labels(
         // Last segment whose start is <= this page wins.
         let segment = segments.iter().take_while(|s| s.start_page <= page).last();
         if let Some(segment) = segment {
-            let n = segment.start_num + i64::from(page - segment.start_page);
-            *slot = Some(format!(
-                "{}{}",
-                segment.prefix,
-                format_label_number(n, segment.style)
-            ));
+            let rendered = if segment.style_none {
+                segment.prefix.clone()
+            } else {
+                let n = segment.start_num + i64::from(page - segment.start_page);
+                format!(
+                    "{}{}",
+                    segment.prefix,
+                    format_label_number(n, segment.style)
+                )
+            };
+            *slot = Some(rendered);
         }
     }
     out
@@ -532,11 +541,20 @@ fn collect_label_segments(doc: &Document, node: &lopdf::Dictionary, out: &mut Ve
                 .ok()
                 .and_then(|o| decode_text_string(o).ok())
                 .unwrap_or_default();
-            let style = label
+            let style_name = label
                 .get(b"S")
                 .ok()
                 .and_then(|o| doc.dereference(o).ok())
                 .and_then(|(_, o)| o.as_name().ok())
+                .map(|n| n.to_vec());
+            // `/S /None` means "no numbering": the label is the `/P`
+            // string alone. An absent `/S` is treated the same way —
+            // writers that only set `/P` intend a literal label (this
+            // is also what `set_page_labels` emits, always with
+            // `/S /None`).
+            let style_none = style_name.as_deref().map(|n| n == b"None").unwrap_or(true);
+            let style = style_name
+                .as_deref()
                 .and_then(|n| n.first().copied())
                 .unwrap_or(b'D');
             let start_num = label
@@ -550,6 +568,7 @@ fn collect_label_segments(doc: &Document, node: &lopdf::Dictionary, out: &mut Ve
                 prefix,
                 style,
                 start_num,
+                style_none,
             });
         }
     }

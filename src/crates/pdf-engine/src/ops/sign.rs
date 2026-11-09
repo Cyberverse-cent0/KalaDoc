@@ -131,9 +131,8 @@ pub struct SignOptions {
     pub location: Option<String>,
     /// Signature `/ContactInfo`.
     pub contact_info: Option<String>,
-    /// Signer `/Name` shown by viewers; defaults to the certificate's
-    /// subject when `None`? — no: when `None` the `/Name` entry is simply
-    /// omitted and viewers fall back to the CMS signer identity.
+    /// Signer `/Name` shown by viewers; when `None` the entry is omitted
+    /// and viewers fall back to the CMS signer identity.
     pub signer_name: Option<String>,
     /// RFC 3161 timestamp authority URL. **Not supported**: setting this
     /// returns [`PdfError::UnsupportedOperation`].
@@ -188,8 +187,7 @@ pub fn sign(
     let workdir = tempfile::tempdir().map_err(|e| PdfError::Io(std::io::Error::other(e)))?;
     let material = prepare_signer(credentials, &tool, workdir.path())?;
 
-    let (field_id, sig_id) = add_signature_field(&mut doc, options)?;
-    drop(field_id); // the field id is only needed inside the document
+    let sig_id = add_signature_field(&mut doc, options)?.1;
 
     // Outer loop: the /Contents placeholder must be exactly as many hex
     // digits as the CMS signature needs. CMS size is independent of the
@@ -242,8 +240,11 @@ pub fn remove_signatures(input: &[u8], limits: &EngineLimits) -> PdfResult<Vec<u
     // Object ids of widget annotations to strip from page /Annots.
     let mut removed_widgets: HashSet<ObjectId> = HashSet::new();
 
-    // 1. Prune signature fields out of the AcroForm /Fields tree.
-    if let Some(acro_id) = acroform_id(&doc) {
+    // 1. Prune signature fields out of the AcroForm /Fields tree. A
+    // direct (non-indirect) AcroForm dictionary is promoted to an
+    // indirect object first so it can be mutated.
+    let acro_id = acroform_id(&doc).or_else(|| promote_direct_acroform(&mut doc));
+    if let Some(acro_id) = acro_id {
         let fields_items = {
             let acro = doc.get_dictionary(acro_id).map_err(lopdf_err)?;
             match acro.get(b"Fields") {
@@ -549,13 +550,33 @@ fn ensure_acroform(doc: &mut Document) -> PdfResult<ObjectId> {
 
 /// The AcroForm dictionary's object id when it exists as an indirect
 /// object. A *direct* AcroForm dictionary returns `None` — callers that
-/// mutate must go through [`ensure_acroform`] first.
+/// mutate must go through [`ensure_acroform`] or
+/// [`promote_direct_acroform`] first.
 fn acroform_id(doc: &Document) -> Option<ObjectId> {
     let catalog = doc.catalog().ok()?;
     match catalog.get(b"AcroForm").ok()? {
         Object::Reference(id) => Some(*id),
         _ => None,
     }
+}
+
+/// Promote a *direct* AcroForm dictionary on the catalog to an indirect
+/// object and return its new id. Returns `None` when there is no
+/// AcroForm at all.
+fn promote_direct_acroform(doc: &mut Document) -> Option<ObjectId> {
+    let dict = doc
+        .catalog()
+        .ok()?
+        .get(b"AcroForm")
+        .ok()?
+        .as_dict()
+        .ok()?
+        .clone();
+    let id = doc.add_object(Object::Dictionary(dict));
+    doc.catalog_mut()
+        .ok()?
+        .set("AcroForm", Object::Reference(id));
+    Some(id)
 }
 
 /// A `Signature1`, `Signature2`, ... field name not already used by a
@@ -1028,12 +1049,169 @@ mod tests {
         assert_eq!(report.signature_count, 0);
     }
 
+    /// `true` when `openssl` is on `PATH` — cert-dependent tests are
+    /// gated on this like the raster/OCR tests gate on their tools.
+    fn openssl_available() -> bool {
+        find_tool(OPENSSL_TOOL).is_ok()
+    }
+
+    /// Create a self-signed PEM cert+key in `dir` via `openssl req`.
+    fn make_self_signed(dir: &Path) -> SignCredentials {
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+        let status = Command::new(find_tool(OPENSSL_TOOL).unwrap())
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-keyout"])
+            .arg(&key)
+            .args(["-out"])
+            .arg(&cert)
+            .args(["-days", "1", "-nodes", "-subj", "/CN=KalaDoc Test Signer"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "openssl req failed: {status}");
+        SignCredentials::Pem {
+            certificate: cert,
+            private_key: key,
+            private_key_password: None,
+        }
+    }
+
+    #[test]
+    fn sign_verify_remove_roundtrip() {
+        if !openssl_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let creds = make_self_signed(dir.path());
+        let input = pdf_with_pages(&["please sign me"]);
+        let options = SignOptions {
+            reason: Some("unit test".to_string()),
+            location: Some("testbed".to_string()),
+            signer_name: Some(" KalaDoc Tester ".to_string()),
+            ..Default::default()
+        };
+
+        let signed = sign(&input, &creds, &options, &unlimited()).unwrap();
+
+        // Structural report sees one signature with sane byte ranges.
+        let report =
+            super::super::verify_signature::verify_signatures(&signed, &unlimited()).unwrap();
+        assert_eq!(report.signature_count, 1);
+        assert!(report.signatures[0].byte_range_covers_file);
+        assert!(report.signatures[0].contents_present);
+        assert_eq!(
+            report.signatures[0].sub_filter.as_deref(),
+            Some("adbe.pkcs7.detached")
+        );
+
+        // Cryptographic verification: the CMS validates over the ranges.
+        let crypto =
+            super::super::verify_signature::verify_signatures_crypto(&signed, &unlimited(), None)
+                .unwrap();
+        assert_eq!(crypto.signature_count, 1);
+        assert_eq!(crypto.signatures[0].digest_valid, Some(true));
+        assert!(crypto.signatures[0].signer_subject.is_some());
+
+        // Tampering with signed content must break verification: mutate
+        // a byte inside the /Reason string — inside the signed region but
+        // outside /Contents, so the file stays parseable.
+        let mut tampered = signed.clone();
+        let needle = b"unit test";
+        let pos = tampered
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("/Reason string present in signed file");
+        tampered[pos] ^= 0x01;
+        let bad =
+            super::super::verify_signature::verify_signatures_crypto(&tampered, &unlimited(), None)
+                .unwrap();
+        assert_eq!(bad.signatures[0].digest_valid, Some(false));
+
+        // Removal strips the signature; the result can be re-signed.
+        let cleaned = remove_signatures(&signed, &unlimited()).unwrap();
+        let after =
+            super::super::verify_signature::verify_signatures(&cleaned, &unlimited()).unwrap();
+        assert_eq!(after.signature_count, 0);
+        let resigned = sign(&cleaned, &creds, &SignOptions::default(), &unlimited()).unwrap();
+        let crypto2 =
+            super::super::verify_signature::verify_signatures_crypto(&resigned, &unlimited(), None)
+                .unwrap();
+        assert_eq!(crypto2.signatures[0].digest_valid, Some(true));
+    }
+
+    #[test]
+    fn sign_with_pkcs12_bundle() {
+        if !openssl_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let tool = find_tool(OPENSSL_TOOL).unwrap();
+        // Self-signed cert+key, then pack into a password-protected p12.
+        let key = dir.path().join("key.pem");
+        let cert = dir.path().join("cert.pem");
+        let p12 = dir.path().join("bundle.p12");
+        let ok = Command::new(&tool)
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-keyout"])
+            .arg(&key)
+            .args(["-out"])
+            .arg(&cert)
+            .args(["-days", "1", "-nodes", "-subj", "/CN=P12 Signer"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let ok = Command::new(&tool)
+            .args(["pkcs12", "-export", "-inkey"])
+            .arg(&key)
+            .args(["-in"])
+            .arg(&cert)
+            .args(["-out"])
+            .arg(&p12)
+            .args(["-passout", "pass:s3cret"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+
+        let creds = SignCredentials::Pkcs12 {
+            path: p12,
+            password: Some("s3cret".to_string()),
+        };
+        let input = pdf_with_pages(&["p12 sign me"]);
+        let signed = sign(&input, &creds, &SignOptions::default(), &unlimited()).unwrap();
+        let crypto =
+            super::super::verify_signature::verify_signatures_crypto(&signed, &unlimited(), None)
+                .unwrap();
+        assert_eq!(crypto.signatures[0].digest_valid, Some(true));
+    }
+
+    #[test]
+    fn sign_rejects_already_signed_document() {
+        if !openssl_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let creds = make_self_signed(dir.path());
+        let input = pdf_with_pages(&["sign me"]);
+        let signed = sign(&input, &creds, &SignOptions::default(), &unlimited()).unwrap();
+        let err = sign(&signed, &creds, &SignOptions::default(), &unlimited()).unwrap_err();
+        assert!(matches!(err, PdfError::InvalidInput(_)));
+    }
+
     #[test]
     fn pdf_date_format() {
         let d = pdf_date_now();
         assert!(d.starts_with("D:"));
         assert!(d.ends_with('Z'));
-        assert_eq!(d.len(), 18); // D: + 14 digits + Z
+        assert_eq!(d.len(), 17); // D: + 14 digits + Z
     }
 
     #[test]
