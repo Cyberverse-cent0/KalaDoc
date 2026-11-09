@@ -49,7 +49,7 @@ src/
 │   │   │   ├── auth_user.rs         # User CRUD + Argon2id credential checks
 │   │   │   └── session.rs           # Bearer-token sessions, expiry, cleanup task
 │   │   └── cli_mcp_server/
-│   │       └── cli/                 # CLI adapter (version/doctor/init/config/auth/user)
+│   │       └── cli/                 # CLI adapter (version/doctor/init/config/auth/user/jobs)
 │   ├── document_engine/             # Document domain model (docs, versions, audit)
 │   ├── job_engine/                  # Durable job queue + dispatcher (jobs_tbl)
 │   └── storage/
@@ -151,8 +151,17 @@ Durable job queue over SQLite (`jobs_tbl`, created by `init_db`).
 Producers call `JobEngine::enqueue`; the `run()` poll loop claims due
 jobs with an atomic `UPDATE ... RETURNING` and dispatches them to
 `JobHandler`s registered by kind. Failures retry with exponential
-backoff (`backoff_base * 2^attempts`, cap 1 h) up to `max_attempts`;
-`reap_stale` returns crash-orphaned `running` jobs to `pending`.
+backoff (`backoff_base * 2^attempts`, cap 1 h) up to `max_attempts`.
+
+Crash recovery is built in: `run()` calls `recover()` once at startup,
+requeueing every `running` job left by a dead process, and
+`reap_stale` returns jobs orphaned mid-run (older than `stale_after`)
+to `pending` on every poll tick. The CLI surface lives under
+`kaladoc jobs` (`worker`, `list`, `enqueue`, `cancel`, `retry`,
+`recover`); built-in handlers (`document.ingest`,
+`document.metadata_extract`, `document.index`, `thumbnail.generate`,
+`pdf.inspect`, `storage.gc_staging`, `system.ping`) are registered by
+`application::job_handlers::register_builtin`.
 Config: `[jobs]` section / `JOB_*` env vars → `AppConfig::to_job_config`.
 See `.doc/job_engine.md` for usage.
 
