@@ -26,8 +26,7 @@ fn version_from_row(row: &SqliteRow) -> StoreResult<DocumentVersion> {
     })
 }
 
-const VER_COLS: &str =
-    "document_id, version_number, artifact_id, revision_ids, created_by, note, is_current, created_at";
+const VER_COLS: &str = "document_id, version_number, artifact_id, revision_ids, created_by, note, is_current, created_at";
 
 /// Creates the next version for a document: `version_number` is
 /// `max + 1`, previous versions lose `is_current`, and a `version_created`
@@ -44,7 +43,10 @@ pub async fn create_version(
     let doc = fetch_document(pool, document_id)
         .await?
         .ok_or_else(|| StoreError::not_found("document", document_id))?;
-    if matches!(doc.status, DocumentStatus::Trashed | DocumentStatus::Deleted) {
+    if matches!(
+        doc.status,
+        DocumentStatus::Trashed | DocumentStatus::Deleted
+    ) {
         return Err(StoreError::validation(
             "status",
             "cannot version a trashed or deleted document",
@@ -152,7 +154,10 @@ pub async fn restore_version(
     let doc = fetch_document(pool, document_id)
         .await?
         .ok_or_else(|| StoreError::not_found("document", document_id))?;
-    if get_version(pool, document_id, version_number).await?.is_none() {
+    if get_version(pool, document_id, version_number)
+        .await?
+        .is_none()
+    {
         return Err(StoreError::not_found("version", version_number));
     }
 

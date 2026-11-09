@@ -20,6 +20,9 @@ pub enum DocumentAuditEventType {
     Trashed,
     Restored,
     Deleted,
+    MetadataUpdated,
+    RelationshipCreated,
+    RelationshipDeleted,
     #[serde(other)]
     Other,
 }

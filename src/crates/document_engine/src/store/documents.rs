@@ -80,10 +80,12 @@ pub(crate) async fn fetch_document(
     pool: &SqlitePool,
     id: &DocumentId,
 ) -> StoreResult<Option<Document>> {
-    let row = sqlx::query(&format!("SELECT {DOC_COLS} FROM documents_tbl WHERE id = ?"))
-        .bind(id.as_str())
-        .fetch_optional(pool)
-        .await?;
+    let row = sqlx::query(&format!(
+        "SELECT {DOC_COLS} FROM documents_tbl WHERE id = ?"
+    ))
+    .bind(id.as_str())
+    .fetch_optional(pool)
+    .await?;
     row.map(|r| document_from_row(&r)).transpose()
 }
 
@@ -252,12 +254,11 @@ pub async fn move_document(
         .ok_or_else(|| StoreError::not_found("document", id))?;
 
     if let Some(folder) = folder_id {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM folders_tbl WHERE id = ?)",
-        )
-        .bind(folder.as_str())
-        .fetch_one(pool)
-        .await?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM folders_tbl WHERE id = ?)")
+                .bind(folder.as_str())
+                .fetch_one(pool)
+                .await?;
         if !exists {
             return Err(StoreError::not_found("folder", folder));
         }
@@ -397,14 +398,7 @@ pub async fn delete_document(pool: &SqlitePool, id: &DocumentId) -> StoreResult<
     .execute(pool)
     .await?;
 
-    record_event(
-        pool,
-        id,
-        None,
-        DocumentAuditEventType::Trashed,
-        None,
-    )
-    .await?;
+    record_event(pool, id, None, DocumentAuditEventType::Trashed, None).await?;
 
     fetch_document(pool, id)
         .await?
@@ -467,4 +461,3 @@ pub async fn purge_document(pool: &SqlitePool, id: &DocumentId) -> StoreResult<b
         .await?;
     Ok(done.rows_affected() > 0)
 }
-

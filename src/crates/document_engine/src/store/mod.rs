@@ -14,7 +14,9 @@ pub mod artifacts;
 pub mod documents;
 pub mod folders;
 pub mod history;
+pub mod metadata;
 pub mod permissions;
+pub mod relationships;
 pub mod schema;
 pub mod tags;
 pub mod versions;
@@ -110,7 +112,10 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 pub(crate) fn enum_str<T: Serialize>(value: &T) -> StoreResult<String> {
     match serde_json::to_value(value)? {
         Value::String(s) => Ok(s),
-        _ => Err(StoreError::validation("enum", "did not serialize to a string")),
+        _ => Err(StoreError::validation(
+            "enum",
+            "did not serialize to a string",
+        )),
     }
 }
 

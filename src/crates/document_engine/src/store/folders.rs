@@ -21,10 +21,12 @@ fn folder_from_row(row: &SqliteRow) -> Folder {
 const FOLDER_COLS: &str = "id, name, parent_id, owner_id, created_at, updated_at";
 
 async fn fetch_folder(pool: &SqlitePool, id: &FolderId) -> StoreResult<Option<Folder>> {
-    let row = sqlx::query(&format!("SELECT {FOLDER_COLS} FROM folders_tbl WHERE id = ?"))
-        .bind(id.as_str())
-        .fetch_optional(pool)
-        .await?;
+    let row = sqlx::query(&format!(
+        "SELECT {FOLDER_COLS} FROM folders_tbl WHERE id = ?"
+    ))
+    .bind(id.as_str())
+    .fetch_optional(pool)
+    .await?;
     Ok(row.map(|r| folder_from_row(&r)))
 }
 
@@ -39,10 +41,10 @@ pub async fn create_folder(
     if name.trim().is_empty() {
         return Err(StoreError::validation("name", "must not be empty"));
     }
-    if let Some(parent) = parent_id {
-        if fetch_folder(pool, parent).await?.is_none() {
-            return Err(StoreError::not_found("folder", parent));
-        }
+    if let Some(parent) = parent_id
+        && fetch_folder(pool, parent).await?.is_none()
+    {
+        return Err(StoreError::not_found("folder", parent));
     }
 
     let now = now_rfc3339();
@@ -103,14 +105,12 @@ pub async fn rename_folder(pool: &SqlitePool, id: &FolderId, name: &str) -> Stor
     if name.trim().is_empty() {
         return Err(StoreError::validation("name", "must not be empty"));
     }
-    let done = sqlx::query(
-        "UPDATE folders_tbl SET name = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(name.trim())
-    .bind(now_rfc3339())
-    .bind(id.as_str())
-    .execute(pool)
-    .await?;
+    let done = sqlx::query("UPDATE folders_tbl SET name = ?, updated_at = ? WHERE id = ?")
+        .bind(name.trim())
+        .bind(now_rfc3339())
+        .bind(id.as_str())
+        .execute(pool)
+        .await?;
     if done.rows_affected() == 0 {
         return Err(StoreError::not_found("folder", id));
     }

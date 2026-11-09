@@ -1,21 +1,35 @@
-//! Error types for document domain validation.
+use thiserror::Error;
 
-/// Errors produced when constructing or validating document domain objects.
-#[derive(Debug, thiserror::Error)]
+#[derive(Error, Debug)]
 pub enum DocumentError {
-    /// A value object failed validation (e.g. empty or over-long name).
-    #[error("invalid {field}: {reason}")]
-    Validation {
-        field: &'static str,
-        reason: String,
-    },
+    #[error("Document not found")]
+    NotFound,
+    #[error("Document already exists")]
+    AlreadyExists,
+    #[error("Invalid document ID")]
+    InvalidId,
+    #[error("Invalid document metadata")]
+    InvalidMetadata,
+    #[error("Invalid document content")]
+    InvalidContent,
+    #[error("Invalid document version")]
+    InvalidVersion,
+    #[error("Invalid document state")]
+    InvalidState,
+    #[error("Invalid document operation")]
+    InvalidOperation,
+    #[error("invalid {field}: {message}")]
+    Validation { field: String, message: String },
+    #[error("Document storage error: {0}")]
+    Storage(#[from] std::io::Error),
 }
 
 impl DocumentError {
-    pub(crate) fn validation(field: &'static str, reason: impl Into<String>) -> Self {
+    /// Builds a [`DocumentError::Validation`] for a rejected field value.
+    pub fn validation(field: &str, message: impl Into<String>) -> Self {
         Self::Validation {
-            field,
-            reason: reason.into(),
+            field: field.to_string(),
+            message: message.into(),
         }
     }
 }

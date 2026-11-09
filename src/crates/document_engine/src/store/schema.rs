@@ -12,6 +12,8 @@ pub async fn init_document_store(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     create_versions_table(pool).await?;
     create_tags_tables(pool).await?;
     create_permissions_table(pool).await?;
+    create_metadata_table(pool).await?;
+    create_relationships_table(pool).await?;
     create_audit_table(pool).await?;
     Ok(())
 }
@@ -85,8 +87,10 @@ async fn create_artifacts_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "#,
     )
     .await?;
-    pool.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_document ON artifacts_tbl(document_id);")
-        .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_artifacts_document ON artifacts_tbl(document_id);",
+    )
+    .await?;
     Ok(())
 }
 
@@ -103,8 +107,10 @@ async fn create_versions_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "#,
     )
     .await?;
-    pool.execute("CREATE INDEX IF NOT EXISTS idx_revisions_document ON revisions_tbl(document_id);")
-        .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_revisions_document ON revisions_tbl(document_id);",
+    )
+    .await?;
 
     pool.execute(
         r#"
@@ -122,8 +128,10 @@ async fn create_versions_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "#,
     )
     .await?;
-    pool.execute("CREATE INDEX IF NOT EXISTS idx_versions_current ON versions_tbl(document_id, is_current);")
-        .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_versions_current ON versions_tbl(document_id, is_current);",
+    )
+    .await?;
     Ok(())
 }
 
@@ -175,6 +183,52 @@ async fn create_permissions_table(pool: &SqlitePool) -> Result<(), sqlx::Error> 
     .await?;
     pool.execute(
         "CREATE INDEX IF NOT EXISTS idx_doc_permissions_subject ON document_permissions_tbl(subject_id);",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn create_metadata_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS document_metadata_tbl (
+            document_id   TEXT PRIMARY KEY REFERENCES documents_tbl(id) ON DELETE CASCADE,
+            title         TEXT,
+            author        TEXT,
+            subject       TEXT,
+            language      TEXT,
+            keywords      TEXT NOT NULL DEFAULT '[]',
+            custom_fields TEXT NOT NULL DEFAULT '{}',
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+        "#,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn create_relationships_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS document_relationships_tbl (
+            id                  TEXT PRIMARY KEY,
+            source_document_id  TEXT NOT NULL REFERENCES documents_tbl(id) ON DELETE CASCADE,
+            target_document_id  TEXT NOT NULL REFERENCES documents_tbl(id) ON DELETE CASCADE,
+            relationship_type   TEXT NOT NULL,
+            created_by          TEXT,
+            created_at          TEXT NOT NULL,
+            UNIQUE (source_document_id, target_document_id, relationship_type)
+        );
+        "#,
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_doc_relationships_source ON document_relationships_tbl(source_document_id);",
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_doc_relationships_target ON document_relationships_tbl(target_document_id);",
     )
     .await?;
     Ok(())

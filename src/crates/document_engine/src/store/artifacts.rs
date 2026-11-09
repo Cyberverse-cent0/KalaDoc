@@ -54,7 +54,10 @@ const ART_COLS: &str = "id, document_id, storage_uri, file_name, mime_type, size
 /// Registers an artifact for a document after its bytes have been
 /// written to `storage_uri` by the storage layer. Returns
 /// `NotFound` when the document does not exist.
-pub async fn upload_artifact(pool: &SqlitePool, new: &NewArtifact) -> StoreResult<DocumentArtifact> {
+pub async fn upload_artifact(
+    pool: &SqlitePool,
+    new: &NewArtifact,
+) -> StoreResult<DocumentArtifact> {
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM documents_tbl WHERE id = ?)")
             .bind(new.document_id.as_str())
@@ -110,10 +113,12 @@ pub async fn download_artifact(
     pool: &SqlitePool,
     artifact_id: &str,
 ) -> StoreResult<Option<DocumentArtifact>> {
-    let row = sqlx::query(&format!("SELECT {ART_COLS} FROM artifacts_tbl WHERE id = ?"))
-        .bind(artifact_id)
-        .fetch_optional(pool)
-        .await?;
+    let row = sqlx::query(&format!(
+        "SELECT {ART_COLS} FROM artifacts_tbl WHERE id = ?"
+    ))
+    .bind(artifact_id)
+    .fetch_optional(pool)
+    .await?;
     let artifact = row.map(|r| artifact_from_row(&r)).transpose()?;
     if let Some(art) = &artifact {
         record_event(
@@ -141,4 +146,3 @@ pub async fn list_artifacts(
     .await?;
     rows.iter().map(artifact_from_row).collect()
 }
-

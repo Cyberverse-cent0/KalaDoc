@@ -55,10 +55,7 @@ pub async fn grant_permission(
     granted_by: Option<&str>,
 ) -> StoreResult<DocumentPermission> {
     if subject_id.trim().is_empty() {
-        return Err(StoreError::validation(
-            "subject_id",
-            "must not be empty",
-        ));
+        return Err(StoreError::validation("subject_id", "must not be empty"));
     }
     fetch_document(pool, document_id)
         .await?
