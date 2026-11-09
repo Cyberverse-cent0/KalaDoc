@@ -33,6 +33,7 @@ pub enum EngineOperation {
     Merge,
     Split,
     Rotate,
+    Resize,
     ExtractPages,
     Compress,
     Watermark,
@@ -52,6 +53,7 @@ impl EngineOperation {
             Self::Merge => "merge",
             Self::Split => "split",
             Self::Rotate => "rotate",
+            Self::Resize => "resize",
             Self::ExtractPages => "extract_pages",
             Self::Compress => "compress",
             Self::Watermark => "watermark",
@@ -76,6 +78,10 @@ pub struct EngineLimits {
     pub max_input_bytes: Option<u64>,
     /// Maximum page count the engine will process.
     pub max_pages: Option<u32>,
+    /// Maximum decoded pixel count (width × height) the engine will
+    /// materialize for a single image/raster input — a decompression
+    /// bomb guard. Ignored by engines without raster inputs.
+    pub max_pixels: Option<u64>,
     /// Maximum number of output artifacts produced by one operation.
     pub max_outputs: Option<u32>,
 }
