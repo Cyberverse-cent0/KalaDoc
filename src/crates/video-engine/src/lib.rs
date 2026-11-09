@@ -55,6 +55,7 @@ mod engine;
 mod error;
 mod model;
 mod ops;
+mod runtime;
 #[cfg(test)]
 mod tests;
 

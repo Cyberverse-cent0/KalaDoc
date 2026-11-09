@@ -17,9 +17,31 @@
 //!   [`VideoError::ExternalTool`] with the tail of stderr; malformed
 //!   media is [`VideoError::InvalidInput`], never a panic.
 
+pub(crate) mod analysis;
+pub(crate) mod audio;
+pub(crate) mod audio_fx;
+pub(crate) mod audio_mix;
+pub(crate) mod av_visual;
+pub(crate) mod capture;
 pub(crate) mod concat;
+pub(crate) mod contact_sheet;
+pub(crate) mod encode;
+pub(crate) mod extract;
 pub(crate) mod extract_audio;
+pub(crate) mod filters;
+pub(crate) mod frames;
+pub(crate) mod geometry;
+pub(crate) mod geometry_adv;
+pub(crate) mod loudness;
+pub(crate) mod overlay;
+pub(crate) mod packaging;
 pub(crate) mod probe;
+pub(crate) mod quality;
+pub(crate) mod remux;
+pub(crate) mod slideshow;
+pub(crate) mod stream_ops;
+pub(crate) mod subtitles;
+pub(crate) mod tempo;
 pub(crate) mod thumbnail;
 pub(crate) mod transcode;
 pub(crate) mod trim;
@@ -515,6 +537,7 @@ pub(crate) fn probe_json(input_path: &Path) -> VideoResult<serde_json::Value> {
         "json".to_string(),
         "-show_format".to_string(),
         "-show_streams".to_string(),
+        "-show_chapters".to_string(),
         input_path.to_string_lossy().into_owned(),
     ];
     let output = run_tool(FFPROBE, &program, &args, PROBE_TIMEOUT)?;

@@ -8,10 +8,12 @@
 //! and `format` supplies duration/name/size. Absent fields stay `None`;
 //! nothing is fabricated.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use crate::crates::video_engine::error::{VideoError, VideoResult};
-use crate::crates::video_engine::model::VideoInfo;
+use crate::crates::video_engine::model::{ChapterInfo, StreamInfo, VideoInfo};
 use crate::crates::video_engine::ops::{
     TempDir, check_input, probe_json, write_input,
 };
@@ -76,6 +78,49 @@ pub(crate) fn parse_probe(json: &Value, input_len: u64) -> VideoResult<VideoInfo
         .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()))
         .unwrap_or(input_len);
 
+    let has_video = video.is_some();
+    let stream_infos: Vec<StreamInfo> = streams.iter().map(stream_info).collect();
+    let chapters: Vec<ChapterInfo> = json
+        .get("chapters")
+        .and_then(Value::as_array)
+        .map(|chs| {
+            chs.iter()
+                .map(|c| ChapterInfo {
+                    id: c.get("id").and_then(Value::as_u64),
+                    start_secs: c
+                        .get("start_time")
+                        .and_then(parse_f64)
+                        .unwrap_or(0.0),
+                    end_secs: c
+                        .get("end_time")
+                        .and_then(parse_f64)
+                        .unwrap_or(0.0),
+                    title: c
+                        .get("tags")
+                        .and_then(|t| t.get("title"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let tags: BTreeMap<String, String> = format
+        .and_then(|f| f.get("tags"))
+        .and_then(Value::as_object)
+        .map(|t| {
+            t.iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.as_str().unwrap_or_default().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let bit_rate = format
+        .and_then(|f| f.get("bit_rate"))
+        .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()));
+    let format_long_name = format
+        .and_then(|f| f.get("format_long_name"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
     Ok(VideoInfo {
         duration_secs,
         width,
@@ -89,7 +134,86 @@ pub(crate) fn parse_probe(json: &Value, input_len: u64) -> VideoResult<VideoInfo
         format_name,
         size_bytes,
         has_audio: audio.is_some(),
+        has_video,
+        bit_rate,
+        format_long_name,
+        streams: stream_infos,
+        chapters,
+        tags,
     })
+}
+
+/// Map one ffprobe stream object to [`StreamInfo`].
+fn stream_info(s: &Value) -> StreamInfo {
+    let codec_type = s
+        .get("codec_type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let tags: BTreeMap<String, String> = s
+        .get("tags")
+        .and_then(Value::as_object)
+        .map(|t| {
+            t.iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.as_str().unwrap_or_default().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let disposition_default = s
+        .get("disposition")
+        .and_then(|d| d.get("default"))
+        .and_then(Value::as_i64)
+        .map(|v| v != 0)
+        .unwrap_or(false);
+    StreamInfo {
+        index: s.get("index").and_then(Value::as_u64).unwrap_or(0) as u32,
+        codec_type: codec_type.clone(),
+        codec_name: s
+            .get("codec_name")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        profile: s
+            .get("profile")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        width: s.get("width").and_then(Value::as_u64).map(|v| v as u32),
+        height: s.get("height").and_then(Value::as_u64).map(|v| v as u32),
+        pix_fmt: s
+            .get("pix_fmt")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        display_aspect_ratio: s
+            .get("display_aspect_ratio")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        field_order: s
+            .get("field_order")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        sample_rate: s
+            .get("sample_rate")
+            .and_then(Value::as_str)
+            .and_then(|v| v.parse::<u32>().ok()),
+        channels: s.get("channels").and_then(Value::as_u64).map(|v| v as u32),
+        channel_layout: s
+            .get("channel_layout")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        language: tags.get("language").cloned(),
+        is_default: disposition_default,
+        attached_pic: codec_type == "video"
+            && s
+                .get("disposition")
+                .and_then(|d| d.get("attached_pic"))
+                .and_then(Value::as_i64)
+                .map(|v| v != 0)
+                .unwrap_or(false),
+        bit_rate: s
+            .get("bit_rate")
+            .and_then(|v| v.as_str().and_then(|x| x.parse::<u64>().ok()).or_else(|| v.as_u64())),
+        duration_secs: s.get("duration").and_then(parse_f64),
+        tags,
+    }
 }
 
 /// ffprobe emits numbers inconsistently — `duration`/`size` are usually
