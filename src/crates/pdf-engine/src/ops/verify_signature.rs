@@ -220,7 +220,7 @@ fn collect_fields(
 /// A dictionary counts as a signature field when it is typed `/Sig`,
 /// declares a signature `/V` dictionary carrying `/ByteRange` or
 /// `/Contents`, or carries those keys directly (merged field/value dicts).
-pub(crate) pub(crate) fn is_signature_field(doc: &Document, dict: &Dictionary) -> bool {
+pub(crate) fn is_signature_field(doc: &Document, dict: &Dictionary) -> bool {
     if dict
         .get(b"FT")
         .ok()
@@ -422,9 +422,7 @@ pub fn verify_signatures_crypto(
     };
 
     let workdir = if needs_tool {
-        Some(
-            tempfile::tempdir().map_err(|e| PdfError::Io(std::io::Error::other(e)))?,
-        )
+        Some(tempfile::tempdir().map_err(|e| PdfError::Io(std::io::Error::other(e)))?)
     } else {
         None
     };
@@ -536,9 +534,9 @@ fn crypto_check_one(
             "-inform".into(),
             "DER".into(),
             "-in".into(),
-            sig_path.clone().into_os_string(),
+            sig_path.as_os_str().to_os_string(),
             "-content".into(),
-            msg_path.clone().into_os_string(),
+            msg_path.as_os_str().to_os_string(),
             "-noverify".into(),
         ],
     ) {
@@ -551,7 +549,9 @@ fn crypto_check_one(
             ));
         }
         Err(detail) => {
-            issues.push(format!("{label}: could not run openssl cms -verify: {detail}"));
+            issues.push(format!(
+                "{label}: could not run openssl cms -verify: {detail}"
+            ));
         }
     }
 
@@ -629,10 +629,10 @@ fn extract_signer_cert(
             "-inform".into(),
             "DER".into(),
             "-in".into(),
-            sig_path.clone().into_os_string(),
+            sig_path.as_os_str().to_os_string(),
             "-print_certs".into(),
             "-out".into(),
-            certs_path.clone().into_os_string(),
+            certs_path.as_os_str().to_os_string(),
         ],
     )
     .ok()?;
@@ -682,9 +682,7 @@ fn first_line(bytes: &[u8]) -> String {
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
         && haystack.len() >= needle.len()
-        && haystack
-            .windows(needle.len())
-            .any(|w| w == needle)
+        && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 #[cfg(test)]

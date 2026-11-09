@@ -78,7 +78,11 @@ pub struct MetadataPatch {
 /// The `/Info` dictionary is created when the trailer lacks one (or
 /// points at something that is not a dictionary). `/ModDate` is always
 /// set — see [`MetadataPatch::mod_date`]. XMP metadata is not modified.
-pub fn set_metadata(input: &[u8], patch: &MetadataPatch, limits: &EngineLimits) -> PdfResult<Vec<u8>> {
+pub fn set_metadata(
+    input: &[u8],
+    patch: &MetadataPatch,
+    limits: &EngineLimits,
+) -> PdfResult<Vec<u8>> {
     let mut doc = load_pdf(input, limits)?;
     reject_encrypted(&doc)?;
 
@@ -91,7 +95,11 @@ pub fn set_metadata(input: &[u8], patch: &MetadataPatch, limits: &EngineLimits) 
         .as_deref()
         .map(normalize_pdf_date)
         .transpose()?;
-    let mod_date = patch.mod_date.as_deref().map(normalize_pdf_date).transpose()?;
+    let mod_date = patch
+        .mod_date
+        .as_deref()
+        .map(normalize_pdf_date)
+        .transpose()?;
 
     ensure_info_dict(&mut doc)?;
     {
@@ -246,7 +254,11 @@ fn format_pdf_date(p: &DateParts) -> String {
     );
     match p.zone {
         Some(Zone::Utc) => out.push('Z'),
-        Some(Zone::Offset { hours, minutes, negative }) => {
+        Some(Zone::Offset {
+            hours,
+            minutes,
+            negative,
+        }) => {
             out.push(if negative { '-' } else { '+' });
             out.push_str(&format!("{hours:02}'{minutes:02}'"));
         }
@@ -271,7 +283,11 @@ enum Zone {
     Utc,
     /// `+`/`-` offset; `negative` records the sign so `+05'30'` and
     /// `-05'30'` stay distinct.
-    Offset { hours: u32, minutes: u32, negative: bool },
+    Offset {
+        hours: u32,
+        minutes: u32,
+        negative: bool,
+    },
 }
 
 fn valid_date(p: &DateParts) -> bool {
@@ -358,7 +374,11 @@ fn normalize_pdf_date_literal(s: &str) -> PdfResult<String> {
                     let hours = tz[0..2].parse().unwrap_or(99);
                     let minutes = tz[2..4].parse().unwrap_or(99);
                     if hours <= 23 && minutes <= 59 {
-                        zone = Some(Zone::Offset { hours, minutes, negative });
+                        zone = Some(Zone::Offset {
+                            hours,
+                            minutes,
+                            negative,
+                        });
                     }
                 }
             }
@@ -389,14 +409,18 @@ fn normalize_rfc3339_date(s: &str) -> PdfResult<String> {
     if bytes.len() < 10
         || bytes[4] != b'-'
         || bytes[7] != b'-'
-        || !bytes[..10].iter().enumerate().all(|(i, b)| {
-            i == 4 || i == 7 || b.is_ascii_digit()
-        })
+        || !bytes[..10]
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
     {
         return Err(invalid_date(s));
     }
     let num = |range: std::ops::Range<usize>| -> u32 {
-        std::str::from_utf8(&bytes[range]).unwrap_or("0").parse().unwrap_or(0)
+        std::str::from_utf8(&bytes[range])
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0)
     };
     let year = i64::from(num(0..4));
     let month = num(5..7);
@@ -407,18 +431,20 @@ fn normalize_rfc3339_date(s: &str) -> PdfResult<String> {
     let mut minute = 0;
     let mut second = 0;
     let mut zone = None;
-    let mut idx = 10;
 
     if bytes.len() > 10 {
         if bytes[10] != b'T' && bytes[10] != b't' && bytes[10] != b' ' {
             return Err(invalid_date(s));
         }
-        idx = 11;
+        let mut idx = 11;
         // HH:MM[:SS][.frac]
         let need = idx + 5;
         if bytes.len() < need
             || bytes[idx + 2] != b':'
-            || !bytes[idx..need].iter().enumerate().all(|(i, b)| i == 2 || b.is_ascii_digit())
+            || !bytes[idx..need]
+                .iter()
+                .enumerate()
+                .all(|(i, b)| i == 2 || b.is_ascii_digit())
         {
             return Err(invalid_date(s));
         }
@@ -426,9 +452,7 @@ fn normalize_rfc3339_date(s: &str) -> PdfResult<String> {
         minute = num(idx + 3..idx + 5);
         idx = need;
         if idx < bytes.len() && bytes[idx] == b':' {
-            if bytes.len() < idx + 3
-                || !bytes[idx + 1..idx + 3].iter().all(u8::is_ascii_digit)
-            {
+            if bytes.len() < idx + 3 || !bytes[idx + 1..idx + 3].iter().all(u8::is_ascii_digit) {
                 return Err(invalid_date(s));
             }
             second = num(idx + 1..idx + 3);
@@ -469,14 +493,26 @@ fn normalize_rfc3339_date(s: &str) -> PdfResult<String> {
                     if zh > 23 || zm > 59 {
                         return Err(invalid_date(s));
                     }
-                    zone = Some(Zone::Offset { hours: zh, minutes: zm, negative: sign == b'-' });
+                    zone = Some(Zone::Offset {
+                        hours: zh,
+                        minutes: zm,
+                        negative: sign == b'-',
+                    });
                 }
                 _ => return Err(invalid_date(s)),
             }
         }
     }
 
-    let parts = DateParts { year, month, day, hour, minute, second, zone };
+    let parts = DateParts {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        zone,
+    };
     if !valid_date(&parts) {
         return Err(invalid_date(s));
     }
@@ -540,10 +576,7 @@ mod tests {
 
         assert_eq!(info_value(&out, b"Title").as_deref(), Some("New Title"));
         assert_eq!(info_value(&out, b"Author").as_deref(), Some("Jane Doe"));
-        assert_eq!(
-            info_value(&out, b"Keywords").as_deref(),
-            Some("rust, pdf")
-        );
+        assert_eq!(info_value(&out, b"Keywords").as_deref(), Some("rust, pdf"));
         // Untouched fields survive.
         assert_eq!(
             info_value(&out, b"Creator").as_deref(),
@@ -630,10 +663,7 @@ mod tests {
             normalize_pdf_date("2024-01-15T14:30:00Z").unwrap(),
             "D:20240115143000Z"
         );
-        assert_eq!(
-            normalize_pdf_date("D:20240115").unwrap(),
-            "D:20240115"
-        );
+        assert_eq!(normalize_pdf_date("D:20240115").unwrap(), "D:20240115");
         assert_eq!(
             normalize_pdf_date("1999-12-31 23:59:58-05:00").unwrap(),
             "D:19991231235958-05'00'"

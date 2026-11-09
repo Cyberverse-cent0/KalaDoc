@@ -262,7 +262,13 @@ fn edit_stream(
         if !TEXT_SHOWING_OPS.contains(&op.operator.as_str()) {
             continue;
         }
-        replace_in_operands(&mut op.operands, needle, replacement, case_sensitive, &mut count);
+        replace_in_operands(
+            &mut op.operands,
+            needle,
+            replacement,
+            case_sensitive,
+            &mut count,
+        );
     }
     if count == 0 {
         return Ok(0);
@@ -290,11 +296,7 @@ fn edit_stream(
 /// Encrypted documents are rejected. A document with zero matches is
 /// returned unchanged in content (still re-serialized) with
 /// `replacements: 0` — not an error.
-pub fn edit_text(
-    input: &[u8],
-    edit: &TextEdit,
-    limits: &EngineLimits,
-) -> PdfResult<EditOutcome> {
+pub fn edit_text(input: &[u8], edit: &TextEdit, limits: &EngineLimits) -> PdfResult<EditOutcome> {
     if edit.find.is_empty() {
         return Err(PdfError::InvalidInput(
             "edit_text requires a non-empty find string".to_string(),
@@ -342,7 +344,10 @@ pub fn edit_text(
 
     let mut pages_affected: Vec<u32> = page_streams
         .iter()
-        .filter(|(_, ids)| ids.iter().any(|id| stream_counts.get(id).copied().unwrap_or(0) > 0))
+        .filter(|(_, ids)| {
+            ids.iter()
+                .any(|id| stream_counts.get(id).copied().unwrap_or(0) > 0)
+        })
         .map(|(n, _)| *n)
         .collect();
     pages_affected.sort_unstable();

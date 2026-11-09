@@ -102,12 +102,12 @@ async fn health_reflects_external_tool_availability() {
     // `render` needs pdftoppm, `ocr` needs tesseract, `sign` needs
     // openssl; any missing degrades health honestly rather than
     // claiming full health.
-    let expected = if tool_on_path("pdftoppm") && tool_on_path("tesseract") && tool_on_path("openssl")
-    {
-        EngineHealthStatus::Healthy
-    } else {
-        EngineHealthStatus::Degraded
-    };
+    let expected =
+        if tool_on_path("pdftoppm") && tool_on_path("tesseract") && tool_on_path("openssl") {
+            EngineHealthStatus::Healthy
+        } else {
+            EngineHealthStatus::Degraded
+        };
     assert_eq!(health.status, expected);
     if expected == EngineHealthStatus::Degraded {
         assert!(health.message.is_some());

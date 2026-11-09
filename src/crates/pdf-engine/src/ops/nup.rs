@@ -210,10 +210,7 @@ pub(crate) fn selected_pages(doc: &Document, pages: Option<&str>) -> PdfResult<V
 /// in the same document. Page content is read via
 /// [`Document::get_page_content`], which concatenates and decompresses
 /// the page's content streams.
-pub(crate) fn import_as_forms(
-    doc: &mut Document,
-    numbers: &[u32],
-) -> PdfResult<Vec<SourcePage>> {
+pub(crate) fn import_as_forms(doc: &mut Document, numbers: &[u32]) -> PdfResult<Vec<SourcePage>> {
     let pages_map = doc.get_pages();
     let mut out = Vec::with_capacity(numbers.len());
     for &number in numbers {
@@ -356,9 +353,7 @@ pub(crate) fn emit_pages(
             )))
             .map_err(lopdf_err)?;
 
-        let media = Object::Array(
-            out.mediabox.iter().map(|&v| number_object(v)).collect(),
-        );
+        let media = Object::Array(out.mediabox.iter().map(|&v| number_object(v)).collect());
         let mut page_dict = dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
