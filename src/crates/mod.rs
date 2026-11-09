@@ -1,4 +1,5 @@
 pub mod application;
+pub mod core;
 #[path = "document_engine/src/lib.rs"]
 pub mod document_engine;
 #[path = "engine-registry/src/lib.rs"]
@@ -12,4 +13,3 @@ pub mod pdf_engine;
 pub mod security_engine;
 pub mod shared_public;
 pub mod storage;
-pub mod core;
