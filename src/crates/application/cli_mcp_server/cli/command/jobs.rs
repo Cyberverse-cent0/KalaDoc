@@ -53,9 +53,20 @@ async fn worker(ctx: &Context) -> Result<i32, CliError> {
     let db_config = ctx.db_config()?;
     let pool = init_db::init_db_with(&db_config).await?;
 
+    // Recurring-job support: the schedule table must exist and at least
+    // one tick job must be queued so the engine keeps driving `tick`.
+    crate::crates::scheduler::create_schedule_table(&pool).await?;
+    crate::crates::scheduler::enqueue_tick(&pool, None, None).await?;
+
     let app_config = ctx.config()?;
     let mut engine = JobEngine::new(pool, app_config.to_job_config());
     crate::crates::application::job_handlers::register_builtin(&mut engine);
+    engine.register(
+        crate::crates::scheduler::SCHEDULER_TICK_KIND,
+        Arc::new(crate::crates::scheduler::SchedulerTickHandler::new(
+            crate::crates::scheduler::SchedulerConfig::default(),
+        )),
+    );
 
     // Reclaim jobs a previous crashed worker left in `running` before
     // this worker starts claiming new ones.

@@ -124,11 +124,7 @@ pub fn watermark(
         let nw = ((mw as f64 * factor).round() as u64).clamp(1, u64::from(u32::MAX)) as u32;
         let nh = ((mh as f64 * factor).round() as u64).clamp(1, u64::from(u32::MAX)) as u32;
         if (nw, nh) != (mw, mh) {
-            mark_img = mark_img.resize_exact(
-                nw,
-                nh,
-                image::imageops::FilterType::Lanczos3,
-            );
+            mark_img = mark_img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3);
         }
     } else {
         let (mw, mh) = (mark_img.width(), mark_img.height());
@@ -155,9 +151,8 @@ pub fn watermark(
 
     // Bake `opacity` into the mark's alpha channel with a 256-entry LUT.
     let opacity_q = (options.opacity * 255.0).round() as u32;
-    let lut: [u8; 256] = std::array::from_fn(|i| {
-        ((i as u32 * opacity_q + 127) / 255).min(255) as u8
-    });
+    let lut: [u8; 256] =
+        std::array::from_fn(|i| ((i as u32 * opacity_q + 127) / 255).min(255) as u8);
     for px in mark_buf.pixels_mut() {
         let a = px[3] as usize;
         px[3] = lut[a];
@@ -168,12 +163,8 @@ pub fn watermark(
 
     match options.position {
         WatermarkPosition::TopLeft => place(margin, margin),
-        WatermarkPosition::TopRight => {
-            place(i64::from(bw) - i64::from(mw) - margin, margin)
-        }
-        WatermarkPosition::BottomLeft => {
-            place(margin, i64::from(bh) - i64::from(mh) - margin)
-        }
+        WatermarkPosition::TopRight => place(i64::from(bw) - i64::from(mw) - margin, margin),
+        WatermarkPosition::BottomLeft => place(margin, i64::from(bh) - i64::from(mh) - margin),
         WatermarkPosition::BottomRight => place(
             i64::from(bw) - i64::from(mw) - margin,
             i64::from(bh) - i64::from(mh) - margin,
@@ -188,9 +179,7 @@ pub fn watermark(
             let step_x = u64::from(mw) + u64::from(options.tile_spacing);
             let step_y = u64::from(mh) + u64::from(options.tile_spacing);
             if step_x == 0 || step_y == 0 {
-                return Err(ImageError::InvalidInput(
-                    "tile step is zero".to_string(),
-                ));
+                return Err(ImageError::InvalidInput("tile step is zero".to_string()));
             }
             let mut y = margin;
             while y < i64::from(bh) {
@@ -204,7 +193,10 @@ pub fn watermark(
         }
     }
 
-    encode(&image::DynamicImage::ImageRgba8(canvas), base_decoded.format)
+    encode(
+        &image::DynamicImage::ImageRgba8(canvas),
+        base_decoded.format,
+    )
 }
 
 #[cfg(test)]
@@ -269,7 +261,10 @@ mod tests {
                 ..WatermarkOptions::default()
             };
             assert!(
-                matches!(watermark(&base, &mark, &o, &limits), Err(ImageError::InvalidInput(_))),
+                matches!(
+                    watermark(&base, &mark, &o, &limits),
+                    Err(ImageError::InvalidInput(_))
+                ),
                 "opacity {bad} should be rejected"
             );
         }

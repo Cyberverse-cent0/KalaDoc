@@ -6,9 +6,12 @@
 
 pub mod auth;
 pub mod config;
+pub mod doc;
 pub mod doctor;
+pub mod engine;
 pub mod init;
 pub mod jobs;
+pub mod serve;
 pub mod user;
 pub mod version;
 

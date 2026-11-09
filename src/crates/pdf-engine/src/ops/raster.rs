@@ -231,11 +231,9 @@ pub(crate) fn rasterize(
             )));
         }
         let png = std::fs::read(&path).map_err(PdfError::Io)?;
-        let (width_px, height_px) = png_dimensions(&png).ok_or_else(|| {
-            PdfError::ExternalTool {
-                tool: RENDER_TOOL.to_string(),
-                detail: format!("page {page} output is not a valid PNG"),
-            }
+        let (width_px, height_px) = png_dimensions(&png).ok_or_else(|| PdfError::ExternalTool {
+            tool: RENDER_TOOL.to_string(),
+            detail: format!("page {page} output is not a valid PNG"),
         })?;
         out.push(PageImage {
             page,
@@ -307,10 +305,7 @@ mod tests {
 
     #[test]
     fn png_page_number_parses_pdftoppm_names() {
-        assert_eq!(
-            png_page_number(Path::new("/tmp/x/page-12.png")),
-            Some(12)
-        );
+        assert_eq!(png_page_number(Path::new("/tmp/x/page-12.png")), Some(12));
         assert_eq!(png_page_number(Path::new("page-1.png")), Some(1));
         assert_eq!(png_page_number(Path::new("page.png")), None);
         assert_eq!(png_page_number(Path::new("page-x.png")), None);

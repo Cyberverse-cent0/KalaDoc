@@ -114,7 +114,7 @@ pub async fn claim_next(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(job_from_row).transpose()?)
+    row.map(job_from_row).transpose()
 }
 
 /// Marks a claimed job succeeded or schedules its next retry.

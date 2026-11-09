@@ -27,11 +27,7 @@ pub enum FlipDirection {
 
 /// Flip `input` in the given direction, returning the encoded bytes
 /// in the input format. All limits are enforced by [`decode`].
-pub fn flip(
-    input: &[u8],
-    direction: FlipDirection,
-    limits: &EngineLimits,
-) -> ImageResult<Vec<u8>> {
+pub fn flip(input: &[u8], direction: FlipDirection, limits: &EngineLimits) -> ImageResult<Vec<u8>> {
     let decoded = decode(input, limits)?;
     let flipped = match direction {
         FlipDirection::Horizontal => decoded.image.fliph(),
@@ -74,12 +70,12 @@ mod tests {
     fn fixture_png() -> ImageResult<Vec<u8>> {
         let mut img = RgbaImage::new(3, 2);
         let px = [
-            [255, 0, 0, 255],    // A
-            [0, 255, 0, 255],    // B
-            [0, 0, 255, 255],    // C
-            [255, 255, 0, 255],  // D
-            [255, 0, 255, 255],  // E
-            [0, 255, 255, 255],  // F
+            [255, 0, 0, 255],   // A
+            [0, 255, 0, 255],   // B
+            [0, 0, 255, 255],   // C
+            [255, 255, 0, 255], // D
+            [255, 0, 255, 255], // E
+            [0, 255, 255, 255], // F
         ];
         for (i, p) in px.iter().enumerate() {
             let (x, y) = (i as u32 % 3, i as u32 / 3);
@@ -162,7 +158,11 @@ mod tests {
 
     #[test]
     fn rejects_garbage_input() {
-        let result = flip(b"not an image", FlipDirection::Horizontal, &EngineLimits::default());
+        let result = flip(
+            b"not an image",
+            FlipDirection::Horizontal,
+            &EngineLimits::default(),
+        );
         assert!(result.is_err());
     }
 }

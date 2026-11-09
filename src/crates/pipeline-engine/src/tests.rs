@@ -5,7 +5,9 @@
 //! utils) for steps that need real page content.
 
 use super::*;
-use crate::crates::core::engine::{EngineHealthStatus, EngineKind, EngineOperation, ProcessingEngine};
+use crate::crates::core::engine::{
+    EngineHealthStatus, EngineKind, EngineOperation, ProcessingEngine,
+};
 use crate::crates::pdf_engine::PdfEngine;
 use crate::crates::security_engine::ResourceLimits;
 
@@ -77,11 +79,7 @@ fn intake_def() -> PipelineDefinition {
             PipelineStep::new("gate", engine_name::SECURITY, operation::VALIDATE),
             PipelineStep::new("check", engine_name::PDF, operation::PDF_VALIDATE),
             PipelineStep::new("info", engine_name::PDF, operation::PDF_INSPECT),
-            PipelineStep::new(
-                "text",
-                engine_name::PDF,
-                operation::PDF_EXTRACT_TEXT,
-            ),
+            PipelineStep::new("text", engine_name::PDF, operation::PDF_EXTRACT_TEXT),
         ],
     }
 }
@@ -292,10 +290,7 @@ fn byte_transform_chains_and_split_is_terminal() {
         ],
     };
     let err = engine.run_pipeline(&split_then, &pdf).unwrap_err();
-    assert!(matches!(
-        err,
-        PipelineError::StepFailed { index: 1, .. }
-    ));
+    assert!(matches!(err, PipelineError::StepFailed { index: 1, .. }));
 
     // split alone is a valid terminal step.
     let split_only = PipelineDefinition {
@@ -326,10 +321,7 @@ fn missing_required_params_are_step_errors() {
         )],
     };
     let err = engine.run_pipeline(&def, MINIMAL_PDF).unwrap_err();
-    assert!(matches!(
-        err,
-        PipelineError::StepFailed { index: 0, .. }
-    ));
+    assert!(matches!(err, PipelineError::StepFailed { index: 0, .. }));
 }
 
 #[test]
@@ -338,15 +330,17 @@ fn security_validate_upload_step() {
     let def = PipelineDefinition {
         name: "upload".to_string(),
         description: None,
-        steps: vec![PipelineStep::new(
-            "upload-gate",
-            engine_name::SECURITY,
-            operation::VALIDATE_UPLOAD,
-        )
-        .with_params(serde_json::json!({
-            "filename": "doc.pdf",
-            "expected_format": "pdf"
-        }))],
+        steps: vec![
+            PipelineStep::new(
+                "upload-gate",
+                engine_name::SECURITY,
+                operation::VALIDATE_UPLOAD,
+            )
+            .with_params(serde_json::json!({
+                "filename": "doc.pdf",
+                "expected_format": "pdf"
+            })),
+        ],
     };
     let out = engine.run_pipeline(&def, MINIMAL_PDF).unwrap();
     let report = &out.steps[0].output.as_ref().unwrap();
@@ -357,15 +351,17 @@ fn security_validate_upload_step() {
     let bad = PipelineDefinition {
         name: "upload-bad".to_string(),
         description: None,
-        steps: vec![PipelineStep::new(
-            "upload-gate",
-            engine_name::SECURITY,
-            operation::VALIDATE_UPLOAD,
-        )
-        .with_params(serde_json::json!({
-            "filename": "doc.pdf",
-            "expected_format": "png"
-        }))],
+        steps: vec![
+            PipelineStep::new(
+                "upload-gate",
+                engine_name::SECURITY,
+                operation::VALIDATE_UPLOAD,
+            )
+            .with_params(serde_json::json!({
+                "filename": "doc.pdf",
+                "expected_format": "png"
+            })),
+        ],
     };
     assert!(matches!(
         engine.run_pipeline(&bad, MINIMAL_PDF),

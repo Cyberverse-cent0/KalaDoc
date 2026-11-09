@@ -34,32 +34,84 @@ fn trait_metadata() {
         EngineOperation::Merge,
         EngineOperation::Split,
         EngineOperation::Rotate,
+        EngineOperation::Resize,
+        EngineOperation::Crop,
+        EngineOperation::Reorder,
+        EngineOperation::RemovePages,
         EngineOperation::ExtractPages,
+        EngineOperation::Compress,
+        EngineOperation::Repair,
+        EngineOperation::Flatten,
+        EngineOperation::Overlay,
+        EngineOperation::Watermark,
+        EngineOperation::Stamp,
+        EngineOperation::Redact,
+        EngineOperation::Sanitize,
+        EngineOperation::VerifySignature,
+        EngineOperation::Sign,
+        EngineOperation::RemoveSignatures,
         EngineOperation::Validate,
         EngineOperation::Inspect,
+        EngineOperation::PageCount,
+        EngineOperation::ExtractMetadata,
+        EngineOperation::ExtractImages,
         EngineOperation::ExtractText,
-    ] {
-        assert!(caps.operations.contains(&op), "missing {op:?}");
-    }
-    // Operations we do NOT implement must not be advertised.
-    for op in [
-        EngineOperation::Compress,
-        EngineOperation::Watermark,
+        EngineOperation::Render,
+        EngineOperation::Compare,
         EngineOperation::Convert,
         EngineOperation::Ocr,
         EngineOperation::Encrypt,
         EngineOperation::Decrypt,
     ] {
-        assert!(!caps.operations.contains(&op), "unexpected {op:?}");
+        assert!(caps.operations.contains(&op), "missing {op:?}");
     }
-    assert_eq!(caps.input_formats, vec!["pdf".to_string()]);
-    assert_eq!(caps.output_formats, vec!["pdf".to_string()]);
+    assert!(caps.input_formats.contains(&"pdf".to_string()));
+    assert!(caps.output_formats.contains(&"pdf".to_string()));
+}
+
+/// `true` when `tool` resolves to an executable on `PATH` — mirrors
+/// the probe `PdfEngine::health` performs for external render/OCR
+/// tools, so the health test is environment-aware.
+fn tool_on_path(tool: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                let candidate = dir.join(tool);
+                candidate.is_file()
+                    && std::fs::metadata(&candidate)
+                        .map(|m| {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                m.permissions().mode() & 0o111 != 0
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                true
+                            }
+                        })
+                        .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 #[tokio::test]
-async fn health_is_healthy() {
+async fn health_reflects_external_tool_availability() {
     let health = engine().health().await;
-    assert_eq!(health.status, EngineHealthStatus::Healthy);
+    // `render` needs pdftoppm, `ocr` needs tesseract, `sign` needs
+    // openssl; any missing degrades health honestly rather than
+    // claiming full health.
+    let expected = if tool_on_path("pdftoppm") && tool_on_path("tesseract") && tool_on_path("openssl")
+    {
+        EngineHealthStatus::Healthy
+    } else {
+        EngineHealthStatus::Degraded
+    };
+    assert_eq!(health.status, expected);
+    if expected == EngineHealthStatus::Degraded {
+        assert!(health.message.is_some());
+    }
 }
 
 #[test]

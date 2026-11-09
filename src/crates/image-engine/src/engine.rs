@@ -15,8 +15,8 @@ use crate::crates::core::engine::{
 
 use crate::crates::image_engine::error::ImageResult;
 use crate::crates::image_engine::ops::{
-    self, AdjustOptions, CompressOptions, FlipDirection, ImageFormat, ImageInfo, ImageMetadata,
-    ResizeOptions, ValidationReport, WatermarkOptions,
+    self, AdjustOptions, ColorOptions, CompressOptions, FlipDirection, ImageFormat, ImageInfo,
+    ImageMetadata, ResizeOptions, ValidationReport, WatermarkOptions,
 };
 
 /// The raster image processing engine.
@@ -132,15 +132,19 @@ impl ImageEngine {
         ops::adjust(input, options, &self.limits)
     }
 
+    /// Apply color manipulations per `options`: per-channel gain and
+    /// offset, HSV saturation, auto-levels (high-contrast) stretch,
+    /// grayscale conversion, and inversion.
+    ///
+    /// See [`ops::color`].
+    pub fn color(&self, input: &[u8], options: &ColorOptions) -> ImageResult<Vec<u8>> {
+        ops::color(input, options, &self.limits)
+    }
+
     /// Generate a thumbnail fitting within `(max_width, max_height)`.
     ///
     /// Never upscales. See [`ops::thumbnail`].
-    pub fn thumbnail(
-        &self,
-        input: &[u8],
-        max_width: u32,
-        max_height: u32,
-    ) -> ImageResult<Vec<u8>> {
+    pub fn thumbnail(&self, input: &[u8], max_width: u32, max_height: u32) -> ImageResult<Vec<u8>> {
         ops::thumbnail(input, max_width, max_height, &self.limits)
     }
 

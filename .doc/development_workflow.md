@@ -61,3 +61,35 @@ Examples:
 - Branches merge back via pull request or merge commit once the
   feature/fix is complete and verified.
 - Delete the branch after merge.
+
+## Staying in sync with the remote
+
+Push rejections (`non-fast-forward`) mean the remote branch has commits
+your local branch does not. This happens easily when multiple agents or
+tooling sessions work on the same branch — e.g. the same work gets
+committed twice under different SHAs, producing "diverged" histories
+with identical commit messages but different trees.
+
+Rules:
+
+- **Fetch before you push.** `git fetch` then check
+  `git rev-list --left-right --count HEAD...@{u}`. `0  N` means you are
+  simply behind — integrate first, never force-push over someone
+  else's commits.
+- **Identical messages ≠ identical commits.** Two branches can carry
+  the same commit subjects with different content. Compare trees
+  (`git diff HEAD origin/<branch>`) before assuming one side is a
+  duplicate; the remote may hold work your local lacks.
+- **Prefer merge or rebase over force-push.** `git pull --rebase`
+  replays local commits on top of the remote; a merge commit preserves
+  both histories. Reach for `--force-with-lease` only when you are
+  certain the remote commits are disposable duplicates of your own
+  work — and say so explicitly before doing it.
+- **Never force-push `main` or shared release branches**, and never
+  plain `--force` when `--force-with-lease` works.
+- **Commit or stash WIP before integrating.** Rebasing/merging with a
+  dirty tree is how changes get lost. Large uncommitted work should be
+  committed as a WIP commit first.
+- **After a rejected push, stop and inspect.** Do not retry the same
+  push in a loop — each retry fails identically. Fetch, diff, then
+  choose merge / rebase / force-push deliberately.

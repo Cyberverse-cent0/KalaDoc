@@ -9,6 +9,7 @@ mod args;
 mod command;
 mod context;
 mod credentials;
+mod envfile;
 mod error;
 mod global;
 mod output;
@@ -66,6 +67,9 @@ async fn dispatch(cli: &Cli, ctx: Context) -> Result<i32, CliError> {
         Commands::Auth(args) => command::auth::run(&ctx, args).await,
         Commands::User(args) => command::user::run(&ctx, args).await,
         Commands::Jobs(args) => command::jobs::run(&ctx, args).await,
+        Commands::Serve { addr } => command::serve::run(&ctx, addr.as_deref()).await,
+        Commands::Engine(args) => command::engine::run(&ctx, args).await,
+        Commands::Doc(args) => command::doc::run(&ctx, args).await,
     }
 }
 

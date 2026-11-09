@@ -18,6 +18,11 @@ pub enum Format {
     Jpeg,
     Docx,
     Odt,
+    Xlsx,
+    Xls,
+    Pptx,
+    Ppt,
+    Epub,
 }
 
 impl Format {
@@ -32,6 +37,11 @@ impl Format {
             Self::Jpeg => "jpeg",
             Self::Docx => "docx",
             Self::Odt => "odt",
+            Self::Xlsx => "xlsx",
+            Self::Xls => "xls",
+            Self::Pptx => "pptx",
+            Self::Ppt => "ppt",
+            Self::Epub => "epub",
         }
     }
 
@@ -48,6 +58,11 @@ impl Format {
             "jpg" | "jpeg" | "jpe" => Some(Self::Jpeg),
             "docx" => Some(Self::Docx),
             "odt" | "odf" => Some(Self::Odt),
+            "xlsx" => Some(Self::Xlsx),
+            "xls" => Some(Self::Xls),
+            "pptx" => Some(Self::Pptx),
+            "ppt" => Some(Self::Ppt),
+            "epub" => Some(Self::Epub),
             _ => None,
         }
     }

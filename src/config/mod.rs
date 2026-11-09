@@ -48,6 +48,7 @@ pub struct AppConfig {
     pub storage: StorageSection,
     pub runtime: RuntimeSection,
     pub jobs: JobsSection,
+    pub api: ApiSection,
     /// From `APP_SECRET_KEY` — env only, never from the file.
     pub secret_key: String,
     /// From `APP_DB_USER` — env only.
@@ -162,6 +163,21 @@ impl Default for JobsSection {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+pub struct ApiSection {
+    /// HTTP API bind address (`host:port`).
+    pub addr: String,
+}
+
+impl Default for ApiSection {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:8080".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct RuntimeSection {
     /// Default `tracing` filter level (also overridable via `RUST_LOG`).
     pub log_level: String,
@@ -184,6 +200,7 @@ struct FileConfig {
     storage: StorageSection,
     runtime: RuntimeSection,
     jobs: JobsSection,
+    api: ApiSection,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +255,7 @@ impl AppConfig {
             cfg.storage = file.storage;
             cfg.runtime = file.runtime;
             cfg.jobs = file.jobs;
+            cfg.api = file.api;
             cfg.config_path = Some(path);
         }
 
@@ -311,6 +329,12 @@ impl AppConfig {
                 "must be >= 1 second (0 would reap every running job immediately)",
             ));
         }
+        if self.api.addr.parse::<std::net::SocketAddr>().is_err() {
+            return Err(bad(
+                "api.addr",
+                "must be a valid socket address (e.g. \"127.0.0.1:8080\")",
+            ));
+        }
         // Lenient loads leave secrets empty; only validate when set.
         if !self.secret_key.is_empty() {
             validate_secret_key(&self.secret_key)?;
@@ -339,6 +363,7 @@ impl AppConfig {
     /// | `JOB_BACKOFF_BASE_SECS`         | `jobs`             | `backoff_base_secs`       |
     /// | `JOB_STALE_AFTER_SECS`          | `jobs`             | `stale_after_secs`        |
     /// | `JOB_RECOVERY_TIMEOUT_SECS`      | `jobs`             | `stale_after_secs` (alias; applied after `JOB_STALE_AFTER_SECS`, so it wins when both are set) |
+    /// | `KALADOC_API_ADDR`               | `api`              | `addr`                     |
     /// | `APP_SECRET_KEY`                | secret             | `secret_key` (required)   |
     /// | `APP_DB_USER`                   | secret             | `db_user` (required)      |
     /// | `APP_DB_PASSWORD`               | secret             | `db_password` (required)  |
@@ -396,6 +421,9 @@ impl AppConfig {
         // takes precedence when both variables are set.
         if let Some(v) = parse_env::<u64>("JOB_RECOVERY_TIMEOUT_SECS")? {
             self.jobs.stale_after_secs = v;
+        }
+        if let Some(v) = parse_env::<String>("KALADOC_API_ADDR")? {
+            self.api.addr = v;
         }
 
         self.secret_key = env_secret("APP_SECRET_KEY", require_secrets)?;

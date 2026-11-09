@@ -11,11 +11,7 @@ use super::load::{decode, encode};
 
 /// Rotate `input` by `degrees`, which must be exactly 90, 180, or 270.
 /// Returns the encoded bytes in the input format.
-pub fn rotate(
-    input: &[u8],
-    degrees: u16,
-    limits: &EngineLimits,
-) -> ImageResult<Vec<u8>> {
+pub fn rotate(input: &[u8], degrees: u16, limits: &EngineLimits) -> ImageResult<Vec<u8>> {
     let loaded = decode(input, limits)?;
     let rotated = match degrees {
         90 => loaded.image.rotate90(),

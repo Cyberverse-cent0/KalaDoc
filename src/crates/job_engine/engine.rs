@@ -728,7 +728,12 @@ mod tests {
                 })
             }
         }
-        eng.register("test.spy", Arc::new(Spy { calls: calls.clone() }));
+        eng.register(
+            "test.spy",
+            Arc::new(Spy {
+                calls: calls.clone(),
+            }),
+        );
 
         let job = eng
             .enqueue(&NewJob {

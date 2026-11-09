@@ -39,7 +39,9 @@ pub enum PipelineError {
 
     /// A step named an operation the target engine does not support
     /// in a pipeline. Detected up front, before any step executes.
-    #[error("pipeline step {step_index} `{step_name}`: engine `{engine}` does not support operation `{operation}`")]
+    #[error(
+        "pipeline step {step_index} `{step_name}`: engine `{engine}` does not support operation `{operation}`"
+    )]
     UnsupportedOperation {
         /// 0-based step position.
         step_index: usize,
@@ -103,5 +105,3 @@ pub enum StepError {
     #[error("invalid pipeline state: {0}")]
     InvalidState(String),
 }
-
-

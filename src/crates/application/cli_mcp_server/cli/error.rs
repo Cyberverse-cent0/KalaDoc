@@ -4,7 +4,9 @@ use crate::config::ConfigError;
 use crate::crates::application::Organization::auth_user::AuthError;
 use crate::crates::application::Organization::init_db::DbError;
 use crate::crates::application::Organization::session::SessionError;
+use crate::crates::application::services::ServiceError;
 use crate::crates::job_engine::JobError;
+use crate::crates::scheduler::SchedulerError;
 
 /// Every failure a command can produce. `exit_code()`/`code()` implement
 /// the documented contract; do not add variants without assigning both.
@@ -49,6 +51,9 @@ pub enum CliError {
     /// Job engine/store error.
     #[error(transparent)]
     Job(#[from] JobError),
+    /// Scheduler store/handler error.
+    #[error(transparent)]
+    Scheduler(#[from] SchedulerError),
     /// Local I/O (credentials file, prompts, artifacts).
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -100,7 +105,7 @@ impl CliError {
                 "conflict"
             }
             Self::Auth(_) => "internal",
-            Self::Db(_) | Self::Session(_) | Self::Job(_) => "internal",
+            Self::Db(_) | Self::Session(_) | Self::Job(_) | Self::Scheduler(_) => "internal",
             Self::Io(_) => "io_error",
             Self::Json(_) | Self::Yaml(_) | Self::Mcp(_) | Self::Internal(_) => "internal",
         }
@@ -110,7 +115,22 @@ impl CliError {
     pub fn retryable(&self) -> bool {
         matches!(
             self,
-            Self::Db(_) | Self::Session(_) | Self::Io(_) | Self::Job(JobError::Db(_))
+            Self::Db(_)
+                | Self::Session(_)
+                | Self::Io(_)
+                | Self::Job(JobError::Db(_))
+                | Self::Scheduler(SchedulerError::Job(JobError::Db(_)))
         )
+    }
+}
+
+impl From<ServiceError> for CliError {
+    fn from(e: ServiceError) -> Self {
+        match e {
+            ServiceError::Db(db) => Self::Db(db),
+            ServiceError::Config(c) => Self::Config(c),
+            ServiceError::Io(io) => Self::Io(io),
+            ServiceError::Storage(_) | ServiceError::Store(_) => Self::Internal(e.to_string()),
+        }
     }
 }

@@ -12,15 +12,18 @@ use sqlx::SqlitePool;
 
 use crate::config::AppConfig;
 use crate::crates::application::Organization::init_db;
+use crate::crates::storage::local::config::StorageConfig;
 
 use super::documents::DocumentService;
 use super::error::ServiceError;
+use super::ingestion::DocumentIngestionService;
 use super::storage::StorageService;
 
 /// All application services sharing one configuration and database.
 pub struct AppServices {
     storage: StorageService,
     documents: DocumentService,
+    ingestion: DocumentIngestionService,
     /// The shared pool, retained so future services (jobs, sessions,
     /// audit) can be added without changing constructors.
     pool: SqlitePool,
@@ -29,11 +32,14 @@ pub struct AppServices {
 impl AppServices {
     /// Composes services from already-built parts. `pool` must have the
     /// document-store schema initialized (see
-    /// [`DocumentService::init`] or `init_db_with`).
-    pub fn new(storage: StorageService, pool: SqlitePool) -> Self {
+    /// [`DocumentService::init`] or `init_db_with`). `storage_config`
+    /// must describe the same storage root the `StorageService` was
+    /// built from — the ingestion service stages uploads through it.
+    pub fn new(storage: StorageService, pool: SqlitePool, storage_config: &StorageConfig) -> Self {
         Self {
             storage,
             documents: DocumentService::new(pool.clone()),
+            ingestion: DocumentIngestionService::new(pool.clone(), storage_config.clone()),
             pool,
         }
     }
@@ -47,9 +53,10 @@ impl AppServices {
     /// storage-root problems, [`ServiceError::Db`] for database open or
     /// migration failures.
     pub async fn init(config: &AppConfig) -> Result<Self, ServiceError> {
-        let storage = StorageService::from_config(&config.to_storage_config())?;
+        let storage_config = config.to_storage_config();
+        let storage = StorageService::from_config(&storage_config)?;
         let pool = init_db::init_db_with(&config.to_db_config()).await?;
-        Ok(Self::new(storage, pool))
+        Ok(Self::new(storage, pool, &storage_config))
     }
 
     /// Storage service. Takes `&mut self` because backend operations
@@ -65,6 +72,13 @@ impl AppServices {
     /// Document service — stateless facade over the shared pool.
     pub fn documents(&self) -> &DocumentService {
         &self.documents
+    }
+
+    /// Ingestion service — staged streaming uploads plus document
+    /// registration and crash recovery. Cheap to clone; holds the
+    /// storage config and stream limits alongside the shared pool.
+    pub fn ingestion(&self) -> &DocumentIngestionService {
+        &self.ingestion
     }
 
     /// The shared SQLite pool for composing additional services.

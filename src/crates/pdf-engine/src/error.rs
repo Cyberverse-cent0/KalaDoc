@@ -29,6 +29,11 @@ pub enum PdfError {
     #[error("failed to encode PDF output")]
     Encode(#[source] io::Error),
 
+    /// Local filesystem or subprocess I/O failure outside PDF parsing —
+    /// e.g. temp files for rasterization.
+    #[error("I/O error during PDF processing")]
+    Io(#[source] io::Error),
+
     /// The page range specifier was malformed or selected pages that do
     /// not exist. The message always states the expected form
     /// (`1-3,8,10-12`, 1-based) so callers can fix the input.
@@ -55,4 +60,18 @@ pub enum PdfError {
     /// decryption; callers must supply an already-decrypted PDF.
     #[error("encrypted PDF documents are not supported")]
     Encrypted,
+
+    /// An operation needs an external command-line tool that is not
+    /// installed or not found on `PATH` (e.g. `pdftoppm`, `tesseract`).
+    /// The engine never fakes the result — the caller must install the
+    /// tool or pick a different operation.
+    #[error("required external tool not found: {0}")]
+    MissingTool(String),
+
+    /// An external tool was found but failed (non-zero exit, bad
+    /// output, timeout). `tool` names the binary; `detail` is a short
+    /// sanitized description — never stdout/stderr dumps, which can be
+    /// large and may contain document-derived data.
+    #[error("external tool {tool} failed: {detail}")]
+    ExternalTool { tool: String, detail: String },
 }

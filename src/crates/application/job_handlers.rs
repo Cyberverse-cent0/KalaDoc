@@ -15,6 +15,7 @@
 //! | `document.metadata_extract` | `{document_id, artifact_id?}`                             | Sniff format + extract PDF metadata into document metadata (see [`DocumentMetadataExtractHandler`]) |
 //! | `document.index`        | `{document_id, artifact_id?}`                                 | Extract searchable text into an `index` metadata field (see [`DocumentIndexHandler`]) |
 //! | `thumbnail.generate`    | `{document_id, artifact_id?}`                                 | Extract an embedded PDF thumbnail image into storage (see [`ThumbnailGenerateHandler`]) |
+//! | `document.pdf_op`       | `{document_id, artifact_id?, op, params?}`                    | Run a pdf-engine operation; byte outputs become artifacts, reports land in metadata (see [`PdfOpHandler`]) |
 //! | `pdf.inspect`           | `{path, max_bytes?}`                                          | Validate + inspect a PDF under the storage root; writes `<path>.inspect.json` |
 //! | `storage.gc_staging`    | `{retention_secs?}`                                           | Delete abandoned entries under `<storage_root>/staging/` and `<storage_root>/.staging/` older than the retention window |
 //!
@@ -56,10 +57,27 @@
 //! row cleanup.
 //!
 //! Use the [`enqueue_ingest`], [`enqueue_metadata_extract`],
-//! [`enqueue_index`], and [`enqueue_thumbnail`] helpers to produce
-//! jobs — they build the documented payload contracts and stamp
-//! `processing_status = "queued"` (best-effort) so producers never
-//! hand-craft JSON.
+//! [`enqueue_index`], [`enqueue_thumbnail`], and [`enqueue_pdf_op`]
+//! helpers to produce jobs — they build the documented payload
+//! contracts and stamp `processing_status = "queued"` (best-effort) so
+//! producers never hand-craft JSON.
+//!
+//! `document.pdf_op` payload details: `document_id` is required,
+//! `artifact_id` selects the input artifact (most recent when absent),
+//! `op` must be one of [`PDF_OPS`], and `params` is an optional JSON
+//! object of op-specific arguments (page ranges as `"pages"`,
+//! passwords, watermark/stamp options, `mode` for `compare`, ...).
+//! For `compare`, `params.other_artifact_id` (same document) or
+//! `params.other_document_id` + `params.other_artifact_id` selects the
+//! second input. Outcomes: ops returning PDF/image bytes store each
+//! output as a new artifact under `documents/{id}/outputs/` (reported
+//! in `pdf_ops.{op}.outputs`); ops returning structured data store a
+//! JSON report inline in `pdf_ops.{op}.result` when it fits in
+//! [`REPORT_INLINE_MAX_BYTES`], otherwise as a `*-result.json`
+//! artifact. Terminal statuses use the same vocabulary as the other
+//! processing handlers (`succeeded`, `error`, `unsupported`,
+//! `unavailable`, `skipped_too_large`) under both `{op}_status` and
+//! `processing_status`.
 //!
 //! `pdf.inspect` payload details: `path` is a **relative** path under
 //! the configured storage root (`[storage].root_dir` /
@@ -95,6 +113,7 @@ use crate::crates::document_engine::artifact::{
 use crate::crates::document_engine::audit::DocumentAuditEventType;
 use crate::crates::document_engine::ids::DocumentId;
 use crate::crates::document_engine::metadata::DocumentMetadata;
+use crate::crates::document_engine::store::StoreError;
 use crate::crates::document_engine::store::artifacts::{
     NewArtifact, download_artifact, list_artifacts, upload_artifact,
 };
@@ -103,8 +122,9 @@ use crate::crates::document_engine::store::history::record_event;
 use crate::crates::document_engine::store::metadata::{
     get_document_metadata, upsert_document_metadata,
 };
-use crate::crates::document_engine::store::StoreError;
-use crate::crates::job_engine::{Job, JobContext, JobEngine, JobError, JobHandler, NewJob, enqueue};
+use crate::crates::job_engine::{
+    Job, JobContext, JobEngine, JobError, JobHandler, NewJob, enqueue,
+};
 use crate::crates::security_engine::{SniffedFormat, sniff_format};
 use crate::crates::storage::local::config::StorageConfig;
 use crate::crates::storage::local::debug_when_full::{FaultInjectingFs, StorageError};
@@ -130,6 +150,46 @@ pub const DOCUMENT_INDEX_KIND: &str = "document.index";
 
 /// Job kind for [`ThumbnailGenerateHandler`].
 pub const THUMBNAIL_GENERATE_KIND: &str = "thumbnail.generate";
+
+/// Job kind for [`PdfOpHandler`].
+pub const PDF_OP_KIND: &str = "document.pdf_op";
+
+/// Pdf-engine operations reachable through [`PDF_OP_KIND`] /
+/// [`enqueue_pdf_op`]. Producers (the REST API) validate `op` against
+/// this list before enqueueing; the handler re-checks it so hand-built
+/// payloads fail fast too.
+pub const PDF_OPS: &[&str] = &[
+    // Inspection / extraction (structured reports).
+    "page_count",
+    "inspect",
+    "validate",
+    "repair",
+    "verify_signatures",
+    "extract_metadata",
+    "extract_text",
+    "extract_images",
+    "ocr",
+    "compare",
+    // Conversion / rendering (byte outputs).
+    "convert",
+    "render",
+    // Page structure (byte outputs).
+    "compress",
+    "flatten",
+    "sanitize",
+    "rotate",
+    "split",
+    "extract_pages",
+    "remove_pages",
+    "reorder",
+    // Marks.
+    "watermark",
+    "stamp",
+    // Security.
+    "encrypt",
+    "decrypt",
+    "redact",
+];
 
 /// Default `max_bytes` for `pdf.inspect` (100 MiB).
 const DEFAULT_INSPECT_MAX_BYTES: u64 = 100 * 1024 * 1024;
@@ -157,6 +217,15 @@ const MAX_THUMBNAIL_PIXELS: u64 = 16_000_000;
 /// Maximum decoded thumbnail payload accepted from a PDF image stream.
 const MAX_THUMBNAIL_DECODED_BYTES: usize = 64 * 1024 * 1024;
 
+/// Maximum output files a single `document.pdf_op` job may store as
+/// artifacts (bounds `split` fan-out).
+const MAX_OP_OUTPUTS: usize = 100;
+
+/// Structured op reports up to this size are stored inline in the
+/// `pdf_ops.{op}.result` metadata field; larger ones become a
+/// `*-result.json` artifact instead.
+const REPORT_INLINE_MAX_BYTES: usize = 64 * 1024;
+
 /// Default `max_attempts` used by the `enqueue_*` helpers.
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 
@@ -183,10 +252,7 @@ pub fn register_builtin(engine: &mut JobEngine) {
     engine.register(PDF_INSPECT_KIND, Arc::new(PdfInspectHandler));
     engine.register(STORAGE_GC_STAGING_KIND, Arc::new(StorageGcStagingHandler));
     match DocumentMetadataExtractHandler::from_app_config() {
-        Ok(handler) => engine.register(
-            DOCUMENT_METADATA_EXTRACT_KIND,
-            Arc::new(handler),
-        ),
+        Ok(handler) => engine.register(DOCUMENT_METADATA_EXTRACT_KIND, Arc::new(handler)),
         Err(e) => tracing::warn!(
             error = %e,
             "skipping document.metadata_extract handler: storage config unavailable"
@@ -204,6 +270,13 @@ pub fn register_builtin(engine: &mut JobEngine) {
         Err(e) => tracing::warn!(
             error = %e,
             "skipping thumbnail.generate handler: storage config unavailable"
+        ),
+    }
+    match PdfOpHandler::from_app_config() {
+        Ok(handler) => engine.register(PDF_OP_KIND, Arc::new(handler)),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "skipping document.pdf_op handler: storage config unavailable"
         ),
     }
 }
@@ -421,7 +494,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 /// Store errors become retryable job failures with context attached.
-fn store_err(e: crate::crates::document_engine::store::StoreError) -> JobError {
+fn store_err(e: StoreError) -> JobError {
     JobError::Failed(format!("document store error: {e}"))
 }
 
@@ -750,7 +823,10 @@ fn read_object_bounded(
         .map_err(|e| JobError::Failed(format!("storage read failed for {name}: {e}")))?;
     let truncated = buf.len() as u64 > max_bytes;
     buf.truncate(max_bytes as usize);
-    Ok(BoundedBytes { bytes: buf, truncated })
+    Ok(BoundedBytes {
+        bytes: buf,
+        truncated,
+    })
 }
 
 /// [`EngineLimits`] applied to pdf-engine calls made by job handlers:
@@ -900,12 +976,11 @@ async fn resolve_artifact(
             Ok(artifact)
         }
         None => {
-            let artifacts = list_artifacts(pool, document_id)
-                .await
-                .map_err(store_err)?;
-            artifacts.into_iter().last().ok_or_else(|| {
-                JobError::Failed(format!("document {document_id} has no artifacts"))
-            })
+            let artifacts = list_artifacts(pool, document_id).await.map_err(store_err)?;
+            artifacts
+                .into_iter()
+                .last()
+                .ok_or_else(|| JobError::Failed(format!("document {document_id} has no artifacts")))
         }
     }
 }
@@ -1054,9 +1129,7 @@ impl DocumentMetadataExtractHandler {
             let format = sniff_format(head);
 
             let (pdf_info, pdf_error) = if format == SniffedFormat::Pdf && !read.truncated {
-                let engine = crate::crates::pdf_engine::PdfEngine::with_limits(
-                    processing_limits(),
-                );
+                let engine = crate::crates::pdf_engine::PdfEngine::with_limits(processing_limits());
                 match engine.inspect(&read.bytes) {
                     Ok(info) => (Some(info), None),
                     Err(e) => (None, Some(e.to_string())),
@@ -1100,8 +1173,10 @@ impl DocumentMetadataExtractHandler {
         let artifact_size = artifact.size_bytes;
 
         mutate_metadata(&ctx.pool, &document_id, move |m| {
-            m.custom_fields
-                .insert("processing_status".into(), json!(status));
+            m.custom_fields.insert(
+                "processing_status".into(),
+                json!(normalized_processing_status(status)),
+            );
             m.custom_fields
                 .insert(META_EXTRACT_STATUS_KEY.into(), json!(status));
             m.custom_fields
@@ -1116,8 +1191,7 @@ impl DocumentMetadataExtractHandler {
             m.custom_fields
                 .insert("metadata_extracted_at".into(), json!(extracted_at));
             if let Some(err) = &pdf_error {
-                m.custom_fields
-                    .insert("extract_error".into(), json!(err));
+                m.custom_fields.insert("extract_error".into(), json!(err));
             }
             if let Some(info) = &info {
                 m.custom_fields
@@ -1216,7 +1290,10 @@ enum IndexOutcome {
     /// Full extracted text (unbounded by the excerpt cap).
     Text { format: SniffedFormat, text: String },
     /// Permanent extraction failure (e.g. corrupt PDF).
-    Failed { format: SniffedFormat, error: String },
+    Failed {
+        format: SniffedFormat,
+        error: String,
+    },
     /// PDF is encrypted — cannot extract without a password.
     Encrypted,
 }
@@ -1234,8 +1311,7 @@ impl JobHandler for DocumentIndexHandler {
                 && job.attempts >= job.max_attempts
                 && let Ok(payload) = DocJobPayload::parse(&job.payload)
             {
-                mark_failed(&ctx.pool, &payload.document_id, INDEX_STATUS_KEY, job, e)
-                    .await;
+                mark_failed(&ctx.pool, &payload.document_id, INDEX_STATUS_KEY, job, e).await;
             }
             result
         })
@@ -1244,8 +1320,7 @@ impl JobHandler for DocumentIndexHandler {
 
 impl DocumentIndexHandler {
     async fn run(&self, ctx: &JobContext, job: &Job) -> Result<(), JobError> {
-        let (document_id, artifact) =
-            begin_processing(&ctx.pool, job, INDEX_STATUS_KEY).await?;
+        let (document_id, artifact) = begin_processing(&ctx.pool, job, INDEX_STATUS_KEY).await?;
 
         let object_name = object_name_for_uri(&artifact.storage_uri)?;
         let storage = self.storage.clone();
@@ -1263,9 +1338,8 @@ impl DocumentIndexHandler {
 
             match format {
                 SniffedFormat::Pdf => {
-                    let engine = crate::crates::pdf_engine::PdfEngine::with_limits(
-                        processing_limits(),
-                    );
+                    let engine =
+                        crate::crates::pdf_engine::PdfEngine::with_limits(processing_limits());
                     match engine.extract_text(&read.bytes, None) {
                         Ok(pages) => {
                             let text = pages
@@ -1356,18 +1430,19 @@ impl DocumentIndexHandler {
         };
 
         mutate_metadata(&ctx.pool, &document_id, move |m| {
+            m.custom_fields.insert(
+                "processing_status".into(),
+                json!(normalized_processing_status(status)),
+            );
             m.custom_fields
-                .insert("processing_status".into(), json!(status));
-            m.custom_fields.insert(INDEX_STATUS_KEY.into(), json!(status));
+                .insert(INDEX_STATUS_KEY.into(), json!(status));
             m.custom_fields
                 .insert("index_artifact_id".into(), json!(artifact_id));
             if let Some(f) = format_label {
-                m.custom_fields
-                    .insert("index_format".into(), json!(f));
+                m.custom_fields.insert("index_format".into(), json!(f));
             }
             if let Some(e) = &index_error {
-                m.custom_fields
-                    .insert("index_error".into(), json!(e));
+                m.custom_fields.insert("index_error".into(), json!(e));
             }
             if let Some(v) = index_value {
                 m.custom_fields.insert("index".into(), v);
@@ -1466,10 +1541,7 @@ fn dict_int(dict: &lopdf::Dictionary, key: &[u8]) -> Option<i64> {
 
 /// Dereferences `obj` (following `Reference`s) and returns it as a
 /// dictionary when possible.
-fn as_dict<'a>(
-    doc: &'a lopdf::Document,
-    obj: &'a lopdf::Object,
-) -> Option<&'a lopdf::Dictionary> {
+fn as_dict<'a>(doc: &'a lopdf::Document, obj: &'a lopdf::Object) -> Option<&'a lopdf::Dictionary> {
     match doc.dereference(obj).ok()?.1 {
         lopdf::Object::Dictionary(d) => Some(d),
         _ => None,
@@ -1567,10 +1639,7 @@ fn find_pdf_thumbnail(doc: &lopdf::Document) -> Option<ThumbCandidate> {
                 }
             }
             for resources in resource_dicts {
-                let Some(xobjects) = resources
-                    .get(b"XObject")
-                    .ok()
-                    .and_then(|o| as_dict(doc, o))
+                let Some(xobjects) = resources.get(b"XObject").ok().and_then(|o| as_dict(doc, o))
                 else {
                     continue;
                 };
@@ -1741,8 +1810,10 @@ impl ThumbnailGenerateHandler {
                     _ => "unavailable",
                 };
                 mutate_metadata(&ctx.pool, &document_id, move |m| {
-                    m.custom_fields
-                        .insert("processing_status".into(), json!(status));
+                    m.custom_fields.insert(
+                        "processing_status".into(),
+                        json!(normalized_processing_status(status)),
+                    );
                     m.custom_fields
                         .insert(THUMBNAIL_STATUS_KEY.into(), json!(status));
                 })
@@ -1763,7 +1834,7 @@ impl ThumbnailGenerateHandler {
             ThumbOutcome::Failed { error } => {
                 mutate_metadata(&ctx.pool, &document_id, move |m| {
                     m.custom_fields
-                        .insert("processing_status".into(), json!("error"));
+                        .insert("processing_status".into(), json!("failed"));
                     m.custom_fields
                         .insert(THUMBNAIL_STATUS_KEY.into(), json!("error"));
                     m.custom_fields
@@ -1812,7 +1883,7 @@ impl ThumbnailGenerateHandler {
                 let artifact_id = artifact.id.clone();
                 mutate_metadata(&ctx.pool, &document_id, move |m| {
                     m.custom_fields
-                        .insert("processing_status".into(), json!("generated"));
+                        .insert("processing_status".into(), json!("succeeded"));
                     m.custom_fields
                         .insert(THUMBNAIL_STATUS_KEY.into(), json!("generated"));
                     m.custom_fields
@@ -1821,8 +1892,7 @@ impl ThumbnailGenerateHandler {
                         .insert("thumbnail_sha256".into(), json!(sha));
                     m.custom_fields
                         .insert("thumbnail_bytes".into(), json!(nbytes));
-                    m.custom_fields
-                        .insert("thumbnail_page".into(), json!(page));
+                    m.custom_fields.insert("thumbnail_page".into(), json!(page));
                     m.custom_fields
                         .insert("thumbnail_format".into(), json!(ext));
                     m.custom_fields
@@ -1848,6 +1918,819 @@ impl ThumbnailGenerateHandler {
                 Ok(())
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// document.pdf_op
+// ---------------------------------------------------------------------------
+//
+// Generic pdf-engine operation runner: one job kind covers every op in
+// [`PDF_OPS`] so the REST API (and any other producer) can reach the
+// whole engine surface without a handler per op. See the module docs
+// for the payload contract and result storage scheme.
+
+/// `document.pdf_op` — runs a [`PdfEngine`](crate::crates::pdf_engine::PdfEngine)
+/// operation named by `payload.op` over the resolved artifact's bytes.
+///
+/// Unlike the dedicated handlers, engine-level failures (bad params,
+/// corrupt PDF, unsupported format) are **terminal job successes**
+/// recorded as `{op}_status: "error"` (or `unsupported` /
+/// `unavailable` / `skipped_too_large`) — they are deterministic, so
+/// retrying cannot help. Only infrastructure failures (storage, store,
+/// pool) produce `JobError` and consume retry attempts.
+pub struct PdfOpHandler {
+    storage: StorageConfig,
+}
+
+/// Metadata custom-field map holding per-op results:
+/// `pdf_ops.{op} = {status, finished_at, result?, outputs?, error?}`.
+const PDF_OPS_FIELD: &str = "pdf_ops";
+
+impl PdfOpHandler {
+    /// Builds the handler from the application storage configuration.
+    pub fn from_app_config() -> Result<Self, crate::config::ConfigError> {
+        Ok(Self::with_storage_config(
+            AppConfig::load_lenient()?.to_storage_config(),
+        ))
+    }
+
+    /// Builds the handler around an explicit storage config (tests).
+    pub fn with_storage_config(storage: StorageConfig) -> Self {
+        Self { storage }
+    }
+}
+
+/// Parsed `document.pdf_op` payload.
+struct PdfOpPayload {
+    document: DocJobPayload,
+    op: String,
+    params: serde_json::Value,
+}
+
+impl PdfOpPayload {
+    fn parse(payload: &serde_json::Value) -> Result<Self, JobError> {
+        let document = DocJobPayload::parse(payload)?;
+        let op = payload["op"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| JobError::Failed("payload.op must be a non-empty string".into()))?
+            .to_string();
+        if !PDF_OPS.contains(&op.as_str()) {
+            return Err(JobError::Failed(format!("unknown pdf op: {op}")));
+        }
+        let params = match &payload["params"] {
+            serde_json::Value::Null => json!({}),
+            v @ serde_json::Value::Object(_) => v.clone(),
+            _ => {
+                return Err(JobError::Failed(
+                    "payload.params must be a JSON object".into(),
+                ));
+            }
+        };
+        Ok(Self {
+            document,
+            op,
+            params,
+        })
+    }
+}
+
+/// Per-operation status field name (`{op}_status`), matching the
+/// convention used by the dedicated processing handlers.
+fn pdf_op_status_key(op: &str) -> String {
+    format!("{op}_status")
+}
+
+/// One output file produced by an op, ready to be streamed into
+/// storage and registered as an artifact.
+struct OpFile {
+    /// Safe file name (already validated); becomes the last path
+    /// segment under `documents/{id}/outputs/`.
+    file_name: String,
+    bytes: Vec<u8>,
+    /// File extension without dot, e.g. `"pdf"`, `"png"`, `"json"`.
+    ext: &'static str,
+    mime: &'static str,
+}
+
+/// Successful op result: an optional structured report plus any
+/// binary output files.
+struct OpSuccess {
+    report: Option<serde_json::Value>,
+    files: Vec<OpFile>,
+}
+
+/// Terminal op failure recorded on the document (the job itself still
+/// succeeds — see [`PdfOpHandler`]).
+struct OpFailure {
+    /// Status vocabulary: `error`, `unsupported`, `unavailable`,
+    /// `skipped_too_large`.
+    status: &'static str,
+    error: String,
+}
+
+enum OpOutcome {
+    Done(OpSuccess),
+    Failed(OpFailure),
+}
+
+/// Parameter/validation failure inside an op — deterministic, so it is
+/// recorded as `error` rather than consuming job retries.
+fn op_param_error(message: impl Into<String>) -> OpFailure {
+    OpFailure {
+        status: "error",
+        error: message.into(),
+    }
+}
+
+/// Maps a [`PdfError`](crate::crates::pdf_engine::PdfError) onto the
+/// terminal-status vocabulary: missing external tools mean the op is
+/// environmentally `unavailable`, encrypted/unsupported inputs are
+/// `unsupported`, everything else is an honest `error`.
+fn op_engine_error(e: crate::crates::pdf_engine::PdfError) -> OpFailure {
+    use crate::crates::pdf_engine::PdfError as E;
+    let status = match e {
+        E::MissingTool(_) => "unavailable",
+        E::Encrypted | E::UnsupportedOperation(_) => "unsupported",
+        _ => "error",
+    };
+    OpFailure {
+        status,
+        error: e.to_string(),
+    }
+}
+
+fn req_str(params: &serde_json::Value, key: &str) -> Result<String, OpFailure> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| op_param_error(format!("params.{key} must be a non-empty string")))
+}
+
+fn opt_str(params: &serde_json::Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn opt_u32(params: &serde_json::Value, key: &str) -> Result<Option<u32>, OpFailure> {
+    match params.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| op_param_error(format!("params.{key} must be a non-negative integer"))),
+    }
+}
+
+fn req_u32(params: &serde_json::Value, key: &str) -> Result<u32, OpFailure> {
+    opt_u32(params, key)?.ok_or_else(|| op_param_error(format!("params.{key} is required")))
+}
+
+fn opt_f64(params: &serde_json::Value, key: &str) -> Result<Option<f64>, OpFailure> {
+    match params.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => v
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| op_param_error(format!("params.{key} must be a number"))),
+    }
+}
+
+fn opt_bool(params: &serde_json::Value, key: &str, default: bool) -> Result<bool, OpFailure> {
+    match params.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(default),
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| op_param_error(format!("params.{key} must be a boolean"))),
+    }
+}
+
+/// Optional 1-based page-range spec shared by most ops.
+fn pages_param(params: &serde_json::Value) -> Option<String> {
+    opt_str(params, "pages")
+}
+
+/// Parses a serde unit-variant enum from a string param
+/// (`"top_left"`, `"text"`, ...).
+fn enum_param<T: serde::de::DeserializeOwned>(
+    params: &serde_json::Value,
+    key: &str,
+) -> Result<Option<T>, OpFailure> {
+    match opt_str(params, key) {
+        None => Ok(None),
+        Some(s) => serde_json::from_value(serde_json::Value::String(s))
+            .map(Some)
+            .map_err(|_| op_param_error(format!("params.{key} has an invalid value"))),
+    }
+}
+
+/// Wraps a serializable report into a successful [`OpOutcome`].
+fn report_outcome<T: serde::Serialize>(value: &T) -> Result<OpOutcome, OpFailure> {
+    let report = serde_json::to_value(value)
+        .map_err(|e| op_param_error(format!("failed to serialize op report: {e}")))?;
+    Ok(OpOutcome::Done(OpSuccess {
+        report: Some(report),
+        files: Vec::new(),
+    }))
+}
+
+/// Wraps PDF output bytes into a successful single-file [`OpOutcome`].
+fn pdf_outcome(op: &str, artifact_id: &str, bytes: Vec<u8>) -> Result<OpOutcome, OpFailure> {
+    Ok(OpOutcome::Done(OpSuccess {
+        report: None,
+        files: vec![OpFile {
+            file_name: format!("{op}-{artifact_id}.pdf"),
+            bytes,
+            ext: "pdf",
+            mime: "application/pdf",
+        }],
+    }))
+}
+
+/// Dispatches `op` against `input` (and `other` for `compare`) and
+/// returns the outcome. All failures — engine errors and bad params —
+/// come back as [`OpOutcome::Failed`]; this function never performs
+/// I/O beyond the engine calls themselves.
+fn run_pdf_op(
+    engine: &crate::crates::pdf_engine::PdfEngine,
+    input: &[u8],
+    other: Option<&[u8]>,
+    op: &str,
+    params: &serde_json::Value,
+    artifact_id: &str,
+) -> OpOutcome {
+    match dispatch_pdf_op(engine, input, other, op, params, artifact_id) {
+        Ok(outcome) => outcome,
+        Err(f) => OpOutcome::Failed(f),
+    }
+}
+
+fn dispatch_pdf_op(
+    engine: &crate::crates::pdf_engine::PdfEngine,
+    input: &[u8],
+    other: Option<&[u8]>,
+    op: &str,
+    params: &serde_json::Value,
+    artifact_id: &str,
+) -> Result<OpOutcome, OpFailure> {
+    use crate::crates::pdf_engine as pe;
+    let pages = pages_param(params);
+    let pages_ref = pages.as_deref();
+    match op {
+        // -- reports ----------------------------------------------------
+        "page_count" => {
+            let n = engine.page_count(input).map_err(op_engine_error)?;
+            report_outcome(&n)
+        }
+        "inspect" => {
+            let info = engine.inspect(input).map_err(op_engine_error)?;
+            report_outcome(&info)
+        }
+        "validate" => {
+            let report = engine.validate(input).map_err(op_engine_error)?;
+            report_outcome(&report)
+        }
+        "repair" => {
+            let report = engine.repair(input).map_err(op_engine_error)?;
+            report_outcome(&report)
+        }
+        "verify_signatures" => {
+            let report = engine.verify_signatures(input).map_err(op_engine_error)?;
+            report_outcome(&report)
+        }
+        "extract_metadata" => {
+            let meta = engine.extract_metadata(input).map_err(op_engine_error)?;
+            report_outcome(&meta)
+        }
+        "extract_text" => {
+            let pages = engine
+                .extract_text(input, pages_ref)
+                .map_err(op_engine_error)?;
+            report_outcome(&pages)
+        }
+        "extract_images" => {
+            let images = engine
+                .extract_images(input, pages_ref)
+                .map_err(op_engine_error)?;
+            report_outcome(&images)
+        }
+        "ocr" => {
+            let pages = engine.ocr(input, pages_ref).map_err(op_engine_error)?;
+            report_outcome(&pages)
+        }
+        "compare" => {
+            let b = other.ok_or_else(|| {
+                op_param_error(
+                    "compare requires params.other_artifact_id or params.other_document_id",
+                )
+            })?;
+            let mode: pe::CompareMode =
+                enum_param(params, "mode")?.unwrap_or(pe::CompareMode::Text);
+            let report = engine.compare(input, b, mode).map_err(op_engine_error)?;
+            report_outcome(&report)
+        }
+        // -- byte outputs -------------------------------------------------
+        "convert" => {
+            let target: pe::ConvertTarget =
+                enum_param(params, "target")?.unwrap_or(pe::ConvertTarget::Text);
+            let bytes = engine
+                .convert(input, target, pages_ref)
+                .map_err(op_engine_error)?;
+            let (ext, mime) = match target {
+                pe::ConvertTarget::Text => ("txt", "text/plain"),
+                pe::ConvertTarget::Markdown => ("md", "text/markdown"),
+            };
+            Ok(OpOutcome::Done(OpSuccess {
+                report: None,
+                files: vec![OpFile {
+                    file_name: format!("{op}-{artifact_id}.{ext}"),
+                    bytes,
+                    ext,
+                    mime,
+                }],
+            }))
+        }
+        "render" => {
+            let format: pe::RenderFormat = match opt_str(params, "format").as_deref() {
+                None => pe::RenderFormat::Png,
+                Some("png") => pe::RenderFormat::Png,
+                Some("jpeg" | "jpg") => pe::RenderFormat::Jpeg,
+                Some(other) => {
+                    return Err(op_param_error(format!(
+                        "params.format must be png or jpeg, got {other:?}"
+                    )));
+                }
+            };
+            let dpi = opt_u32(params, "dpi")?;
+            let bytes = engine
+                .render(input, pages_ref, dpi, format)
+                .map_err(op_engine_error)?;
+            let (ext, mime) = match format {
+                pe::RenderFormat::Png => ("png", "image/png"),
+                pe::RenderFormat::Jpeg => ("jpg", "image/jpeg"),
+            };
+            Ok(OpOutcome::Done(OpSuccess {
+                report: None,
+                files: vec![OpFile {
+                    file_name: format!("{op}-{artifact_id}.{ext}"),
+                    bytes,
+                    ext,
+                    mime,
+                }],
+            }))
+        }
+        "compress" => pdf_outcome(
+            op,
+            artifact_id,
+            engine.compress(input).map_err(op_engine_error)?,
+        ),
+        "flatten" => pdf_outcome(
+            op,
+            artifact_id,
+            engine.flatten(input).map_err(op_engine_error)?,
+        ),
+        "sanitize" => pdf_outcome(
+            op,
+            artifact_id,
+            engine.sanitize(input).map_err(op_engine_error)?,
+        ),
+        "rotate" => {
+            let degrees = req_u32(params, "degrees")?;
+            let degrees = u16::try_from(degrees)
+                .map_err(|_| op_param_error("params.degrees must fit in u16"))?;
+            let pages = pages_param(params).unwrap_or_else(|| "all".to_string());
+            let bytes = engine
+                .rotate_degrees(input, &pages, degrees)
+                .map_err(op_engine_error)?;
+            pdf_outcome(op, artifact_id, bytes)
+        }
+        "split" => {
+            let per_file = req_u32(params, "pages_per_file")?;
+            let parts = engine.split(input, per_file).map_err(op_engine_error)?;
+            let files = parts
+                .into_iter()
+                .enumerate()
+                .map(|(i, bytes)| OpFile {
+                    file_name: format!("{op}-{artifact_id}-{}.pdf", i + 1),
+                    bytes,
+                    ext: "pdf",
+                    mime: "application/pdf",
+                })
+                .collect();
+            Ok(OpOutcome::Done(OpSuccess {
+                report: None,
+                files,
+            }))
+        }
+        "extract_pages" => {
+            let pages = req_str(params, "pages")?;
+            let bytes = engine
+                .extract_pages(input, &pages)
+                .map_err(op_engine_error)?;
+            pdf_outcome(op, artifact_id, bytes)
+        }
+        "remove_pages" => {
+            let pages = req_str(params, "pages")?;
+            let bytes = engine
+                .remove_pages(input, &pages)
+                .map_err(op_engine_error)?;
+            pdf_outcome(op, artifact_id, bytes)
+        }
+        "reorder" => {
+            let order = req_str(params, "order")?;
+            let bytes = engine.reorder(input, &order).map_err(op_engine_error)?;
+            pdf_outcome(op, artifact_id, bytes)
+        }
+        "watermark" => {
+            let mut opts = pe::WatermarkOptions {
+                text: req_str(params, "text")?,
+                ..Default::default()
+            };
+            if let Some(v) = opt_f64(params, "font_size")? {
+                opts.font_size = v as f32;
+            }
+            if let Some(v) = opt_f64(params, "opacity")? {
+                opts.opacity = v as f32;
+            }
+            if let Some(v) = opt_f64(params, "rotation_degrees")? {
+                opts.rotation_degrees = v as f32;
+            }
+            if let Some(p) = enum_param::<pe::MarkPosition>(params, "position")? {
+                opts.position = p;
+            }
+            opts.pages = pages_param(params);
+            if let Some(c) = params.get("color") {
+                opts.color = Some(
+                    serde_json::from_value::<[u8; 3]>(c.clone())
+                        .map_err(|_| op_param_error("params.color must be [r, g, b]"))?,
+                );
+            }
+            let bytes = engine.watermark(input, &opts).map_err(op_engine_error)?;
+            pdf_outcome(op, artifact_id, bytes)
+        }
+        "stamp" => {
+            let mut opts = pe::StampOptions::default();
+            opts.text = opt_str(params, "text");
+            if let Some(b64) = opt_str(params, "image_png_b64") {
+                opts.image_png = Some(B64.decode(b64.trim()).map_err(|e| {
+                    op_param_error(format!("params.image_png_b64 is not valid base64: {e}"))
+                })?);
+            }
+            if let Some(p) = enum_param::<pe::MarkPosition>(params, "position")? {
+                opts.position = p;
+            }
+            if let Some(v) = opt_f64(params, "scale")? {
+                opts.scale = v as f32;
+            }
+            if let Some(v) = opt_f64(params, "opacity")? {
+                opts.opacity = v as f32;
+            }
+            if let Some(v) = opt_f64(params, "margin")? {
+                opts.margin = v as f32;
+            }
+            opts.pages = pages_param(params);
+            let bytes = engine.stamp(input, &opts).map_err(op_engine_error)?;
+            pdf_outcome(op, artifact_id, bytes)
+        }
+        "encrypt" => {
+            let user_password = req_str(params, "user_password")?;
+            let owner_password = opt_str(params, "owner_password");
+            let permissions = pe::PdfPermissions {
+                allow_print: opt_bool(params, "allow_print", true)?,
+                allow_copy: opt_bool(params, "allow_copy", true)?,
+                allow_modify: opt_bool(params, "allow_modify", true)?,
+                allow_annotations: opt_bool(params, "allow_annotations", true)?,
+            };
+            // Permission flags may also arrive nested under
+            // `params.permissions` for callers that mirror the engine
+            // type shape.
+            let permissions = match params.get("permissions") {
+                Some(pe_obj) if pe_obj.is_object() => pe::PdfPermissions {
+                    allow_print: pe_obj
+                        .get("allow_print")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(permissions.allow_print),
+                    allow_copy: pe_obj
+                        .get("allow_copy")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(permissions.allow_copy),
+                    allow_modify: pe_obj
+                        .get("allow_modify")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(permissions.allow_modify),
+                    allow_annotations: pe_obj
+                        .get("allow_annotations")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(permissions.allow_annotations),
+                },
+                _ => permissions,
+            };
+            let bytes = engine
+                .encrypt(
+                    input,
+                    &user_password,
+                    owner_password.as_deref(),
+                    permissions,
+                )
+                .map_err(op_engine_error)?;
+            pdf_outcome(op, artifact_id, bytes)
+        }
+        "decrypt" => {
+            let password = req_str(params, "password")?;
+            let bytes = engine.decrypt(input, &password).map_err(op_engine_error)?;
+            pdf_outcome(op, artifact_id, bytes)
+        }
+        "redact" => {
+            let terms: Vec<String> = params
+                .get("terms")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .filter(|t: &Vec<String>| !t.is_empty())
+                .ok_or_else(|| {
+                    op_param_error("params.terms must be a non-empty array of strings")
+                })?;
+            let bytes = engine
+                .redact(input, &terms, pages_ref)
+                .map_err(op_engine_error)?;
+            pdf_outcome(op, artifact_id, bytes)
+        }
+        other => Err(op_param_error(format!("unsupported pdf op: {other}"))),
+    }
+}
+
+/// Uploads one [`OpFile`] through the streaming staging/commit path
+/// and registers (or reuses) its artifact row. Object names are
+/// deterministic — `documents/{doc}/outputs/{file_name}` — so job
+/// retries rewrite the same bytes instead of accumulating orphans,
+/// and an existing artifact row for the same `storage_uri` is reused
+/// rather than duplicated.
+async fn store_op_output(
+    ctx: &JobContext,
+    storage: &StorageConfig,
+    document_id: &DocumentId,
+    file: &OpFile,
+) -> Result<(String, DocumentArtifact), JobError> {
+    let object_name = format!("documents/{document_id}/outputs/{}", file.file_name);
+    let storage_uri = format!("local://{object_name}");
+
+    // Reuse a previously registered artifact for this deterministic
+    // object name (retry / replay path).
+    let existing = list_artifacts(&ctx.pool, document_id)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .find(|a| a.storage_uri == storage_uri);
+    if let Some(artifact) = existing {
+        return Ok((storage_uri, artifact));
+    }
+
+    let receipt = {
+        let storage = storage.clone();
+        let name = object_name.clone();
+        let bytes = file.bytes.clone();
+        run_blocking("pdf_op output upload", move || {
+            let mut fs = FaultInjectingFs::new(storage)
+                .map_err(|e| JobError::Failed(format!("storage init failed: {e}")))?;
+            let mut upload = fs.begin_upload(&name).map_err(storage_err)?;
+            for chunk in bytes.chunks(UPLOAD_CHUNK_BYTES) {
+                upload.write_chunk(chunk).map_err(storage_err)?;
+            }
+            upload.commit().map_err(storage_err)
+        })
+        .await?
+    };
+
+    let artifact = upload_artifact(
+        &ctx.pool,
+        &NewArtifact {
+            id: None,
+            document_id: document_id.clone(),
+            storage_uri: storage_uri.clone(),
+            file_name: file.file_name.clone(),
+            mime_type: Some(file.mime.to_string()),
+            size_bytes: receipt.bytes,
+            checksum: Some(DocumentChecksum {
+                algorithm: ChecksumAlgorithm::Sha256,
+                value: receipt.sha256,
+            }),
+        },
+    )
+    .await
+    .map_err(store_err)?;
+    Ok((storage_uri, artifact))
+}
+
+impl JobHandler for PdfOpHandler {
+    fn handle<'a>(
+        &'a self,
+        ctx: &'a JobContext,
+        job: &'a Job,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let result = self.run(ctx, job).await;
+            if let Err(e) = &result
+                && job.attempts >= job.max_attempts
+                && let Ok(payload) = DocJobPayload::parse(&job.payload)
+            {
+                let status_key = PdfOpPayload::parse(&job.payload)
+                    .map(|p| pdf_op_status_key(&p.op))
+                    .unwrap_or_else(|_| "pdf_op_status".to_string());
+                mark_failed(&ctx.pool, &payload.document_id, &status_key, job, e).await;
+            }
+            result
+        })
+    }
+}
+
+impl PdfOpHandler {
+    async fn run(&self, ctx: &JobContext, job: &Job) -> Result<(), JobError> {
+        let payload = PdfOpPayload::parse(&job.payload)?;
+        let op = payload.op.clone();
+        let status_key = pdf_op_status_key(&op);
+        let (document_id, artifact) = begin_processing(&ctx.pool, job, &status_key).await?;
+
+        // `compare` needs a second input artifact, resolved up front
+        // (same rules as the primary: explicit id or most recent).
+        let other_artifact = match op.as_str() {
+            "compare" => {
+                let other_doc = opt_str(&payload.params, "other_document_id")
+                    .map(crate::crates::document_engine::ids::DocumentId::new);
+                let other_art = opt_str(&payload.params, "other_artifact_id");
+                match (other_doc, other_art) {
+                    (None, None) => {
+                        return Err(JobError::Failed(
+                            "compare requires params.other_artifact_id or params.other_document_id"
+                                .into(),
+                        ));
+                    }
+                    (doc, art) => {
+                        let doc_id = doc.unwrap_or_else(|| document_id.clone());
+                        Some(resolve_artifact(&ctx.pool, &doc_id, art.as_deref()).await?)
+                    }
+                }
+            }
+            _ => None,
+        };
+
+        let object_name = object_name_for_uri(&artifact.storage_uri)?;
+        let other_name = other_artifact
+            .as_ref()
+            .map(|a| object_name_for_uri(&a.storage_uri))
+            .transpose()?;
+        let storage = self.storage.clone();
+        let read_name = object_name.clone();
+        let other_read_name = other_name.clone();
+        let artifact_id = artifact.id.clone();
+        let artifact_id_for_blocking = artifact_id.clone();
+        let op_for_blocking = op.clone();
+        let params_for_blocking = payload.params.clone();
+        let outcome = run_blocking("document.pdf_op", move || {
+            let engine = crate::crates::pdf_engine::PdfEngine::with_limits(processing_limits());
+            let mut fs = FaultInjectingFs::new(storage)
+                .map_err(|e| JobError::Failed(format!("storage init failed: {e}")))?;
+            let read = read_object_bounded(&mut fs, &read_name, MAX_PROCESSING_BYTES)?;
+            if read.truncated {
+                return Ok(OpOutcome::Failed(OpFailure {
+                    status: "skipped_too_large",
+                    error: format!("artifact exceeds {MAX_PROCESSING_BYTES} bytes"),
+                }));
+            }
+            let other_bytes = match other_read_name {
+                Some(name) => {
+                    let read = read_object_bounded(&mut fs, &name, MAX_PROCESSING_BYTES)?;
+                    if read.truncated {
+                        return Ok(OpOutcome::Failed(OpFailure {
+                            status: "skipped_too_large",
+                            error: format!(
+                                "comparison artifact exceeds {MAX_PROCESSING_BYTES} bytes"
+                            ),
+                        }));
+                    }
+                    Some(read.bytes)
+                }
+                None => None,
+            };
+            Ok(run_pdf_op(
+                &engine,
+                &read.bytes,
+                other_bytes.as_deref(),
+                &op_for_blocking,
+                &params_for_blocking,
+                &artifact_id_for_blocking,
+            ))
+        })
+        .await?;
+
+        // Turn the outcome into (status, inline report, output files).
+        let (status, inline_result, files, error) = match outcome {
+            OpOutcome::Failed(f) => (f.status, serde_json::Value::Null, Vec::new(), Some(f.error)),
+            OpOutcome::Done(success) => {
+                let mut files = success.files;
+                let mut inline = serde_json::Value::Null;
+                if let Some(report) = success.report {
+                    let bytes = serde_json::to_vec(&report).map_err(|e| {
+                        JobError::Failed(format!("failed to serialize op report: {e}"))
+                    })?;
+                    if bytes.len() <= REPORT_INLINE_MAX_BYTES {
+                        inline = report;
+                    } else {
+                        files.push(OpFile {
+                            file_name: format!("{op}-{artifact_id}-result.json"),
+                            bytes,
+                            ext: "json",
+                            mime: "application/json",
+                        });
+                    }
+                }
+                if files.len() > MAX_OP_OUTPUTS {
+                    (
+                        "error",
+                        serde_json::Value::Null,
+                        Vec::new(),
+                        Some(format!(
+                            "op produced {} outputs, exceeding the limit of {MAX_OP_OUTPUTS}",
+                            files.len()
+                        )),
+                    )
+                } else {
+                    ("succeeded", inline, files, None)
+                }
+            }
+        };
+        // Upload outputs and register artifact rows.
+        let mut outputs = Vec::new();
+        for file in &files {
+            let (_uri, stored) = store_op_output(ctx, &self.storage, &document_id, file).await?;
+            outputs.push(json!({
+                "artifact_id": stored.id,
+                "storage_uri": stored.storage_uri,
+                "file_name": stored.file_name,
+                "bytes": stored.size_bytes,
+                "format": file.ext,
+            }));
+        }
+        let output_count = outputs.len();
+
+        let finished_at = crate::crates::document_engine::store::now_rfc3339();
+        let op_key = op.clone();
+        let status_string = status.to_string();
+        let entry = json!({
+            "op": op,
+            "status": status,
+            "finished_at": finished_at,
+            "source_artifact_id": artifact.id,
+            "result": inline_result,
+            "outputs": outputs,
+            "error": error,
+        });
+        let proc_status = normalized_processing_status(status).to_string();
+        mutate_metadata(&ctx.pool, &document_id, move |m| {
+            m.custom_fields.insert(status_key, json!(status_string));
+            m.custom_fields
+                .insert("processing_status".into(), json!(proc_status));
+            let mut ops_map = m
+                .custom_fields
+                .get(PDF_OPS_FIELD)
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            if !ops_map.is_object() {
+                ops_map = json!({});
+            }
+            ops_map[op_key.as_str()] = entry;
+            m.custom_fields.insert(PDF_OPS_FIELD.into(), ops_map);
+        })
+        .await?;
+
+        audit_event(
+            &ctx.pool,
+            &document_id,
+            DocumentAuditEventType::ProcessingCompleted,
+            json!({
+                "job_id": job.id,
+                "job_kind": job.kind,
+                "op": op,
+                "status": status,
+                "outputs": output_count,
+            }),
+        )
+        .await?;
+
+        Ok(())
     }
 }
 
@@ -1973,954 +2856,37 @@ pub async fn enqueue_thumbnail(
     Ok(job)
 }
 
-// ---------------------------------------------------------------------------
-// document.metadata_extract / document.index / thumbnail.generate
-// ---------------------------------------------------------------------------
-
-/// Shared payload for the document-processing handlers:
-/// `{document_id, artifact_id?}`. When `artifact_id` is omitted the
-/// most recently created artifact of the document is used.
-#[derive(Debug, Deserialize)]
-struct DocumentJobPayload {
-    document_id: String,
-    #[serde(default)]
-    artifact_id: Option<String>,
-}
-
-impl DocumentJobPayload {
-    fn parse(payload: &serde_json::Value) -> Result<(Self, DocumentId), JobError> {
-        let parsed: Self = serde_json::from_value(payload.clone())?;
-        if parsed.document_id.trim().is_empty() {
-            return Err(JobError::Failed(
-                "payload.document_id must be a non-empty string".into(),
-            ));
-        }
-        let id = DocumentId::new(parsed.document_id.clone());
-        Ok((parsed, id))
-    }
-}
-
-/// Resolves the artifact a document job operates on: the explicitly
-/// named artifact, or the most recently created one. The artifact must
-/// belong to the payload's document.
-async fn resolve_job_artifact(
+/// Enqueues a `document.pdf_op` job. Payload: `{document_id,
+/// artifact_id?, op, params?}` — see [`PdfOpHandler`]. `op` must be
+/// one of [`PDF_OPS`]; `params` is an opaque JSON object forwarded to
+/// the op (use `serde_json::json!({})` or `Value::Null` for none).
+pub async fn enqueue_pdf_op(
     pool: &sqlx::SqlitePool,
     document_id: &DocumentId,
     artifact_id: Option<&str>,
-) -> Result<DocumentArtifact, JobError> {
-    let artifact = match artifact_id {
-        Some(id) => download_artifact(pool, id)
-            .await
-            .map_err(store_err)?
-            .ok_or_else(|| JobError::Failed(format!("artifact not found: {id}")))?,
-        None => list_artifacts(pool, document_id)
-            .await
-            .map_err(store_err)?
-            .into_iter()
-            .next_back()
-            .ok_or_else(|| JobError::Failed("document has no artifacts".into()))?,
-    };
-    if artifact.document_id != *document_id {
-        return Err(JobError::Failed(format!(
-            "artifact {} does not belong to document {document_id}",
-            artifact.id
-        )));
-    }
-    Ok(artifact)
-}
-
-/// Maps a `local://` storage URI to the backend object name. Other
-/// schemes are rejected — these handlers only read local storage.
-fn object_name_from_uri(uri: &str) -> Result<String, JobError> {
-    uri.strip_prefix("local://")
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            JobError::Failed(format!("unsupported storage_uri scheme: {uri:?}"))
-        })
-}
-
-fn storage_fs(config: &StorageConfig) -> Result<FaultInjectingFs, JobError> {
-    FaultInjectingFs::new(config.clone())
-        .map_err(|e| JobError::Failed(format!("storage init failed: {e}")))
-}
-
-/// Reads at most `cap` bytes of object `name` through the streaming
-/// backend. Returns `Ok(None)` when the object exceeds `cap` — the
-/// caller records `skipped_too_large` rather than buffering it.
-fn read_object_capped(
-    fs: &mut FaultInjectingFs,
-    name: &str,
-    cap: u64,
-) -> Result<Option<Vec<u8>>, JobError> {
-    let mut reader = fs
-        .open_reader(name)
-        .map_err(|e| JobError::Failed(format!("storage read failed for {name:?}: {e}")))?;
-    let mut buf = Vec::new();
-    (&mut reader)
-        .take(cap.saturating_add(1))
-        .read_to_end(&mut buf)
-        .map_err(|e| JobError::Failed(format!("storage read failed for {name:?}: {e}")))?;
-    if buf.len() as u64 > cap {
-        return Ok(None);
-    }
-    Ok(Some(buf))
-}
-
-/// Reads the artifact's bytes, enforcing [`MAX_PROCESSING_BYTES`].
-/// `Ok(None)` means "too large — record skipped_too_large".
-fn read_artifact_bytes(
-    fs: &mut FaultInjectingFs,
-    artifact: &DocumentArtifact,
-) -> Result<Option<Vec<u8>>, JobError> {
-    if artifact.size_bytes > MAX_PROCESSING_BYTES {
-        return Ok(None);
-    }
-    let name = object_name_from_uri(&artifact.storage_uri)?;
-    read_object_capped(fs, &name, MAX_PROCESSING_BYTES)
-}
-
-/// Marks the start of a processing op: `processing_status = "running"`
-/// plus a [`DocumentAuditEventType::ProcessingStarted`] event.
-async fn begin_processing(
-    pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
-) -> Result<(), JobError> {
-    set_custom_field(pool, document_id, "processing_status", &json!("running"))
-        .await
-        .map_err(store_err)?;
-    record_event(
-        pool,
-        document_id,
-        None,
-        DocumentAuditEventType::ProcessingStarted,
-        None,
-    )
-    .await
-    .map_err(store_err)
-}
-
-/// Records a terminal processing outcome: `processing_status` plus the
-/// per-op `{op}_status` custom field, and the matching audit event.
-async fn finish_processing(
-    pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
     op: &str,
-    status: &str,
-    audit: DocumentAuditEventType,
-) -> Result<(), JobError> {
-    set_custom_field(pool, document_id, "processing_status", &json!(status))
-        .await
-        .map_err(store_err)?;
-    set_custom_field(
-        pool,
-        document_id,
-        &format!("{op}_status"),
-        &json!(status),
-    )
-    .await
-    .map_err(store_err)?;
-    record_event(
-        pool,
-        document_id,
-        None,
-        audit,
-        Some(&json!({ "operation": op, "status": status })),
-    )
-    .await
-    .map_err(store_err)
-}
-
-/// Terminal statuses shared by all document-processing handlers.
-mod op_status {
-    pub const SUCCEEDED: &str = "succeeded";
-    pub const FAILED: &str = "failed";
-    pub const UNSUPPORTED: &str = "unsupported";
-    pub const UNAVAILABLE: &str = "unavailable";
-    pub const SKIPPED_TOO_LARGE: &str = "skipped_too_large";
-}
-
-/// Runs the shared preamble for a document job: parse payload, verify
-/// the document exists, mark processing as running, resolve + size-check
-/// the target artifact. Returns the artifact bytes, or `None` when the
-/// artifact exceeded [`MAX_PROCESSING_BYTES`] (caller records
-/// `skipped_too_large`).
-async fn load_job_input(
-    ctx: &JobContext,
-    fs: &mut FaultInjectingFs,
-    job: &Job,
-) -> Result<Option<(DocumentId, DocumentArtifact, Vec<u8>)>, JobError> {
-    let (payload, document_id) = DocumentJobPayload::parse(&job.payload)?;
-    get_document(&ctx.pool, &document_id)
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| JobError::Failed(format!("document not found: {document_id}")))?;
-    begin_processing(&ctx.pool, &document_id).await?;
-    let artifact = resolve_job_artifact(&ctx.pool, &document_id, payload.artifact_id.as_deref())
-        .await?;
-    match read_artifact_bytes(fs, &artifact)? {
-        Some(bytes) => Ok(Some((document_id, artifact, bytes))),
-        None => Ok(None),
-    }
-}
-
-/// Records the failure-side bookkeeping when a handler returns `Err`:
-/// on the final attempt (`attempts + 1 >= max_attempts`) the document
-/// gets `processing_status = "failed"` and a `ProcessingFailed` audit
-/// event; intermediate retries stay `running` — the job row remains
-/// the authoritative retry state.
-async fn note_failure(ctx: &JobContext, job: &Job, document_id: Option<&DocumentId>) {
-    let Some(document_id) = document_id else { return };
-    if job.attempts.saturating_add(1) < job.max_attempts {
-        return;
-    }
-    let _ = finish_processing(
-        &ctx.pool,
-        document_id,
-        "processing",
-        op_status::FAILED,
-        DocumentAuditEventType::ProcessingFailed,
-    )
-    .await;
-}
-
-/// `document.metadata_extract` — sniffs the target artifact and, for
-/// PDFs, writes title/author/producer/page-count into document
-/// metadata. Non-PDF artifacts are recorded `unsupported`.
-pub struct DocumentMetadataExtractHandler {
-    storage: StorageConfig,
-}
-
-impl DocumentMetadataExtractHandler {
-    /// Builds the handler from the application's storage configuration.
-    pub fn from_app_config() -> Result<Self, crate::config::ConfigError> {
-        Ok(Self::with_storage_config(
-            AppConfig::load_lenient()?.to_storage_config(),
-        ))
-    }
-
-    /// Builds the handler around an explicit storage config (tests).
-    pub fn with_storage_config(storage: StorageConfig) -> Self {
-        Self { storage }
-    }
-}
-
-impl JobHandler for DocumentMetadataExtractHandler {
-    fn handle<'a>(
-        &'a self,
-        ctx: &'a JobContext,
-        job: &'a Job,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let mut fs = storage_fs(&self.storage)?;
-            let input = load_job_input(ctx, &mut fs, job).await;
-            let (document_id, _artifact, bytes) = match input {
-                Ok(Some(input)) => input,
-                Ok(None) => {
-                    // Too-large artifact: still need the document id for
-                    // status bookkeeping — re-parse cheaply.
-                    let (_, document_id) =
-                        DocumentJobPayload::parse(&job.payload)?;
-                    let id = DocumentId::new(document_id.document_id.clone());
-                    finish_processing(
-                        &ctx.pool,
-                        &id,
-                        "metadata_extract",
-                        op_status::SKIPPED_TOO_LARGE,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    note_failure(ctx, job, None).await;
-                    return Err(e);
-                }
-            };
-
-            let result = extract_metadata_into_store(ctx, &document_id, &bytes).await;
-            match result {
-                Ok(()) => {
-                    finish_processing(
-                        &ctx.pool,
-                        &document_id,
-                        "metadata_extract",
-                        op_status::SUCCEEDED,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await
-                }
-                Err(e) if is_unsupported_format(&e) => {
-                    finish_processing(
-                        &ctx.pool,
-                        &document_id,
-                        "metadata_extract",
-                        op_status::UNSUPPORTED,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await
-                }
-                Err(e) => {
-                    note_failure(ctx, job, Some(&document_id)).await;
-                    Err(e)
-                }
-            }
-        })
-    }
-}
-
-/// Runs the PDF metadata extraction and merges the result into the
-/// document's stored metadata (existing custom fields are preserved).
-async fn extract_metadata_into_store(
-    ctx: &JobContext,
-    document_id: &DocumentId,
-    bytes: &[u8],
-) -> Result<(), JobError> {
-    if sniff_format(bytes) != SniffedFormat::Pdf {
-        return Err(unsupported_format());
-    }
-
-    let info = crate::crates::pdf_engine::PdfEngine::new()
-        .inspect(bytes)
-        .map_err(|e| JobError::Failed(format!("pdf inspect failed: {e}")))?;
-
-    let mut metadata = get_document_metadata(&ctx.pool, document_id)
-        .await
-        .map_err(store_err)?
-        .unwrap_or_else(|| DocumentMetadata {
-            document_id: document_id.clone(),
-            title: None,
-            author: None,
-            subject: None,
-            language: None,
-            keywords: Vec::new(),
-            custom_fields: serde_json::Map::new(),
-        });
-
-    // PDF Info-dict fields win when present; existing values are kept
-    // otherwise so re-runs never erase metadata set by other tools.
-    if info.title.is_some() {
-        metadata.title = info.title.clone();
-    }
-    if info.author.is_some() {
-        metadata.author = info.author.clone();
-    }
-    metadata.custom_fields.insert(
-        "format".to_string(),
-        json!("pdf"),
-    );
-    metadata.custom_fields.insert(
-        "page_count".to_string(),
-        json!(info.page_count),
-    );
-    metadata.custom_fields.insert(
-        "encrypted".to_string(),
-        json!(info.encrypted),
-    );
-    metadata.custom_fields.insert(
-        "file_size_bytes".to_string(),
-        json!(info.file_size_bytes),
-    );
-    if let Some(v) = &info.creator {
-        metadata.custom_fields.insert("creator".to_string(), json!(v));
-    }
-    if let Some(v) = &info.producer {
-        metadata.custom_fields.insert("producer".to_string(), json!(v));
-    }
-
-    upsert_document_metadata(&ctx.pool, &metadata)
-        .await
-        .map_err(store_err)
-}
-
-/// `document.index` — extracts the PDF text layer into the `index`
-/// metadata custom field (excerpt + sha256 + counts). Non-PDF
-/// artifacts are recorded `unsupported`.
-pub struct DocumentIndexHandler {
-    storage: StorageConfig,
-}
-
-impl DocumentIndexHandler {
-    /// Builds the handler from the application's storage configuration.
-    pub fn from_app_config() -> Result<Self, crate::config::ConfigError> {
-        Ok(Self::with_storage_config(
-            AppConfig::load_lenient()?.to_storage_config(),
-        ))
-    }
-
-    /// Builds the handler around an explicit storage config (tests).
-    pub fn with_storage_config(storage: StorageConfig) -> Self {
-        Self { storage }
-    }
-}
-
-impl JobHandler for DocumentIndexHandler {
-    fn handle<'a>(
-        &'a self,
-        ctx: &'a JobContext,
-        job: &'a Job,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let mut fs = storage_fs(&self.storage)?;
-            let input = load_job_input(ctx, &mut fs, job).await;
-            let (document_id, _artifact, bytes) = match input {
-                Ok(Some(input)) => input,
-                Ok(None) => {
-                    let (_, document_id) = DocumentJobPayload::parse(&job.payload)?;
-                    let id = DocumentId::new(document_id.document_id.clone());
-                    finish_processing(
-                        &ctx.pool,
-                        &id,
-                        "index",
-                        op_status::SKIPPED_TOO_LARGE,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    note_failure(ctx, job, None).await;
-                    return Err(e);
-                }
-            };
-
-            let result = index_document_text(ctx, &document_id, &bytes).await;
-            match result {
-                Ok(()) => {
-                    finish_processing(
-                        &ctx.pool,
-                        &document_id,
-                        "index",
-                        op_status::SUCCEEDED,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await
-                }
-                Err(e) => {
-                    if is_unsupported_format(&e) {
-                        finish_processing(
-                            &ctx.pool,
-                            &document_id,
-                            "index",
-                            op_status::UNSUPPORTED,
-                            DocumentAuditEventType::ProcessingCompleted,
-                        )
-                        .await
-                    } else {
-                        note_failure(ctx, job, Some(&document_id)).await;
-                        Err(e)
-                    }
-                }
-            }
-        })
-    }
-}
-
-/// Marker prefix for the "format not supported" job error.
-const UNSUPPORTED_FORMAT: &str = "unsupported document format";
-
-fn unsupported_format() -> JobError {
-    JobError::Failed(UNSUPPORTED_FORMAT.to_string())
-}
-
-fn is_unsupported_format(e: &JobError) -> bool {
-    matches!(e, JobError::Failed(msg) if msg == UNSUPPORTED_FORMAT)
-}
-
-/// Extracts the PDF text layer and stores it under the `index` custom
-/// field: `{excerpt, sha256, characters, words}`. The excerpt is capped
-/// at [`INDEX_EXCERPT_CHARS`]; counts/hash always cover the full text.
-async fn index_document_text(
-    ctx: &JobContext,
-    document_id: &DocumentId,
-    bytes: &[u8],
-) -> Result<(), JobError> {
-    if sniff_format(bytes) != SniffedFormat::Pdf {
-        return Err(unsupported_format());
-    }
-
-    let pages = crate::crates::pdf_engine::PdfEngine::new()
-        .extract_text(bytes, None)
-        .map_err(|e| JobError::Failed(format!("pdf text extraction failed: {e}")))?;
-
-    let text = pages
-        .iter()
-        .map(|p| p.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let words = text.split_whitespace().count() as u64;
-    let characters = text.chars().count() as u64;
-    let sha256 = hex_lower(&Sha256::digest(text.as_bytes()));
-    let excerpt: String = text.chars().take(INDEX_EXCERPT_CHARS).collect();
-
-    set_custom_field(
-        &ctx.pool,
-        document_id,
-        "index",
-        &json!({
-            "excerpt": excerpt,
-            "sha256": sha256,
-            "characters": characters,
-            "words": words,
-        }),
-    )
-    .await
-    .map_err(store_err)?;
-    Ok(())
-}
-
-/// `thumbnail.generate` — extracts the document's embedded thumbnail
-/// (page `/Thumb` or first image XObject) and stores it under
-/// `thumbnails/{document_id}/thumbnail.{ext}`.
-pub struct ThumbnailGenerateHandler {
-    storage: StorageConfig,
-}
-
-impl ThumbnailGenerateHandler {
-    /// Builds the handler from the application's storage configuration.
-    pub fn from_app_config() -> Result<Self, crate::config::ConfigError> {
-        Ok(Self::with_storage_config(
-            AppConfig::load_lenient()?.to_storage_config(),
-        ))
-    }
-
-    /// Builds the handler around an explicit storage config (tests).
-    pub fn with_storage_config(storage: StorageConfig) -> Self {
-        Self { storage }
-    }
-}
-
-impl JobHandler for ThumbnailGenerateHandler {
-    fn handle<'a>(
-        &'a self,
-        ctx: &'a JobContext,
-        job: &'a Job,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let mut fs = storage_fs(&self.storage)?;
-            let input = load_job_input(ctx, &mut fs, job).await;
-            let (document_id, _artifact, bytes) = match input {
-                Ok(Some(input)) => input,
-                Ok(None) => {
-                    let (_, document_id) = DocumentJobPayload::parse(&job.payload)?;
-                    let id = DocumentId::new(document_id.document_id.clone());
-                    finish_processing(
-                        &ctx.pool,
-                        &id,
-                        "thumbnail",
-                        op_status::SKIPPED_TOO_LARGE,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    note_failure(ctx, job, None).await;
-                    return Err(e);
-                }
-            };
-
-            match generate_thumbnail(ctx, &mut fs, &document_id, &bytes).await {
-                Ok(()) => {
-                    finish_processing(
-                        &ctx.pool,
-                        &document_id,
-                        "thumbnail",
-                        op_status::SUCCEEDED,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await
-                }
-                Err(ThumbnailOutcome::Unavailable) => {
-                    finish_processing(
-                        &ctx.pool,
-                        &document_id,
-                        "thumbnail",
-                        op_status::UNAVAILABLE,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await
-                }
-                Err(ThumbnailOutcome::Unsupported) => {
-                    finish_processing(
-                        &ctx.pool,
-                        &document_id,
-                        "thumbnail",
-                        op_status::UNSUPPORTED,
-                        DocumentAuditEventType::ProcessingCompleted,
-                    )
-                    .await
-                }
-                Err(ThumbnailOutcome::Failed(e)) => {
-                    note_failure(ctx, job, Some(&document_id)).await;
-                    Err(e)
-                }
-            }
-        })
-    }
-}
-
-/// Outcome of a thumbnail attempt that isn't a plain success/failure.
-enum ThumbnailOutcome {
-    /// No embedded thumbnail could be found or decoded.
-    Unavailable,
-    /// The artifact isn't a PDF.
-    Unsupported,
-    /// A real error (storage, parse, encode).
-    Failed(JobError),
-}
-
-impl From<JobError> for ThumbnailOutcome {
-    fn from(e: JobError) -> Self {
-        Self::Failed(e)
-    }
-}
-
-/// Extracts and stores the document thumbnail. Deterministic object
-/// name → retries overwrite the same bytes (idempotent).
-async fn generate_thumbnail(
-    ctx: &JobContext,
-    fs: &mut FaultInjectingFs,
-    document_id: &DocumentId,
-    bytes: &[u8],
-) -> Result<(), ThumbnailOutcome> {
-    if sniff_format(bytes) != SniffedFormat::Pdf {
-        return Err(ThumbnailOutcome::Unsupported);
-    }
-    let (image, ext) =
-        extract_pdf_thumbnail(bytes).map_err(ThumbnailOutcome::Failed)?
-            .ok_or(ThumbnailOutcome::Unavailable)?;
-
-    let name = format!("thumbnails/{document_id}/thumbnail{ext}");
-    let mut writer = fs
-        .begin_upload(&name)
-        .map_err(|e| ThumbnailOutcome::Failed(JobError::Failed(format!("storage init failed: {e}"))))?;
-    for chunk in image.chunks(UPLOAD_CHUNK_BYTES) {
-        writer
-            .write_chunk(chunk)
-            .map_err(|e| ThumbnailOutcome::Failed(JobError::Failed(format!("thumbnail upload failed: {e}"))))?;
-    }
-    writer
-        .commit()
-        .map_err(|e| ThumbnailOutcome::Failed(JobError::Failed(format!("thumbnail commit failed: {e}"))))?;
-
-    set_custom_field(
-        &ctx.pool,
-        document_id,
-        "thumbnail_uri",
-        &json!(format!("local://{name}")),
-    )
-    .await
-    .map_err(|e| ThumbnailOutcome::Failed(store_err(e)))?;
-    Ok(())
-}
-
-/// Finds and decodes the best embedded thumbnail in a PDF: the first
-/// page's `/Thumb` entry, falling back to the first image XObject in
-/// that page's resources. Returns `(encoded_bytes, extension)`.
-fn extract_pdf_thumbnail(pdf: &[u8]) -> Result<Option<(Vec<u8>, &'static str)>, JobError> {
-    let doc = lopdf::Document::load_mem(pdf)
-        .map_err(|e| JobError::Failed(format!("pdf parse failed: {e}")))?;
-    if doc.trailer.has(b"Encrypt") {
-        return Ok(None);
-    }
-    let pages = doc.get_pages();
-    let Some(first_page_id) = pages.values().next().copied() else {
-        return Ok(None);
-    };
-    let Ok(page) = doc.get_dictionary(first_page_id) else {
-        return Ok(None);
-    };
-
-    // 1) Explicit /Thumb entry on the page.
-    if let Ok(thumb) = page.get(b"Thumb")
-        && let Ok((_, obj)) = doc.dereference(thumb)
-        && let Ok(stream) = obj.as_stream()
-        && let Some(found) = image_stream_to_file(stream)?
-    {
-        return Ok(Some(found));
-    }
-
-    // 2) First image XObject in the page's /Resources.
-    if let Ok(resources) = page.get(b"Resources")
-        && let Ok((_, res_obj)) = doc.dereference(resources)
-        && let Ok(res_dict) = res_obj.as_dict()
-        && let Ok(xobjects) = res_dict.get(b"XObject")
-        && let Ok((_, xo_obj)) = doc.dereference(xobjects)
-        && let Ok(xo_dict) = xo_obj.as_dict()
-    {
-        for (_, xobj) in xo_dict.iter() {
-            if let Ok((_, obj)) = doc.dereference(xobj)
-                && let Ok(stream) = obj.as_stream()
-                && stream
-                    .dict
-                    .get(b"Subtype")
-                    .is_ok_and(|s| s.as_name() == Ok(b"Image"))
-                && let Some(found) = image_stream_to_file(stream)?
-            {
-                return Ok(Some(found));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Converts one PDF image stream into a storable file: already-encoded
-/// formats (JPEG/JPX/CCITT) pass through with their extension; raw
-/// sample data (FlateDecode) is decoded to PNG via the `image` crate.
-fn image_stream_to_file(
-    stream: &lopdf::Stream,
-) -> Result<Option<(Vec<u8>, &'static str)>, JobError> {
-    // Filter may be a name or an array of names; anything more complex
-    // (multiple filters, decode parms we don't model) is declined.
-    let filter = match stream.dict.get(b"Filter") {
-        Ok(lopdf::Object::Name(n)) => Some(n.as_slice().to_vec()),
-        Ok(lopdf::Object::Array(items)) if items.len() == 1 => items[0]
-            .as_name()
-            .ok()
-            .map(|n| n.as_slice().to_vec()),
-        Ok(_) => return Ok(None),
-        Err(_) => None,
-    };
-
-    // Already-file formats: the (still-filtered) stream content is the
-    // file itself.
-    if let Some(name) = filter.as_deref() {
-        let ext = match name {
-            b"DCTDecode" => Some(".jpg"),
-            b"JPXDecode" => Some(".jp2"),
-            b"CCITTFaxDecode" => Some(".ccitt"),
-            b"JBIG2Decode" => Some(".jbig2"),
-            _ => None,
-        };
-        if let Some(ext) = ext {
-            if stream.content.is_empty() || stream.content.len() > MAX_THUMBNAIL_DECODED_BYTES {
-                return Ok(None);
-            }
-            return Ok(Some((stream.content.clone(), ext)));
-        }
-    }
-
-    // Raw sample path: only plain FlateDecode (or unfiltered) streams
-    // with trivial decode parms are supported.
-    let flate_only = filter.is_none() || filter.as_deref() == Some(b"FlateDecode");
-    if !flate_only {
-        return Ok(None);
-    }
-    if stream
-        .dict
-        .get(b"DecodeParms")
-        .is_ok_and(|dp| dp.as_dict().is_ok_and(|d| d.get(b"Predictor").is_ok()))
-    {
-        // Row predictors change the sample layout — decoding them is
-        // out of scope; report "no usable thumbnail" honestly.
-        return Ok(None);
-    }
-
-    let width = stream.dict.get(b"Width").ok().and_then(|v| v.as_i64().ok())
-        .filter(|&w| w > 0)
-        .map(|w| w as u32)
-        .ok_or_else(|| JobError::Failed("thumbnail stream missing /Width".into()))?;
-    let height = stream.dict.get(b"Height").ok().and_then(|v| v.as_i64().ok())
-        .filter(|&h| h > 0)
-        .map(|h| h as u32)
-        .ok_or_else(|| JobError::Failed("thumbnail stream missing /Height".into()))?;
-    let bpc = stream
-        .dict
-        .get(b"BitsPerComponent")
-        .ok()
-        .and_then(|v| v.as_i64().ok())
-        .unwrap_or(8);
-    if bpc != 8 {
-        return Ok(None);
-    }
-    let components = color_space_components(stream)?;
-    let Some(components) = components else {
-        return Ok(None);
-    };
-    if u64::from(width) * u64::from(height) > MAX_THUMBNAIL_PIXELS {
-        return Ok(None);
-    }
-
-    let samples = stream
-        .decompressed_content_with_limit(MAX_THUMBNAIL_DECODED_BYTES)
-        .map_err(|e| JobError::Failed(format!("thumbnail decode failed: {e}")))?;
-    let expected = width as usize * height as usize * components;
-    if samples.len() < expected {
-        return Ok(None);
-    }
-    let samples = &samples[..expected];
-
-    let mut png = std::io::Cursor::new(Vec::new());
-    match components {
-        1 => {
-            let img = image::GrayImage::from_raw(width, height, samples.to_vec())
-                .ok_or_else(|| JobError::Failed("thumbnail buffer size mismatch".into()))?;
-            image::DynamicImage::ImageLuma8(img)
-                .write_to(&mut png, image::ImageFormat::Png)
-                .map_err(|e| JobError::Failed(format!("thumbnail png encode failed: {e}")))?;
-        }
-        3 => {
-            let img = image::RgbImage::from_raw(width, height, samples.to_vec())
-                .ok_or_else(|| JobError::Failed("thumbnail buffer size mismatch".into()))?;
-            image::DynamicImage::ImageRgb8(img)
-                .write_to(&mut png, image::ImageFormat::Png)
-                .map_err(|e| JobError::Failed(format!("thumbnail png encode failed: {e}")))?;
-        }
-        _ => return Ok(None),
-    }
-    Ok(Some((png.into_inner(), ".png")))
-}
-
-/// Maps a PDF `/ColorSpace` entry to a component count for 8-bpc
-/// device spaces. Returns `None` for anything else (ICCBased,
-/// Indexed, Separation, Pattern, ...).
-fn color_space_components(stream: &lopdf::Stream) -> Result<Option<usize>, JobError> {
-    let cs = match stream.dict.get(b"ColorSpace") {
-        Ok(v) => v,
-        Err(_) => return Ok(Some(1)), // image XObjects default to DeviceGray
-    };
-    let name = match cs {
-        lopdf::Object::Name(n) => Some(n.as_slice()),
-        lopdf::Object::Array(items) => items
-            .first()
-            .and_then(|o| o.as_name().ok())
-            .map(|n| n.as_slice()),
-        _ => None,
-    };
-    Ok(match name {
-        Some(b"DeviceGray") | Some(b"G") => Some(1),
-        Some(b"DeviceRGB") | Some(b"RGB") => Some(3),
-        _ => None,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// enqueue_* producer helpers
-// ---------------------------------------------------------------------------
-
-/// Builds the `document.ingest` payload, enqueues the job, and stamps
-/// `processing_status = "queued"` (best-effort). Bytes are base64'd
-/// into `content_b64`.
-pub async fn enqueue_ingest(
-    pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
-    file_name: &str,
-    mime_type: Option<&str>,
-    bytes: &[u8],
-    default_max_attempts: u32,
+    params: serde_json::Value,
 ) -> Result<Job, JobError> {
+    if !PDF_OPS.contains(&op) {
+        return Err(JobError::Failed(format!("unknown pdf op: {op}")));
+    }
+    let mut payload = doc_job_payload(document_id, artifact_id);
+    payload["op"] = json!(op);
+    payload["params"] = params;
     let job = enqueue(
         pool,
         &NewJob {
-            kind: DOCUMENT_INGEST_KIND.to_string(),
-            payload: json!({
-                "document_id": document_id.as_str(),
-                "content_b64": B64.encode(bytes),
-                "file_name": file_name,
-                "mime_type": mime_type,
-            }),
-            priority: 0,
-            run_at: None,
-            max_attempts: None,
-        },
-        default_max_attempts,
-    )
-    .await?;
-    stamp_queued(pool, document_id).await;
-    Ok(job)
-}
-
-/// Enqueues `document.metadata_extract` for `document_id`
-/// (`artifact_id` optional — most recent artifact when `None`).
-pub async fn enqueue_metadata_extract(
-    pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
-    artifact_id: Option<&str>,
-    default_max_attempts: u32,
-) -> Result<Job, JobError> {
-    enqueue_document_op(
-        pool,
-        DOCUMENT_METADATA_EXTRACT_KIND,
-        document_id,
-        artifact_id,
-        default_max_attempts,
-    )
-    .await
-}
-
-/// Enqueues `document.index` for `document_id`.
-pub async fn enqueue_index(
-    pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
-    artifact_id: Option<&str>,
-    default_max_attempts: u32,
-) -> Result<Job, JobError> {
-    enqueue_document_op(
-        pool,
-        DOCUMENT_INDEX_KIND,
-        document_id,
-        artifact_id,
-        default_max_attempts,
-    )
-    .await
-}
-
-/// Enqueues `thumbnail.generate` for `document_id`.
-pub async fn enqueue_thumbnail(
-    pool: &sqlx::SqlitePool,
-    document_id: &DocumentId,
-    artifact_id: Option<&str>,
-    default_max_attempts: u32,
-) -> Result<Job, JobError> {
-    enqueue_document_op(
-        pool,
-        THUMBNAIL_GENERATE_KIND,
-        document_id,
-        artifact_id,
-        default_max_attempts,
-    )
-    .await
-}
-
-async fn enqueue_document_op(
-    pool: &sqlx::SqlitePool,
-    kind: &str,
-    document_id: &DocumentId,
-    artifact_id: Option<&str>,
-    default_max_attempts: u32,
-) -> Result<Job, JobError> {
-    let mut payload = json!({ "document_id": document_id.as_str() });
-    if let Some(id) = artifact_id {
-        payload["artifact_id"] = json!(id);
-    }
-    let job = enqueue(
-        pool,
-        &NewJob {
-            kind: kind.to_string(),
+            kind: PDF_OP_KIND.to_string(),
             payload,
             priority: 0,
             run_at: None,
             max_attempts: None,
         },
-        default_max_attempts,
+        DEFAULT_MAX_ATTEMPTS,
     )
     .await?;
-    stamp_queued(pool, document_id).await;
+    let _ = mark_op_status(pool, document_id, &pdf_op_status_key(op), "queued").await;
     Ok(job)
-}
-
-/// Best-effort `processing_status = "queued"` stamp — producers must
-/// never fail just because the status field couldn't be written.
-async fn stamp_queued(pool: &sqlx::SqlitePool, document_id: &DocumentId) {
-    if let Err(e) = set_custom_field(pool, document_id, "processing_status", &json!("queued"))
-        .await
-    {
-        tracing::warn!(error = %e, "failed to stamp processing_status=queued");
-    }
 }
 
 #[cfg(test)]
@@ -3270,7 +3236,9 @@ mod tests {
         );
         eng.register(
             DOCUMENT_METADATA_EXTRACT_KIND,
-            Arc::new(DocumentMetadataExtractHandler::with_storage_config(storage())),
+            Arc::new(DocumentMetadataExtractHandler::with_storage_config(
+                storage(),
+            )),
         );
         eng.register(
             DOCUMENT_INDEX_KIND,
@@ -3435,9 +3403,19 @@ mod tests {
         let root = temp_root();
         let doc_id = make_document(&pool).await;
         let eng = full_engine(pool.clone(), &root);
-        ingest_doc(&eng, &pool, &doc_id, &test_pdf_bytes(), "report.pdf", "application/pdf").await;
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "report.pdf",
+            "application/pdf",
+        )
+        .await;
 
-        enqueue_metadata_extract(&pool, &doc_id, None).await.unwrap();
+        enqueue_metadata_extract(&pool, &doc_id, None)
+            .await
+            .unwrap();
         assert!(eng.run_once().await.unwrap());
 
         let meta = metadata_of(&pool, &doc_id).await;
@@ -3460,7 +3438,9 @@ mod tests {
         assert!(types.contains(&DocumentAuditEventType::ProcessingCompleted));
 
         // Job succeeded.
-        let jobs = list_jobs(&pool, Some(JobStatus::Succeeded), 10).await.unwrap();
+        let jobs = list_jobs(&pool, Some(JobStatus::Succeeded), 10)
+            .await
+            .unwrap();
         assert_eq!(jobs.len(), 2); // ingest + extract
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3475,12 +3455,20 @@ mod tests {
         let png = b"\x89PNG\r\n\x1a\nrest-of-file";
         ingest_doc(&eng, &pool, &doc_id, png, "img.png", "image/png").await;
 
-        enqueue_metadata_extract(&pool, &doc_id, None).await.unwrap();
+        enqueue_metadata_extract(&pool, &doc_id, None)
+            .await
+            .unwrap();
         assert!(eng.run_once().await.unwrap());
 
         let meta = metadata_of(&pool, &doc_id).await;
-        assert_eq!(meta.custom_fields["metadata_extract_status"], json!("unsupported"));
-        assert_eq!(meta.custom_fields["processing_status"], json!("unsupported"));
+        assert_eq!(
+            meta.custom_fields["metadata_extract_status"],
+            json!("unsupported")
+        );
+        assert_eq!(
+            meta.custom_fields["processing_status"],
+            json!("unsupported")
+        );
         assert_eq!(meta.custom_fields["detected_format"], json!("png"));
         assert_eq!(meta.custom_fields["mime_type"], json!("image/png"));
         std::fs::remove_dir_all(&root).ok();
@@ -3516,7 +3504,15 @@ mod tests {
         let root = temp_root();
         let doc_id = make_document(&pool).await;
         let eng = full_engine(pool.clone(), &root);
-        ingest_doc(&eng, &pool, &doc_id, &test_pdf_bytes(), "report.pdf", "application/pdf").await;
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "report.pdf",
+            "application/pdf",
+        )
+        .await;
 
         enqueue_index(&pool, &doc_id, None).await.unwrap();
         assert!(eng.run_once().await.unwrap());
@@ -3565,7 +3561,12 @@ mod tests {
         let index = &meta.custom_fields["index"];
         assert_eq!(index["char_count"], json!(43));
         assert_eq!(index["word_count"], json!(9));
-        assert!(index["excerpt"].as_str().unwrap().contains("quick brown fox"));
+        assert!(
+            index["excerpt"]
+                .as_str()
+                .unwrap()
+                .contains("quick brown fox")
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -3584,10 +3585,15 @@ mod tests {
 
         let meta = metadata_of(&pool, &doc_id).await;
         assert_eq!(meta.custom_fields["index_status"], json!("unsupported"));
-        assert_eq!(meta.custom_fields["processing_status"], json!("unsupported"));
+        assert_eq!(
+            meta.custom_fields["processing_status"],
+            json!("unsupported")
+        );
         assert!(meta.custom_fields.get("index").is_none());
         // Job itself succeeded.
-        let jobs = list_jobs(&pool, Some(JobStatus::Succeeded), 10).await.unwrap();
+        let jobs = list_jobs(&pool, Some(JobStatus::Succeeded), 10)
+            .await
+            .unwrap();
         assert_eq!(jobs.len(), 2);
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3619,7 +3625,10 @@ mod tests {
 
         // Thumbnail bytes really landed in storage as a PNG.
         let arts = list_artifacts(&pool, &doc_id).await.unwrap();
-        let uri = meta.custom_fields["thumbnail_uri"].as_str().unwrap().to_string();
+        let uri = meta.custom_fields["thumbnail_uri"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(uri.starts_with("local://documents/"));
         assert!(uri.contains("/thumbnails/"));
         assert!(uri.ends_with(".png"));
@@ -3648,14 +3657,25 @@ mod tests {
         let root = temp_root();
         let doc_id = make_document(&pool).await;
         let eng = full_engine(pool.clone(), &root);
-        ingest_doc(&eng, &pool, &doc_id, &test_pdf_bytes(), "plain.pdf", "application/pdf").await;
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "plain.pdf",
+            "application/pdf",
+        )
+        .await;
 
         enqueue_thumbnail(&pool, &doc_id, None).await.unwrap();
         assert!(eng.run_once().await.unwrap());
 
         let meta = metadata_of(&pool, &doc_id).await;
         assert_eq!(meta.custom_fields["thumbnail_status"], json!("unavailable"));
-        assert_eq!(meta.custom_fields["processing_status"], json!("unavailable"));
+        assert_eq!(
+            meta.custom_fields["processing_status"],
+            json!("unavailable")
+        );
         assert!(meta.custom_fields.get("thumbnail_uri").is_none());
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3682,10 +3702,20 @@ mod tests {
         let root = temp_root();
         let doc_id = make_document(&pool).await;
         let eng = full_engine(pool.clone(), &root);
-        ingest_doc(&eng, &pool, &doc_id, &test_pdf_bytes(), "r.pdf", "application/pdf").await;
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "r.pdf",
+            "application/pdf",
+        )
+        .await;
 
         // Enqueue helper stamps "queued".
-        enqueue_metadata_extract(&pool, &doc_id, None).await.unwrap();
+        enqueue_metadata_extract(&pool, &doc_id, None)
+            .await
+            .unwrap();
         let meta = metadata_of(&pool, &doc_id).await;
         assert_eq!(meta.custom_fields["processing_status"], json!("queued"));
         assert_eq!(
@@ -3696,13 +3726,14 @@ mod tests {
         assert!(eng.run_once().await.unwrap());
         let meta = metadata_of(&pool, &doc_id).await;
         assert_eq!(meta.custom_fields["processing_status"], json!("succeeded"));
-        assert_eq!(meta.custom_fields["metadata_extract_status"], json!("extracted"));
+        assert_eq!(
+            meta.custom_fields["metadata_extract_status"],
+            json!("extracted")
+        );
 
         // Audit ordering: started before completed.
         let history = get_document_history(&pool, &doc_id).await.unwrap();
-        let pos = |t: DocumentAuditEventType| {
-            history.iter().position(|e| e.event_type == t)
-        };
+        let pos = |t: DocumentAuditEventType| history.iter().position(|e| e.event_type == t);
         let started = pos(DocumentAuditEventType::ProcessingStarted).unwrap();
         let completed = pos(DocumentAuditEventType::ProcessingCompleted).unwrap();
         assert!(started < completed);
@@ -3715,15 +3746,29 @@ mod tests {
         let root = temp_root();
         let doc_id = make_document(&pool).await;
         let eng = full_engine(pool.clone(), &root);
-        ingest_doc(&eng, &pool, &doc_id, &test_pdf_with_image_bytes(), "i.pdf", "application/pdf").await;
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_with_image_bytes(),
+            "i.pdf",
+            "application/pdf",
+        )
+        .await;
 
         // Run each processing job twice — second run must succeed and
         // leave a single consistent state (no duplicate artifacts,
         // deterministic thumbnail path).
         for kind_payload in [
-            (DOCUMENT_METADATA_EXTRACT_KIND, json!({"document_id": doc_id.as_str()})),
+            (
+                DOCUMENT_METADATA_EXTRACT_KIND,
+                json!({"document_id": doc_id.as_str()}),
+            ),
             (DOCUMENT_INDEX_KIND, json!({"document_id": doc_id.as_str()})),
-            (THUMBNAIL_GENERATE_KIND, json!({"document_id": doc_id.as_str()})),
+            (
+                THUMBNAIL_GENERATE_KIND,
+                json!({"document_id": doc_id.as_str()}),
+            ),
         ] {
             for _ in 0..2 {
                 eng.enqueue(&NewJob {
@@ -3741,11 +3786,17 @@ mod tests {
 
         assert_eq!(list_artifacts(&pool, &doc_id).await.unwrap().len(), 1);
         let meta = metadata_of(&pool, &doc_id).await;
-        assert_eq!(meta.custom_fields["metadata_extract_status"], json!("extracted"));
+        assert_eq!(
+            meta.custom_fields["metadata_extract_status"],
+            json!("extracted")
+        );
         assert_eq!(meta.custom_fields["index_status"], json!("indexed"));
         assert_eq!(meta.custom_fields["thumbnail_status"], json!("generated"));
         // Exactly one thumbnail object on disk.
-        let thumbs = root.join("documents").join(doc_id.as_str()).join("thumbnails");
+        let thumbs = root
+            .join("documents")
+            .join(doc_id.as_str())
+            .join("thumbnails");
         let entries: Vec<_> = std::fs::read_dir(&thumbs).unwrap().collect();
         assert_eq!(entries.len(), 1);
         std::fs::remove_dir_all(&root).ok();
@@ -3757,10 +3808,20 @@ mod tests {
         let root = temp_root();
         let doc_id = make_document(&pool).await;
         let eng = full_engine(pool.clone(), &root);
-        ingest_doc(&eng, &pool, &doc_id, &test_pdf_bytes(), "c.pdf", "application/pdf").await;
+        ingest_doc(
+            &eng,
+            &pool,
+            &doc_id,
+            &test_pdf_bytes(),
+            "c.pdf",
+            "application/pdf",
+        )
+        .await;
 
         enqueue_index(&pool, &doc_id, None).await.unwrap();
-        let job = list_jobs(&pool, None, 10).await.unwrap()
+        let job = list_jobs(&pool, None, 10)
+            .await
+            .unwrap()
             .into_iter()
             .find(|j| j.kind == DOCUMENT_INDEX_KIND)
             .unwrap();
@@ -3770,10 +3831,12 @@ mod tests {
             "UPDATE jobs_tbl SET status = 'running', worker_id = 'dead-worker',
              started_at = ?, attempts = 1 WHERE id = ?",
         )
-        .bind(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64)
+        .bind(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        )
         .bind(job.id)
         .execute(&pool)
         .await

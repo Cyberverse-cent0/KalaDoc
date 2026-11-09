@@ -24,6 +24,7 @@
 //! | `rotate`           | [`ImageEngine::rotate`] | Quarter turns only (90/180/270) — no arbitrary angles |
 //! | `crop`             | [`ImageEngine::crop`] | Pixel-exact rectangle crop |
 //! | `adjust`           | [`ImageEngine::adjust`] | Brightness, contrast, hue rotation |
+//! | `color`            | [`ImageEngine::color`] | Saturation, per-channel RGB, grayscale, invert, high-contrast |
 //! | `flip`             | [`ImageEngine::flip`] / [`ImageEngine::flip_mirror`] | Lossless mirror, no resampling |
 //! | `thumbnail`        | [`ImageEngine::thumbnail`] | Aspect-fit thumbnail; never upscales |
 //! | `compress`         | [`ImageEngine::compress`] | Quality/effort re-encode per codec |
@@ -60,7 +61,8 @@ mod tests;
 pub use engine::ImageEngine;
 pub use error::{ImageError, ImageResult};
 pub use ops::{
-    AdjustOptions, CompressOptions, FlipDirection, ImageFormat, ImageInfo, ImageMetadata,
-    ResizeOptions, ValidationReport, WatermarkOptions, WatermarkPosition, convert, flip,
-    flip_mirror, inspect, metadata, resize, resize_to, thumbnail, validate,
+    AdjustOptions, ChannelAdjust, ColorOptions, CompressOptions, FlipDirection,
+    HighContrastOptions, ImageFormat, ImageInfo, ImageMetadata, ResizeOptions, ValidationReport,
+    WatermarkOptions, WatermarkPosition, convert, flip, flip_mirror, inspect, metadata, resize,
+    resize_to, thumbnail, validate,
 };

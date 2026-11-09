@@ -14,7 +14,9 @@ pub fn builtin_definitions() -> Vec<PipelineDefinition> {
 
 /// Find a built-in definition by name, returning an owned copy.
 pub(crate) fn find_builtin(name: &str) -> Option<PipelineDefinition> {
-    builtin_definitions().into_iter().find(|def| def.name == name)
+    builtin_definitions()
+        .into_iter()
+        .find(|def| def.name == name)
 }
 
 /// `pdf.intake` — the standard ingestion gate: security validation,
@@ -28,11 +30,7 @@ pub fn pdf_intake() -> PipelineDefinition {
             "Validate an uploaded PDF, inspect its metadata, and extract its text".to_string(),
         ),
         steps: vec![
-            PipelineStep::new(
-                "security-gate",
-                engine_name::SECURITY,
-                operation::VALIDATE,
-            ),
+            PipelineStep::new("security-gate", engine_name::SECURITY, operation::VALIDATE),
             PipelineStep::new("pdf-validate", engine_name::PDF, operation::PDF_VALIDATE),
             PipelineStep::new("pdf-inspect", engine_name::PDF, operation::PDF_INSPECT),
             PipelineStep::new(

@@ -54,6 +54,21 @@ pub enum Commands {
     /// cancel, retry, and recover interrupted work.
     #[command(subcommand)]
     Jobs(JobsArgs),
+
+    /// Inspect processing engines: list capabilities and health.
+    #[command(subcommand)]
+    Engine(EngineArgs),
+
+    /// Manage documents in the local document store.
+    #[command(subcommand)]
+    Doc(DocArgs),
+
+    /// Start the HTTP API server (binds `api.addr` unless overridden).
+    Serve {
+        /// Bind address override, e.g. `0.0.0.0:8080`.
+        #[arg(long)]
+        addr: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -177,6 +192,127 @@ pub enum JobsArgs {
 
     /// Reclaim jobs left in `running` state by a crashed worker.
     Recover,
+}
+
+#[derive(Subcommand)]
+pub enum EngineArgs {
+    /// List registered engines with their advertised operations and
+    /// input/output formats.
+    List,
+
+    /// Report per-engine health status.
+    Health,
+}
+
+#[derive(Subcommand)]
+pub enum DocArgs {
+    /// List documents, newest first.
+    List {
+        /// Only documents owned by this user/organization id.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Only documents in this folder.
+        #[arg(long)]
+        folder: Option<String>,
+        /// Include trashed documents.
+        #[arg(long)]
+        all: bool,
+        /// Maximum number of documents to show.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+
+    /// Show a document with its artifacts and versions.
+    Get {
+        /// Document ID from `kaladoc doc list`.
+        id: String,
+    },
+
+    /// Register a new document (metadata only — file upload is not
+    /// supported by the CLI yet).
+    Create {
+        /// Document display name.
+        #[arg(long)]
+        name: String,
+        /// Owning user/organization id.
+        #[arg(long)]
+        owner: String,
+        /// Folder to place the document in.
+        #[arg(long)]
+        folder: Option<String>,
+        /// Document type: pdf, image, spreadsheet, presentation, text,
+        /// archive, or other. Inferred from the file extension when
+        /// omitted.
+        #[arg(long = "type")]
+        document_type: Option<String>,
+    },
+
+    /// Rename a document.
+    Rename {
+        /// Document ID from `kaladoc doc list`.
+        id: String,
+        /// New display name.
+        #[arg(long)]
+        name: String,
+    },
+
+    /// Move a document into a folder (or back to the root).
+    Move {
+        /// Document ID from `kaladoc doc list`.
+        id: String,
+        /// Target folder id, or `none` for the root.
+        #[arg(long)]
+        folder: String,
+    },
+
+    /// Move a document to the trash (restorable via `doc restore`).
+    Delete {
+        /// Document ID from `kaladoc doc list`.
+        id: String,
+    },
+
+    /// Restore a trashed document to active.
+    Restore {
+        /// Document ID from `kaladoc doc list`.
+        id: String,
+    },
+
+    /// Permanently delete a trashed document and its dependents.
+    Purge {
+        /// Document ID from `kaladoc doc list`.
+        id: String,
+    },
+
+    /// Manage document folders.
+    #[command(subcommand)]
+    Folders(FolderArgs),
+}
+
+#[derive(Subcommand)]
+pub enum FolderArgs {
+    /// List folders. Root-level folders unless `--parent` selects the
+    /// children of a specific folder.
+    List {
+        /// Only folders owned by this user/organization id.
+        #[arg(long)]
+        owner: Option<String>,
+        /// List only direct children of this folder.
+        #[arg(long)]
+        parent: Option<String>,
+    },
+
+    /// Create a folder, optionally nested under a parent.
+    Create {
+        /// Folder name.
+        #[arg(long)]
+        name: String,
+        /// Owning user/organization id.
+        #[arg(long)]
+        owner: String,
+        /// Parent folder id (omit for a root-level folder).
+        #[arg(long)]
+        parent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

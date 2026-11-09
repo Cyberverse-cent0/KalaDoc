@@ -19,10 +19,13 @@ archival by Applaicon and used as the feature-parity target for KalaDoc.
   crates (`pdf-engine`, `conversion-engine`, `image-engine`,
   `pipeline-engine`, `job_engine`, `security-engine`, `document_engine`)
   and the services above them.
-- **The backend API will be constructed.** The existing axum REST API is
-  the seed; the full Stirling-style endpoint surface (per-operation
-  process endpoints, batch jobs, pipeline execution, OpenAPI) is to be
-  built on top of the engines — see section 10.
+- **The backend API is under construction.** The axum REST API exists
+  (`kaladoc serve`, `api.addr` config) with document upload/download,
+  CRUD, versions, tags, history, folders, jobs, engines, storage and
+  health endpoints; the full Stirling-style surface (per-operation
+  process endpoints for every engine op, batch jobs, pipeline
+  execution, OpenAPI) is still to be built on top of the engines —
+  see section 10.
 
 ## 1. Advanced PDF editing
 
@@ -85,7 +88,9 @@ archival by Applaicon and used as the feature-parity target for KalaDoc.
 
 Supported formats today: `pdf`, `txt`, `markdown`, `html`, `png`, `jpeg`,
 `docx`, `odt` — backed by pandoc, LibreOffice, poppler (external) plus a
-pure-Rust fallback, dispatched with automatic fallback.
+pure-Rust fallback, dispatched with automatic fallback. The `Format`
+enum additionally declares `xlsx`, `xls`, `pptx`, `ppt` and `epub`, but
+no backend reads them yet, so those conversions are not advertised.
 
 ### To PDF
 
@@ -96,8 +101,9 @@ pure-Rust fallback, dispatched with automatic fallback.
 - [x] HTML → PDF *(pandoc)*
 - [x] Markdown → PDF *(pandoc + Rust backend)*
 - [x] TXT → PDF *(pandoc + Rust backend)*
-- [ ] Images → PDF
-- [ ] EPUB → PDF
+- [x] Images → PDF *(partial: pure-Rust backend converts PNG/JPEG → PDF;
+  multi-page/other formats not covered)*
+- [ ] EPUB → PDF *(enum value exists; no backend reads EPUB yet)*
 - [ ] Email (EML) → PDF
 - [ ] URL → PDF
 - [ ] HTML files → PDF *(HTML string/bytes covered; file/URL fetching no)*
@@ -150,7 +156,8 @@ pure-Rust fallback, dispatched with automatic fallback.
   `extract_metadata`, pipeline `pdf.intake` reports)*
 - [x] Extract document information. *(pdf-engine `extract_metadata` —
   Info dict, dates, keywords, XMP)*
-- [ ] Automatic form detection.
+- [x] Automatic form detection. *(partial: `extract_metadata` reports
+  AcroForm field names/paths; no detection heuristics or field creation)*
 - [x] Document classification and processing workflows. *(partial:
   linear pipeline definitions + ingestion/metadata/index jobs)*
 
@@ -196,24 +203,28 @@ pure-Rust fallback, dispatched with automatic fallback.
 - [x] Compress PDF files. *(partial: `compress` recompresses object/
   xref streams via lopdf; no image-level optimization)*
 - [ ] Optimize embedded images.
-- [ ] Reduce image resolution. *(image-engine `compress`/`resize` cover
+- [x] Reduce image resolution. *(image-engine `resize`/`thumbnail` cover
   raster inputs, not embedded PDF images)*
-- [ ] Adjust JPEG quality. *(image-engine `compress` supports quality
-  for JPEG output)*
+- [x] Adjust JPEG quality. *(image-engine `compress` — quality 1–100 for
+  JPEG; PNG uses compression effort; WebP/GIF/BMP use codec defaults)*
 - [ ] Remove unnecessary objects.
 - [ ] Remove unused resources.
 - [ ] Optimize PDF structure.
 - [ ] Reduce redundant content.
 - [ ] Linearize PDFs for faster web viewing.
-- [ ] Convert images to more efficient formats. *(image-engine
-  `convert` covers png/jpeg/gif/webp/bmp for standalone images)*
+- [x] Convert images to more efficient formats. *(image-engine
+  `convert`/`compress` cover png/jpeg/gif/webp/bmp for standalone
+  images)*
 - [ ] Optimize documents for printing.
 - [ ] Optimize documents for archival storage.
 
 ## 7. Advanced visual processing
 
 *(image-engine ops apply to raster images — PNG/JPEG/GIF/WebP/BMP —
-not directly to PDF page content)*
+not directly to PDF page content. Implemented ops: `inspect`,
+`resize`, `resize_to`, `convert`, `rotate` (90/180/270), `crop`,
+`flip`, `adjust` (brightness/contrast/hue), `thumbnail`, `compress`,
+`watermark` (image overlay), `validate`, `metadata`.)*
 
 - [x] Adjust brightness. *(image-engine `adjust` — ±100% via
   `imageops::brighten`)*
@@ -271,8 +282,9 @@ not directly to PDF page content)*
 - [x] Automate compression. *(engine op; not a named pipeline step)*
 - [ ] Automate document renaming. *(security filename sanitization
   exists; no content-based auto-rename)*
-- [x] Process files through APIs. *(REST API upload + process
-  endpoints)*
+- [x] Process files through APIs. *(REST API: raw-body upload with
+  magic-byte sniffing + `x-file-name`, artifact download, and
+  `/documents/{id}/process` enqueueing metadata/index/thumbnail jobs)*
 - [ ] Automate folder scanning.
 - [ ] Watch folders for new documents.
 - [ ] Automatically process incoming files. *(partial: ingest can be
@@ -283,12 +295,21 @@ not directly to PDF page content)*
 
 ## 10. Developer and integration features
 
-- [x] REST API. *(axum server, ~20 endpoints: documents, folders,
-  versions, tags, history, jobs, engines, storage, health)*
+- [x] REST API. *(axum server in `src/crates/api` via `kaladoc serve` —
+  18 routes: document create/list/get/patch/delete, restore, versions +
+  version restore, tags, history, artifact download, `/process` job
+  enqueue, folders, jobs list/get/cancel/retry, engines, storage,
+  health; Bearer session auth on all but `/health`)*
+- [x] Command-line interface. *(not a Stirling feature, but the primary
+  current surface: `version`, `doctor`, `init` (auto `.env` secrets),
+  `config`, `auth`, `user`, `jobs` (worker/list/enqueue/cancel/retry/
+  recover), `engine list|health`, `doc` CRUD + folders, `serve`;
+  stable exit codes + `--output json`)*)
 - [ ] API documentation. *(endpoint table in crate docs; no OpenAPI)*
 - [x] API authentication. *(Bearer session tokens validated against
-  `sessions_tbl` on every request)*
-- [ ] API endpoint configuration.
+  `sessions_tbl` on every protected route)*
+- [x] API endpoint configuration. *(partial: `api.addr` bind address via
+  `kaladoc.toml`/`KALADOC_API_ADDR`; no per-endpoint enable/disable)*
 - [ ] OpenAPI integration.
 - [x] Batch processing through API. *(partial: job enqueue endpoints;
   no bulk-operation endpoint)*
@@ -326,7 +347,9 @@ not directly to PDF page content)*
   Arch/deb/fedora/tar/zip; no Dockerfiles)*
 - [ ] Kubernetes deployment.
 - [x] Desktop deployment. *(partial: Windows/Linux packaging targets)*
-- [ ] Air-gapped deployment.
+- [x] Air-gapped deployment. *(partial: fully local stack — SQLite +
+  filesystem/S3 storage, no external service calls; external conversion
+  tools are optional probes, not requirements)*
 - [x] On-premises hosting. *(local SQLite + filesystem/S3 storage)*
 
 ## 12. AI and intelligent features

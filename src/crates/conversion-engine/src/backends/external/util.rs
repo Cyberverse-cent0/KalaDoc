@@ -11,9 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::crates::conversion_engine::{
-    ConvertError, ConvertOutput, ConvertResult, Format,
-};
+use crate::crates::conversion_engine::{ConvertError, ConvertOutput, ConvertResult, Format};
 
 /// Hard cap for a single external-tool invocation.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
@@ -114,6 +112,11 @@ pub fn format_ext(format: Format) -> &'static str {
         Format::Jpeg => "jpg",
         Format::Docx => "docx",
         Format::Odt => "odt",
+        Format::Xlsx => "xlsx",
+        Format::Xls => "xls",
+        Format::Pptx => "pptx",
+        Format::Ppt => "ppt",
+        Format::Epub => "epub",
     }
 }
 
@@ -196,7 +199,11 @@ where
 /// Spawn `program` with `args`, drain stdout/stderr concurrently,
 /// and wait up to `timeout`. On expiry the child is killed and
 /// [`RunFailure::Timeout`] is returned.
-pub fn run_capture(program: &Path, args: &[String], timeout: Duration) -> Result<ProcOutput, RunFailure> {
+pub fn run_capture(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+) -> Result<ProcOutput, RunFailure> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())

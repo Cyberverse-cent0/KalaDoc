@@ -30,6 +30,10 @@ pub enum DocumentAuditEventType {
     ProcessingCompleted,
     /// A document processing job failed permanently (retries exhausted).
     ProcessingFailed,
+    /// Searchable text was extracted into the document index.
+    Indexed,
+    /// A thumbnail image was generated for the document.
+    ThumbnailGenerated,
     #[serde(other)]
     Other,
 }

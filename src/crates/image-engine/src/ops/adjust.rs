@@ -66,12 +66,8 @@ pub fn adjust(
 
     let decoded = decode(input, limits)?;
     let adjusted = match decoded.image {
-        DynamicImage::ImageRgb8(buf) => {
-            DynamicImage::ImageRgb8(adjust_buffer(&buf, options))
-        }
-        DynamicImage::ImageRgba8(buf) => {
-            DynamicImage::ImageRgba8(adjust_buffer(&buf, options))
-        }
+        DynamicImage::ImageRgb8(buf) => DynamicImage::ImageRgb8(adjust_buffer(&buf, options)),
+        DynamicImage::ImageRgba8(buf) => DynamicImage::ImageRgba8(adjust_buffer(&buf, options)),
         other => {
             // 16-bit, float, grayscale, and gray+alpha variants are
             // normalized to 8-bit sRGB before adjustment (see module
@@ -92,8 +88,7 @@ pub fn adjust(
 
 /// Rejects out-of-range or empty option sets.
 fn validate(options: &AdjustOptions) -> ImageResult<()> {
-    if options.brightness.is_none() && options.contrast.is_none() && options.hue_degrees.is_none()
-    {
+    if options.brightness.is_none() && options.contrast.is_none() && options.hue_degrees.is_none() {
         return Err(ImageError::InvalidInput(
             "at least one of brightness, contrast, or hue_degrees must be set".to_string(),
         ));
@@ -156,8 +151,8 @@ mod tests {
     use super::{AdjustOptions, adjust};
     use crate::crates::core::engine::EngineLimits;
     use crate::crates::image_engine::error::ImageError;
-    use crate::crates::image_engine::ops::load::decode;
     use crate::crates::image_engine::ops::format::ImageFormat;
+    use crate::crates::image_engine::ops::load::decode;
 
     /// Encodes a 4x4 PNG of uniform `rgb` pixels.
     fn png_of(rgb: Rgb<u8>) -> Vec<u8> {
@@ -255,7 +250,10 @@ mod tests {
 
         let after = decode_rgb(&out);
         assert_ne!(after.0, [255, 0, 0], "red must rotate: {after:?}");
-        assert!(after.0[1] > after.0[0], "expected greenish result: {after:?}");
+        assert!(
+            after.0[1] > after.0[0],
+            "expected greenish result: {after:?}"
+        );
     }
 
     #[test]
@@ -314,7 +312,10 @@ mod tests {
             },
         ] {
             assert!(
-                matches!(adjust(&input, &options, &limits), Err(ImageError::InvalidInput(_))),
+                matches!(
+                    adjust(&input, &options, &limits),
+                    Err(ImageError::InvalidInput(_))
+                ),
                 "options {options:?} must be rejected"
             );
         }
@@ -323,11 +324,7 @@ mod tests {
     #[test]
     fn rejects_empty_options() {
         let input = png_of(Rgb([100, 100, 100]));
-        let result = adjust(
-            &input,
-            &AdjustOptions::default(),
-            &EngineLimits::default(),
-        );
+        let result = adjust(&input, &AdjustOptions::default(), &EngineLimits::default());
         assert!(matches!(result, Err(ImageError::InvalidInput(_))));
     }
 

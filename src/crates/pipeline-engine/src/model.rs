@@ -165,8 +165,7 @@ impl Serialize for PipelineArtifact {
                 map.end()
             }
             Self::Multiple(v) => {
-                let encoded: Vec<String> =
-                    v.iter().map(|b| super::b64_serde::encode(b)).collect();
+                let encoded: Vec<String> = v.iter().map(|b| super::b64_serde::encode(b)).collect();
                 let mut map = serializer.serialize_map(Some(2))?;
                 map.serialize_entry("kind", "multiple")?;
                 map.serialize_entry("data", &encoded)?;

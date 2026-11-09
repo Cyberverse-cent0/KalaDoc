@@ -123,30 +123,32 @@ impl PipelineEngine {
         for (index, step) in def.steps.iter().enumerate() {
             // Every supported step consumes a single byte stream;
             // a Multiple artifact here means a non-terminal `split`.
-            let bytes = artifact.as_bytes().ok_or_else(|| PipelineError::StepFailed {
-                index,
-                name: step.name.clone(),
-                engine: step.engine.clone(),
-                operation: step.operation.clone(),
-                source: StepError::InvalidState(
-                    "step requires a single byte stream but the artifact is multi-output"
-                        .to_string(),
-                ),
-            })?;
+            let bytes = artifact
+                .as_bytes()
+                .ok_or_else(|| PipelineError::StepFailed {
+                    index,
+                    name: step.name.clone(),
+                    engine: step.engine.clone(),
+                    operation: step.operation.clone(),
+                    source: StepError::InvalidState(
+                        "step requires a single byte stream but the artifact is multi-output"
+                            .to_string(),
+                    ),
+                })?;
 
             self.limits
                 .check_step_input(bytes.len() as u64)
                 .map_err(PipelineError::LimitExceeded)?;
 
-            let outcome = self
-                .dispatch(step, bytes)
-                .map_err(|source| PipelineError::StepFailed {
-                    index,
-                    name: step.name.clone(),
-                    engine: step.engine.clone(),
-                    operation: step.operation.clone(),
-                    source,
-                })?;
+            let outcome =
+                self.dispatch(step, bytes)
+                    .map_err(|source| PipelineError::StepFailed {
+                        index,
+                        name: step.name.clone(),
+                        engine: step.engine.clone(),
+                        operation: step.operation.clone(),
+                        source,
+                    })?;
 
             total_bytes = total_bytes.saturating_add(outcome.produced_bytes);
             self.limits
@@ -235,8 +237,8 @@ impl PipelineEngine {
         match (step.engine.as_str(), step.operation.as_str()) {
             // ---- security engine ----
             (engine_name::SECURITY, operation::VALIDATE) => {
-                let max_bytes = optional_u64(&step.params, "max_bytes")
-                    .unwrap_or(self.limits.max_input_bytes);
+                let max_bytes =
+                    optional_u64(&step.params, "max_bytes").unwrap_or(self.limits.max_input_bytes);
                 self.security.validate(input, max_bytes)?;
                 Ok(report_step(
                     serde_json::json!({ "validated": true, "size_bytes": input.len() }),
@@ -255,12 +257,16 @@ impl PipelineEngine {
                     &self.security_limits,
                     expected,
                 )?;
-                Ok(report_step(serde_json::to_value(&report).map_err(json_err)?))
+                Ok(report_step(
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
             }
             // ---- pdf engine: report steps (bytes pass through) ----
             (engine_name::PDF, operation::PDF_VALIDATE) => {
                 let report = self.pdf.validate(input)?;
-                Ok(report_step(serde_json::to_value(&report).map_err(json_err)?))
+                Ok(report_step(
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
             }
             (engine_name::PDF, operation::PDF_INSPECT) => {
                 let info = self.pdf.inspect(input)?;
@@ -401,9 +407,8 @@ fn optional_str<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
 
 /// Required string param.
 fn required_str<'a>(params: &'a Value, key: &str) -> Result<&'a str, StepError> {
-    optional_str(params, key).ok_or_else(|| {
-        StepError::Params(format!("missing required string parameter `{key}`"))
-    })
+    optional_str(params, key)
+        .ok_or_else(|| StepError::Params(format!("missing required string parameter `{key}`")))
 }
 
 /// Optional unsigned-integer param.

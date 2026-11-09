@@ -1,12 +1,16 @@
+#[path = "api/src/lib.rs"]
+pub mod api;
 pub mod application;
+#[path = "conversion-engine/src/lib.rs"]
+pub mod conversion_engine;
 pub mod core;
 #[path = "document_engine/src/lib.rs"]
 pub mod document_engine;
 #[path = "engine-registry/src/lib.rs"]
 pub mod engine_registry;
-pub mod job_engine;
 #[path = "image-engine/src/lib.rs"]
 pub mod image_engine;
+pub mod job_engine;
 #[path = "observability/src/lib.rs"]
 pub mod observability;
 #[path = "pdf-engine/src/lib.rs"]
@@ -19,5 +23,3 @@ pub mod scheduler;
 pub mod security_engine;
 pub mod shared_public;
 pub mod storage;
-#[path = "conversion-engine/src/lib.rs"]
-pub mod conversion_engine;
