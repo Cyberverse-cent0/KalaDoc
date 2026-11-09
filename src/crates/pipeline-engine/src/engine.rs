@@ -76,6 +76,7 @@ impl PipelineEngine {
             max_pages: limits.max_pages,
             max_pixels: None,
             max_outputs: limits.max_outputs,
+            max_duration_secs: None,
         };
         Self {
             pdf: PdfEngine::with_limits(pdf_limits),
@@ -347,6 +348,7 @@ impl ProcessingEngine for PipelineEngine {
                 max_pages: self.limits.max_pages,
                 max_pixels: None,
                 max_outputs: self.limits.max_outputs,
+                max_duration_secs: None,
             },
         }
     }

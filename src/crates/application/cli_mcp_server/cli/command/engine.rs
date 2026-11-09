@@ -77,6 +77,7 @@ struct LimitsView {
     max_pages: Option<u32>,
     max_pixels: Option<u64>,
     max_outputs: Option<u32>,
+    max_duration_secs: Option<u64>,
 }
 
 fn capabilities(ctx: &Context, registry: &EngineRegistry, name: &str) -> Result<i32, CliError> {
@@ -96,6 +97,7 @@ fn capabilities(ctx: &Context, registry: &EngineRegistry, name: &str) -> Result<
             max_pages: caps.limits.max_pages,
             max_pixels: caps.limits.max_pixels,
             max_outputs: caps.limits.max_outputs,
+            max_duration_secs: caps.limits.max_duration_secs,
         },
     };
 
@@ -122,6 +124,7 @@ fn capabilities(ctx: &Context, registry: &EngineRegistry, name: &str) -> Result<
     print_limit("  max_pages", report.limits.max_pages.map(u64::from));
     print_limit("  max_pixels", report.limits.max_pixels);
     print_limit("  max_outputs", report.limits.max_outputs.map(u64::from));
+    print_limit("  max_duration_secs", report.limits.max_duration_secs);
     Ok(0)
 }
 
@@ -168,6 +171,7 @@ fn kind_label(kind: EngineKind) -> &'static str {
         EngineKind::Conversion => "conversion",
         EngineKind::Security => "security",
         EngineKind::Pipeline => "pipeline",
+        EngineKind::Video => "video",
     }
 }
 

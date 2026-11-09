@@ -2,7 +2,7 @@
 //!
 //! Thin adapter over [`ImageEngine`]: reads the input file, calls the
 //! matching engine method, and either prints the [`ImageInfo`] report
-//! or writes the produced bytes to `--output` (or a derived path next
+//! or writes the produced bytes to `--output-file` (or a derived path next
 //! to the input). No configuration or database access is needed.
 
 use std::path::{Path, PathBuf};
@@ -22,12 +22,12 @@ pub fn run(ctx: &Context, args: &ImageArgs) -> Result<i32, CliError> {
             file,
             width,
             height,
-            output,
+            output_file: output,
         } => resize(ctx, &engine, file, *width, *height, output.as_deref()),
         ImageArgs::Convert {
             file,
             target,
-            output,
+            output_file: output,
         } => convert(ctx, &engine, file, target, output.as_deref()),
     }
 }
@@ -116,7 +116,7 @@ fn convert(
     };
     if out.as_path() == file {
         return Err(CliError::Usage(format!(
-            "output would overwrite the input {}; pass --output",
+            "output would overwrite the input {}; pass --output-file",
             file.display()
         )));
     }

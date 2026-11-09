@@ -20,6 +20,7 @@ use crate::crates::image_engine::ImageEngine;
 use crate::crates::pdf_engine::PdfEngine;
 use crate::crates::pipeline_engine::PipelineEngine;
 use crate::crates::security_engine::SecurityEngine;
+use crate::crates::video_engine::VideoEngine;
 
 /// Summary of a registered engine, returned by [`EngineRegistry::list`].
 #[derive(Debug, Clone, Serialize)]
@@ -65,8 +66,8 @@ impl EngineRegistry {
     }
 
     /// A registry pre-populated with the built-in engines: `convert`,
-    /// `image`, `pdf`, `pipeline`, and `security`. Additional engines
-    /// can be added with [`EngineRegistry::register`].
+    /// `image`, `pdf`, `pipeline`, `security`, and `video`. Additional
+    /// engines can be added with [`EngineRegistry::register`].
     pub fn builtin() -> Self {
         let mut registry = Self::new();
         registry.register(Arc::new(PdfEngine::new()));
@@ -74,6 +75,7 @@ impl EngineRegistry {
         registry.register(Arc::new(ConversionEngine::new()));
         registry.register(Arc::new(ImageEngine::new()));
         registry.register(Arc::new(PipelineEngine::new()));
+        registry.register(Arc::new(VideoEngine::new()));
         registry
     }
 
@@ -330,14 +332,17 @@ mod tests {
     #[test]
     fn builtin_registers_all_builtin_engines() {
         let registry = EngineRegistry::builtin();
-        assert_eq!(registry.len(), 5);
-        for name in ["convert", "image", "pdf", "pipeline", "security"] {
+        assert_eq!(registry.len(), 6);
+        for name in ["convert", "image", "pdf", "pipeline", "security", "video"] {
             assert!(registry.get(name).is_some(), "missing engine {name}");
         }
 
         let infos = registry.list();
         let names: Vec<&str> = infos.iter().map(|info| info.name.as_str()).collect();
-        assert_eq!(names, ["convert", "image", "pdf", "pipeline", "security"]);
+        assert_eq!(
+            names,
+            ["convert", "image", "pdf", "pipeline", "security", "video"]
+        );
     }
 
     #[tokio::test]
@@ -373,7 +378,7 @@ mod tests {
     async fn builtin_engines_report_healthy() {
         let registry = EngineRegistry::builtin();
         let results = registry.health_all().await;
-        assert_eq!(results.len(), 5);
+        assert_eq!(results.len(), 6);
         for entry in &results {
             assert_eq!(entry.status, EngineHealthStatus::Healthy);
             assert!(entry.message.is_none());

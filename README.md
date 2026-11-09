@@ -4,7 +4,7 @@
 
 KalaDoc is a modular document platform designed to ingest, organize, store, and process documents through a unified application architecture.
 
-Built with Rust, KalaDoc prioritizes reliability, performance, security, and extensibility. Its modular engine architecture provides a foundation for document management, storage, PDF processing, conversion, automation, and AI-assisted workflows.
+Built with Rust, KalaDoc prioritizes reliability, performance, security, and extensibility. Its modular engine architecture provides a foundation for document management, storage, PDF processing, video processing, conversion, automation, and AI-assisted workflows.
 
 `APP_SECRET_KEY` must be at least 32 characters (see Validation rules).
 
@@ -99,6 +99,7 @@ The technology stack is intentionally modular so that infrastructure and process
 - Cargo.
 - Git.
 - Platform-specific dependencies required by the enabled engines.
+- `ffmpeg` and `ffprobe` binaries on `PATH` (required by the video engine — detected, never bundled).
 
 ### Clone the repository
 
@@ -200,6 +201,7 @@ Planned development areas include:
 - PDF manipulation and rendering.
 - Image processing and OCR.
 - Document format conversion.
+- Video processing via the ffmpeg-backed video engine.
 - Pipeline-based document automation.
 - CLI and MCP integrations.
 

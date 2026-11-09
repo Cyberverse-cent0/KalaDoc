@@ -13,6 +13,7 @@ pub mod init;
 pub mod jobs;
 pub mod pipeline;
 pub mod user;
+pub mod video;
 pub mod version;
 
 pub(crate) use super::{CliError, Context};

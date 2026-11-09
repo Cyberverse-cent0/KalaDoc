@@ -38,6 +38,16 @@
 //! - **Header may be preceded by junk.** The `%PDF-` magic is searched
 //!   within the first 1024 bytes, per the PDF spec allowance for
 //!   leading garbage.
+//! - **Video is byte-sniffed too.** MP4/MOV (`ftyp` box), Matroska and
+//!   WebM (EBML header), AVI (`RIFF`/`AVI `), and MPEG-TS/PS are
+//!   recognized by magic bytes and reported as
+//!   [`SniffedFormat::Video`] carrying a [`VideoContainer`]. Video
+//!   uploads get their own, larger size budget
+//!   ([`ResourceLimits::max_video_upload_bytes`]); detection stays
+//!   byte-level and never trusts filename extensions — EBML's
+//!   Matroska/WebM ambiguity is resolved by DocType evidence when
+//!   visible, otherwise conservatively reported as Matroska (see
+//!   [`sniff_format`]).
 
 mod engine;
 mod error;
@@ -50,7 +60,7 @@ pub use engine::SecurityEngine;
 pub use error::{SecurityError, SecurityResult};
 pub use filename::sanitize_filename;
 pub use limits::ResourceLimits;
-pub use sniff::{SniffedFormat, sniff_format};
+pub use sniff::{SniffedFormat, VideoContainer, sniff_format};
 pub use validate::{ValidationReport, validate_pdf, validate_upload};
 
 #[cfg(test)]
