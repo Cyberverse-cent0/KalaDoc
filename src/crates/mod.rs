@@ -19,6 +19,8 @@ pub mod pipeline_engine;
 pub mod scheduler;
 #[path = "security-engine/src/lib.rs"]
 pub mod security_engine;
+#[path = "video-engine/src/lib.rs"]
+pub mod video_engine;
 pub mod shared_public;
 pub mod storage;
 #[path = "conversion-engine/src/lib.rs"]

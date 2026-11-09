@@ -16,6 +16,10 @@
 //! | `document.index`        | `{document_id, artifact_id?}`                                 | Extract searchable text into an `index` metadata field (see [`DocumentIndexHandler`]) |
 //! | `thumbnail.generate`    | `{document_id, artifact_id?}`                                 | Extract an embedded PDF thumbnail image into storage (see [`ThumbnailGenerateHandler`]) |
 //! | `pdf.inspect`           | `{path, max_bytes?}`                                          | Validate + inspect a PDF under the storage root; writes `<path>.inspect.json` |
+//! | `video.probe`           | `{path, max_bytes?}`                                          | Probe a video under the storage root; writes `<path>.probe.json` |
+//! | `video.thumbnail`       | `{path, at_secs?, max_bytes?}`                                | Extract a PNG thumbnail frame; writes `<path>.thumb.png` |
+//! | `video.transcode`       | `{path, target_ext, max_bytes?}`                              | Transcode to `target_ext`; writes `<path>.<target_ext>` |
+//! | `video.trim`            | `{path, start_secs, end_secs?, reencode?, max_bytes?}`        | Trim a video segment; writes `<path>.trim<ext>` |
 //! | `storage.gc_staging`    | `{retention_secs?}`                                           | Delete abandoned entries under `<storage_root>/staging/` and `<storage_root>/.staging/` older than the retention window |
 //!
 //! `document.metadata_extract` / `document.index` / `thumbnail.generate`
@@ -69,6 +73,22 @@
 //! validation. The inspection report (`PdfInfo` as pretty JSON) is
 //! written atomically to `<root>/<path>.inspect.json` via a `*.tmp`
 //! sibling + rename.
+//!
+//! `video.*` payload details: `path` is a **relative** path under the
+//! configured storage root, confined exactly like `pdf.inspect`.
+//! `max_bytes` defaults to 4 GiB and is checked against the on-disk
+//! size before the file is read (and again after, as a TOCTOU guard);
+//! it is also passed to the engine as `EngineLimits::max_input_bytes`.
+//! `video.probe` writes the `VideoInfo` report as pretty JSON to
+//! `<root>/<path>.probe.json`; `video.thumbnail` writes PNG bytes to
+//! `<path>.thumb.png` (`at_secs` selects the frame, `None` = default);
+//! `video.transcode` writes `<path>.<target_ext>` where `target_ext`
+//! is a bare alphanumeric extension and is rejected if the output
+//! name would equal the input; `video.trim` writes
+//! `<path>.trim.<input-ext>` (`end_secs`/`reencode` optional). All
+//! outputs are written atomically via `*.tmp` + rename and all four
+//! kinds are idempotent — deterministic output names make retries
+//! safe.
 //!
 //! `storage.gc_staging` payload details: `retention_secs` defaults to
 //! 86 400 (24 h). Every entry directly under `staging/` **and** the
@@ -130,8 +150,23 @@ pub const DOCUMENT_INDEX_KIND: &str = "document.index";
 /// Job kind for [`ThumbnailGenerateHandler`].
 pub const THUMBNAIL_GENERATE_KIND: &str = "thumbnail.generate";
 
+/// Job kind for [`VideoProbeHandler`].
+pub const VIDEO_PROBE_KIND: &str = "video.probe";
+
+/// Job kind for [`VideoThumbnailHandler`].
+pub const VIDEO_THUMBNAIL_KIND: &str = "video.thumbnail";
+
+/// Job kind for [`VideoTranscodeHandler`].
+pub const VIDEO_TRANSCODE_KIND: &str = "video.transcode";
+
+/// Job kind for [`VideoTrimHandler`].
+pub const VIDEO_TRIM_KIND: &str = "video.trim";
+
 /// Default `max_bytes` for `pdf.inspect` (100 MiB).
 const DEFAULT_INSPECT_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Default `max_bytes` for the `video.*` handlers (4 GiB).
+const DEFAULT_VIDEO_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Hard cap on artifact bytes read for `document.metadata_extract`,
 /// `document.index`, and `thumbnail.generate`. Larger objects are
@@ -168,8 +203,9 @@ const DEFAULT_GC_RETENTION_SECS: u64 = 86_400;
 /// config that fails to load logs a warning and skips that handler so
 /// the engine can still start (its jobs will fail with `NoHandler`).
 /// Config-dependent handlers (`document.ingest`) resolve storage at
-/// construction; `pdf.inspect` / `storage.gc_staging` resolve it per
-/// job so a fixed storage root can be picked up without a restart.
+/// construction; `pdf.inspect` / `video.*` / `storage.gc_staging`
+/// resolve it per job so a fixed storage root can be picked up
+/// without a restart.
 pub fn register_builtin(engine: &mut JobEngine) {
     match DocumentIngestHandler::from_app_config() {
         Ok(handler) => engine.register(DOCUMENT_INGEST_KIND, Arc::new(handler)),
@@ -180,6 +216,10 @@ pub fn register_builtin(engine: &mut JobEngine) {
     }
     engine.register(SYSTEM_PING_KIND, Arc::new(SystemPingHandler));
     engine.register(PDF_INSPECT_KIND, Arc::new(PdfInspectHandler));
+    engine.register(VIDEO_PROBE_KIND, Arc::new(VideoProbeHandler));
+    engine.register(VIDEO_THUMBNAIL_KIND, Arc::new(VideoThumbnailHandler));
+    engine.register(VIDEO_TRANSCODE_KIND, Arc::new(VideoTranscodeHandler));
+    engine.register(VIDEO_TRIM_KIND, Arc::new(VideoTrimHandler));
     engine.register(STORAGE_GC_STAGING_KIND, Arc::new(StorageGcStagingHandler));
     match DocumentMetadataExtractHandler::from_app_config() {
         Ok(handler) => engine.register(
@@ -591,6 +631,318 @@ fn inspect_pdf_at(root: &Path, rel_path: &str, max_bytes: u64) -> Result<(), Job
 }
 
 // ---------------------------------------------------------------------------
+// video.probe / video.thumbnail / video.transcode / video.trim
+// ---------------------------------------------------------------------------
+//
+// ffmpeg-backed media operations over files stored under the storage
+// root. All four kinds share the `pdf.inspect` confinement model:
+// `path` is relative to the storage root, size is checked before
+// reading, and outputs are deterministic sibling files written
+// atomically (`*.tmp` + rename) so retries are idempotent.
+
+/// `video.probe` — probes a video file and writes the `VideoInfo`
+/// report next to it as pretty JSON.
+struct VideoProbeHandler;
+
+/// `video.thumbnail` — extracts a PNG thumbnail frame from a video.
+struct VideoThumbnailHandler;
+
+/// `video.transcode` — transcodes a video to `target_ext`.
+struct VideoTranscodeHandler;
+
+/// `video.trim` — cuts a video to `[start_secs, end_secs)`.
+struct VideoTrimHandler;
+
+/// Shared `path` + `max_bytes` fields for the `video.*` payloads.
+#[derive(Debug, Deserialize)]
+struct VideoPathPayload {
+    /// Path relative to the storage root. Must not be absolute and
+    /// must not contain `..` components.
+    path: String,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.thumbnail` payload.
+#[derive(Debug, Deserialize)]
+struct VideoThumbnailPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Timestamp (seconds) of the frame to thumbnail. `None` = engine
+    /// default (typically the first frame).
+    #[serde(default)]
+    at_secs: Option<f64>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.transcode` payload.
+#[derive(Debug, Deserialize)]
+struct VideoTranscodePayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Bare output extension (e.g. `"webm"`, `"mp4"`). Must be
+    /// alphanumeric; the output is written to `<path>.<target_ext>`.
+    target_ext: String,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.trim` payload.
+#[derive(Debug, Deserialize)]
+struct VideoTrimPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Start of the kept segment, in seconds.
+    start_secs: f64,
+    /// End of the kept segment, in seconds. `None` = to the end.
+    #[serde(default)]
+    end_secs: Option<f64>,
+    /// Whether to re-encode (frame-accurate) instead of stream-copy.
+    #[serde(default)]
+    reencode: bool,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+fn default_video_max_bytes() -> u64 {
+    DEFAULT_VIDEO_MAX_BYTES
+}
+
+impl JobHandler for VideoProbeHandler {
+    fn handle<'a>(
+        &'a self,
+        _ctx: &'a JobContext,
+        job: &'a Job,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let payload: VideoPathPayload = serde_json::from_value(job.payload.clone())?;
+            let root = storage_root()?;
+            probe_video_at(&root, &payload.path, payload.max_bytes)
+        })
+    }
+}
+
+impl JobHandler for VideoThumbnailHandler {
+    fn handle<'a>(
+        &'a self,
+        _ctx: &'a JobContext,
+        job: &'a Job,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let payload: VideoThumbnailPayload = serde_json::from_value(job.payload.clone())?;
+            let root = storage_root()?;
+            thumbnail_video_at(&root, &payload)
+        })
+    }
+}
+
+impl JobHandler for VideoTranscodeHandler {
+    fn handle<'a>(
+        &'a self,
+        _ctx: &'a JobContext,
+        job: &'a Job,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let payload: VideoTranscodePayload = serde_json::from_value(job.payload.clone())?;
+            let root = storage_root()?;
+            transcode_video_at(&root, &payload)
+        })
+    }
+}
+
+impl JobHandler for VideoTrimHandler {
+    fn handle<'a>(
+        &'a self,
+        _ctx: &'a JobContext,
+        job: &'a Job,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JobError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let payload: VideoTrimPayload = serde_json::from_value(job.payload.clone())?;
+            let root = storage_root()?;
+            trim_video_at(&root, &payload)
+        })
+    }
+}
+
+/// [`EngineLimits`] handed to video-engine calls: the caller's byte
+/// cap as `max_input_bytes`, everything else left to engine defaults.
+fn video_limits(max_bytes: u64) -> crate::crates::core::engine::EngineLimits {
+    crate::crates::core::engine::EngineLimits {
+        max_input_bytes: Some(max_bytes),
+        ..Default::default()
+    }
+}
+
+/// Maps a video-engine failure into a retryable job failure.
+fn video_err(context: &str, e: crate::crates::video_engine::VideoError) -> JobError {
+    JobError::Failed(format!("{context}: {e}"))
+}
+
+/// Confines `rel_path` under `root`, checks the file size against
+/// `max_bytes` **before** reading (then again after, as a TOCTOU
+/// guard), and returns the resolved path plus the file bytes.
+fn read_video_input(
+    root: &Path,
+    rel_path: &str,
+    max_bytes: u64,
+) -> Result<(PathBuf, Vec<u8>), JobError> {
+    let file = resolve_under_root(root, rel_path)?;
+    let meta = std::fs::metadata(&file)
+        .map_err(|e| JobError::Failed(format!("cannot stat {}: {e}", file.display())))?;
+    if !meta.is_file() {
+        return Err(JobError::Failed(format!(
+            "payload.path is not a regular file: {rel_path:?}"
+        )));
+    }
+    if meta.len() > max_bytes {
+        return Err(JobError::Failed(format!(
+            "file {} is {} bytes, exceeding max_bytes {max_bytes}",
+            rel_path,
+            meta.len()
+        )));
+    }
+    let data = std::fs::read(&file)
+        .map_err(|e| JobError::Failed(format!("cannot read {}: {e}", file.display())))?;
+    if data.len() as u64 > max_bytes {
+        return Err(JobError::Failed(format!(
+            "file {} grew past max_bytes {max_bytes} while reading",
+            rel_path
+        )));
+    }
+    Ok((file, data))
+}
+
+/// Appends `suffix` to a path's file name (operating on the whole
+/// path string, like the `.inspect.json` report naming).
+fn path_with_suffix(file: &Path, suffix: &str) -> PathBuf {
+    let mut os = file.as_os_str().to_os_string();
+    os.push(suffix);
+    PathBuf::from(os)
+}
+
+/// Writes `bytes` to `out` atomically: a `*.tmp` sibling is written
+/// first, then renamed over `out`, so a crash mid-write can't leave a
+/// truncated output that looks authoritative.
+fn write_output_atomic(out: &Path, bytes: &[u8]) -> Result<(), JobError> {
+    let mut tmp_os = out.as_os_str().to_os_string();
+    tmp_os.push(".tmp");
+    let tmp = PathBuf::from(tmp_os);
+    if let Some(parent) = tmp.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| JobError::Failed(format!("cannot create {}: {e}", parent.display())))?;
+    }
+    std::fs::write(&tmp, bytes)
+        .map_err(|e| JobError::Failed(format!("cannot write {}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, out).map_err(|e| {
+        JobError::Failed(format!(
+            "cannot rename {} -> {}: {e}",
+            tmp.display(),
+            out.display()
+        ))
+    })?;
+    Ok(())
+}
+
+/// Validates `target_ext` as a bare output extension: alphanumeric
+/// only, no leading dot required, case-normalized to lowercase.
+fn sanitize_target_ext(ext: &str) -> Result<String, JobError> {
+    let cleaned = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+    let ok = !cleaned.is_empty()
+        && cleaned.len() <= 16
+        && cleaned.chars().all(|c| c.is_ascii_alphanumeric());
+    if !ok {
+        return Err(JobError::Failed(format!(
+            "payload.target_ext is not a safe extension: {ext:?}"
+        )));
+    }
+    Ok(cleaned)
+}
+
+/// `video.probe` implementation: probe `rel_path` under `root` and
+/// write the pretty-JSON `VideoInfo` report to
+/// `<root>/<rel_path>.probe.json`.
+fn probe_video_at(root: &Path, rel_path: &str, max_bytes: u64) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, rel_path, max_bytes)?;
+    let info = crate::crates::video_engine::VideoEngine::new()
+        .probe(&data)
+        .map_err(|e| video_err(&format!("video probe failed for {rel_path:?}"), e))?;
+    let json = serde_json::to_string_pretty(&info)?;
+    write_output_atomic(&path_with_suffix(&file, ".probe.json"), json.as_bytes())
+}
+
+/// `video.thumbnail` implementation: extract a PNG frame from
+/// `rel_path` and write it to `<root>/<rel_path>.thumb.png`.
+fn thumbnail_video_at(root: &Path, payload: &VideoThumbnailPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let png = crate::crates::video_engine::VideoEngine::new()
+        .thumbnail(&data, payload.at_secs, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(&format!("video thumbnail failed for {:?}", payload.path), e)
+        })?;
+    write_output_atomic(&path_with_suffix(&file, ".thumb.png"), &png)
+}
+
+/// `video.transcode` implementation: transcode `rel_path` to
+/// `target_ext` and write the result to `<root>/<rel_path>.<ext>`.
+/// Fails rather than overwrite the input if the names collide.
+fn transcode_video_at(root: &Path, payload: &VideoTranscodePayload) -> Result<(), JobError> {
+    let ext = sanitize_target_ext(&payload.target_ext)?;
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let out = path_with_suffix(&file, &format!(".{ext}"));
+    if out == file {
+        return Err(JobError::Failed(format!(
+            "video.transcode output would overwrite the input: {:?}",
+            payload.path
+        )));
+    }
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .transcode(&data, &ext, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(&format!("video transcode failed for {:?}", payload.path), e)
+        })?;
+    write_output_atomic(&out, &bytes)
+}
+
+/// `video.trim` implementation: cut `rel_path` to
+/// `[start_secs, end_secs)` and write the result to
+/// `<root>/<rel_path>.trim.<input-ext>` (`.trim` alone when the input
+/// has no extension).
+fn trim_video_at(root: &Path, payload: &VideoTrimPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    let out = path_with_suffix(&file, &format!(".trim{ext}"));
+    if out == file {
+        return Err(JobError::Failed(format!(
+            "video.trim output would overwrite the input: {:?}",
+            payload.path
+        )));
+    }
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .trim(
+            &data,
+            payload.start_secs,
+            payload.end_secs,
+            payload.reencode,
+            &video_limits(payload.max_bytes),
+        )
+        .map_err(|e| video_err(&format!("video trim failed for {:?}", payload.path), e))?;
+    write_output_atomic(&out, &bytes)
+}
+
+// ---------------------------------------------------------------------------
 // storage.gc_staging
 // ---------------------------------------------------------------------------
 
@@ -953,6 +1305,7 @@ fn sniffed_name(format: SniffedFormat) -> &'static str {
         SniffedFormat::Jpeg => "jpeg",
         SniffedFormat::Zip => "zip",
         SniffedFormat::Gif => "gif",
+        SniffedFormat::Video { .. } => "video",
         SniffedFormat::Unknown => "unknown",
     }
 }
@@ -965,6 +1318,16 @@ fn mime_for_format(format: SniffedFormat) -> Option<&'static str> {
         SniffedFormat::Jpeg => Some("image/jpeg"),
         SniffedFormat::Zip => Some("application/zip"),
         SniffedFormat::Gif => Some("image/gif"),
+        // `VideoContainer` lives in security_engine's private `sniff`
+        // module, so dispatch on its public extension accessor.
+        SniffedFormat::Video { container } => Some(match container.sniffed_extension() {
+            ".mp4" => "video/mp4",
+            ".mkv" => "video/x-matroska",
+            ".webm" => "video/webm",
+            ".avi" => "video/x-msvideo",
+            ".ts" => "video/mp2t",
+            _ => "video/mpeg",
+        }),
         SniffedFormat::Unknown => None,
     }
 }
@@ -1978,6 +2341,110 @@ pub async fn enqueue_thumbnail(
     Ok(job)
 }
 
+// ---------------------------------------------------------------------------
+// video.* enqueue helpers
+// ---------------------------------------------------------------------------
+//
+// Unlike the document handlers there is no document-level status
+// tracking for video jobs — they operate on storage-root paths, not
+// document rows — so these helpers just enqueue with the documented
+// payload contract.
+
+/// Enqueues a `video.probe` job. Payload: `{path, max_bytes?}` — see
+/// [`VideoProbeHandler`].
+pub async fn enqueue_video_probe(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    enqueue_video_job(pool, VIDEO_PROBE_KIND, video_path_payload(path, max_bytes, &[])).await
+}
+
+/// Enqueues a `video.thumbnail` job. Payload: `{path, at_secs?,
+/// max_bytes?}` — see [`VideoThumbnailHandler`].
+pub async fn enqueue_video_thumbnail(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    at_secs: Option<f64>,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    let mut extra = Vec::new();
+    if let Some(secs) = at_secs {
+        extra.push(("at_secs", json!(secs)));
+    }
+    enqueue_video_job(pool, VIDEO_THUMBNAIL_KIND, video_path_payload(path, max_bytes, &extra)).await
+}
+
+/// Enqueues a `video.transcode` job. Payload: `{path, target_ext,
+/// max_bytes?}` — see [`VideoTranscodeHandler`].
+pub async fn enqueue_video_transcode(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    target_ext: &str,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    let mut payload = video_path_payload(path, max_bytes, &[]);
+    payload["target_ext"] = json!(target_ext);
+    enqueue_video_job(pool, VIDEO_TRANSCODE_KIND, payload).await
+}
+
+/// Enqueues a `video.trim` job. Payload: `{path, start_secs,
+/// end_secs?, reencode?, max_bytes?}` — see [`VideoTrimHandler`].
+pub async fn enqueue_video_trim(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    start_secs: f64,
+    end_secs: Option<f64>,
+    reencode: bool,
+    max_bytes: Option<u64>,
+) -> Result<Job, JobError> {
+    let mut extra = vec![
+        ("start_secs", json!(start_secs)),
+        ("reencode", json!(reencode)),
+    ];
+    if let Some(end) = end_secs {
+        extra.push(("end_secs", json!(end)));
+    }
+    enqueue_video_job(pool, VIDEO_TRIM_KIND, video_path_payload(path, max_bytes, &extra)).await
+}
+
+/// Builds the shared `{path, max_bytes?}` portion of a `video.*`
+/// payload plus any operation-specific extra fields.
+fn video_path_payload(
+    path: &str,
+    max_bytes: Option<u64>,
+    extra: &[(&str, serde_json::Value)],
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({ "path": path });
+    if let Some(max) = max_bytes {
+        payload["max_bytes"] = json!(max);
+    }
+    for (key, value) in extra {
+        payload[*key] = value.clone();
+    }
+    payload
+}
+
+/// Enqueues a `video.*` job with the standard retry policy.
+async fn enqueue_video_job(
+    pool: &sqlx::SqlitePool,
+    kind: &str,
+    payload: serde_json::Value,
+) -> Result<Job, JobError> {
+    enqueue(
+        pool,
+        &NewJob {
+            kind: kind.to_string(),
+            payload,
+            priority: 0,
+            run_at: None,
+            max_attempts: None,
+        },
+        DEFAULT_MAX_ATTEMPTS,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2265,6 +2732,167 @@ mod tests {
                 "expected {bad:?} to be rejected"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // video.* handlers
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn video_payloads_parse_with_defaults() {
+        let p: VideoPathPayload =
+            serde_json::from_value(json!({"path": "media/clip.mp4"})).unwrap();
+        assert_eq!(p.path, "media/clip.mp4");
+        assert_eq!(p.max_bytes, DEFAULT_VIDEO_MAX_BYTES);
+
+        let p: VideoThumbnailPayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "at_secs": 2.5}),
+        )
+        .unwrap();
+        assert_eq!(p.at_secs, Some(2.5));
+        assert_eq!(p.max_bytes, DEFAULT_VIDEO_MAX_BYTES);
+
+        let p: VideoTranscodePayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "target_ext": "webm"}),
+        )
+        .unwrap();
+        assert_eq!(p.target_ext, "webm");
+
+        let p: VideoTrimPayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "start_secs": 1.0, "end_secs": 3.0, "reencode": true}),
+        )
+        .unwrap();
+        assert_eq!(p.start_secs, 1.0);
+        assert_eq!(p.end_secs, Some(3.0));
+        assert!(p.reencode);
+
+        // Required fields are enforced.
+        assert!(serde_json::from_value::<VideoTrimPayload>(
+            json!({"path": "clip.mp4"})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<VideoTranscodePayload>(
+            json!({"path": "clip.mp4"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn video_handlers_reject_path_escapes() {
+        let root = PathBuf::from("/storage");
+        for bad in ["", "../clip.mp4", "/abs/clip.mp4", "a/../../clip.mp4"] {
+            assert!(
+                probe_video_at(&root, bad, DEFAULT_VIDEO_MAX_BYTES).is_err(),
+                "probe should reject {bad:?}"
+            );
+            assert!(
+                thumbnail_video_at(
+                    &root,
+                    &VideoThumbnailPayload {
+                        path: bad.into(),
+                        at_secs: None,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "thumbnail should reject {bad:?}"
+            );
+            assert!(
+                transcode_video_at(
+                    &root,
+                    &VideoTranscodePayload {
+                        path: bad.into(),
+                        target_ext: "webm".into(),
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "transcode should reject {bad:?}"
+            );
+            assert!(
+                trim_video_at(
+                    &root,
+                    &VideoTrimPayload {
+                        path: bad.into(),
+                        start_secs: 0.0,
+                        end_secs: None,
+                        reencode: false,
+                        max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                    },
+                )
+                .is_err(),
+                "trim should reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn video_transcode_rejects_unsafe_target_ext() {
+        let root = PathBuf::from("/storage");
+        for bad in ["", "  ", "../x", "a/b", "a.b", "mp4;rm", "-"] {
+            let r = transcode_video_at(
+                &root,
+                &VideoTranscodePayload {
+                    path: "clip.mp4".into(),
+                    target_ext: bad.into(),
+                    max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+                },
+            );
+            // Unsafe ext fails at sanitize (before any file access);
+            // "-" is alphanumeric-safe? No — '-' is not alphanumeric.
+            assert!(r.is_err(), "target_ext {bad:?} should be rejected");
+        }
+        assert_eq!(sanitize_target_ext(" WebM ").unwrap(), "webm");
+        assert_eq!(sanitize_target_ext(".MP4").unwrap(), "mp4");
+    }
+
+    #[test]
+    fn video_probe_writes_report_when_ffmpeg_available() {
+        use std::process::Command;
+        // Skip when the ffmpeg toolchain isn't installed — same probe
+        // style other engine tests use.
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            return;
+        }
+        let root = temp_root();
+        let src = root.join("clip.mp4");
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=1:r=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ])
+            .arg(&src)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !generated || !src.is_file() {
+            std::fs::remove_dir_all(&root).ok();
+            return; // encoder unavailable (e.g. no libx264) — skip
+        }
+
+        probe_video_at(&root, "clip.mp4", DEFAULT_VIDEO_MAX_BYTES).unwrap();
+        let report = root.join("clip.mp4.probe.json");
+        assert!(report.is_file(), "probe report should be written");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+        assert!(parsed.is_object());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
