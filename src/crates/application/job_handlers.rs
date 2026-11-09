@@ -12,8 +12,54 @@
 //! |-------------------------|---------------------------------------------------------------|---------|
 //! | `system.ping`           | any (ignored)                                                 | Health check / queue smoke test; always succeeds |
 //! | `document.ingest`       | `{document_id, content_b64` or `content`, `file_name?`, `mime_type?}` | Write payload bytes into storage + register artifact (see [`DocumentIngestHandler`]) |
+//! | `document.metadata_extract` | `{document_id, artifact_id?}`                             | Sniff format + extract PDF metadata into document metadata (see [`DocumentMetadataExtractHandler`]) |
+//! | `document.index`        | `{document_id, artifact_id?}`                                 | Extract searchable text into an `index` metadata field (see [`DocumentIndexHandler`]) |
+//! | `thumbnail.generate`    | `{document_id, artifact_id?}`                                 | Extract an embedded PDF thumbnail image into storage (see [`ThumbnailGenerateHandler`]) |
 //! | `pdf.inspect`           | `{path, max_bytes?}`                                          | Validate + inspect a PDF under the storage root; writes `<path>.inspect.json` |
 //! | `storage.gc_staging`    | `{retention_secs?}`                                           | Delete abandoned entries under `<storage_root>/staging/` older than the retention window |
+//!
+//! `document.metadata_extract` / `document.index` / `thumbnail.generate`
+//! payload details: `document_id` is required; `artifact_id` is
+//! optional and selects a specific artifact — when omitted the
+//! **most recently created** artifact of the document is used
+//! (`list_artifacts` order, last entry). Artifact bytes are read
+//! through the streaming backend with a hard cap of
+//! [`MAX_PROCESSING_BYTES`] (64 MiB); larger objects are recorded as
+//! `skipped_too_large` rather than read into memory. All three
+//! handlers are idempotent: they overwrite deterministic metadata
+//! fields and storage object names, so job retries and crash-recovery
+//! replays are safe.
+//!
+//! # Processing status tracking
+//!
+//! These handlers report per-document progress through **document
+//! metadata custom fields** (queryable via
+//! `store::metadata::get_document_metadata`), backed by audit events:
+//!
+//! - `processing_status` — status of the *most recently run*
+//!   processing job: `queued` (set by the `enqueue_*` helpers,
+//!   best-effort), `running`, then a terminal value: `succeeded`,
+//!   `failed`, `unsupported`, `unavailable`, or `skipped_too_large`.
+//! - `{op}_status` — the same terminal vocabulary scoped to one
+//!   operation: `metadata_extract_status`, `index_status`,
+//!   `thumbnail_status`. This is the field to check for "did indexing
+//!   work on this document".
+//! - Audit events: [`DocumentAuditEventType::ProcessingStarted`] when
+//!   a handler begins, `ProcessingCompleted` on success,
+//!   `ProcessingFailed` only when the job exhausts `max_attempts`
+//!   (intermediate retries stay `running` — the job row in
+//!   `jobs_tbl` remains the authoritative retry state).
+//!
+//! The `jobs_tbl` row (`pending`/`running`/`succeeded`/`failed`) is
+//! the source of truth for *execution*; the metadata fields above are
+//! the source of truth for *document-level outcome* and survive job
+//! row cleanup.
+//!
+//! Use the [`enqueue_ingest`], [`enqueue_metadata_extract`],
+//! [`enqueue_index`], and [`enqueue_thumbnail`] helpers to produce
+//! jobs — they build the documented payload contracts and stamp
+//! `processing_status = "queued"` (best-effort) so producers never
+//! hand-craft JSON.
 //!
 //! `pdf.inspect` payload details: `path` is a **relative** path under
 //! the configured storage root (`[storage].root_dir` /
@@ -31,6 +77,7 @@
 //! `remove_file`. Entries whose metadata cannot be read are skipped;
 //! a missing `staging/` directory is a no-op success.
 
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -41,17 +88,26 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::config::AppConfig;
-use crate::crates::document_engine::artifact::{ChecksumAlgorithm, DocumentChecksum};
+use crate::crates::document_engine::artifact::{
+    ChecksumAlgorithm, DocumentArtifact, DocumentChecksum,
+};
 use crate::crates::document_engine::audit::DocumentAuditEventType;
 use crate::crates::document_engine::ids::DocumentId;
+use crate::crates::document_engine::metadata::DocumentMetadata;
 use crate::crates::document_engine::store::artifacts::{
-    NewArtifact, list_artifacts, upload_artifact,
+    NewArtifact, download_artifact, list_artifacts, upload_artifact,
 };
 use crate::crates::document_engine::store::documents::get_document;
 use crate::crates::document_engine::store::history::record_event;
-use crate::crates::job_engine::{Job, JobContext, JobEngine, JobError, JobHandler};
+use crate::crates::document_engine::store::metadata::{
+    get_document_metadata, upsert_document_metadata,
+};
+use crate::crates::document_engine::store::StoreError;
+use crate::crates::job_engine::{Job, JobContext, JobEngine, JobError, JobHandler, NewJob, enqueue};
+use crate::crates::security_engine::{SniffedFormat, sniff_format};
 use crate::crates::storage::local::config::StorageConfig;
-use crate::crates::storage::local::debug_when_full::FaultInjectingFs;
+use crate::crates::storage::local::debug_when_full::{FaultInjectingFs, StorageError};
+use crate::crates::storage::stream::{StreamUpload, StreamingBackend};
 
 /// Job kind for [`DocumentIngestHandler`].
 pub const DOCUMENT_INGEST_KIND: &str = "document.ingest";
@@ -65,8 +121,43 @@ pub const PDF_INSPECT_KIND: &str = "pdf.inspect";
 /// Job kind for [`StorageGcStagingHandler`].
 pub const STORAGE_GC_STAGING_KIND: &str = "storage.gc_staging";
 
+/// Job kind for [`DocumentMetadataExtractHandler`].
+pub const DOCUMENT_METADATA_EXTRACT_KIND: &str = "document.metadata_extract";
+
+/// Job kind for [`DocumentIndexHandler`].
+pub const DOCUMENT_INDEX_KIND: &str = "document.index";
+
+/// Job kind for [`ThumbnailGenerateHandler`].
+pub const THUMBNAIL_GENERATE_KIND: &str = "thumbnail.generate";
+
 /// Default `max_bytes` for `pdf.inspect` (100 MiB).
 const DEFAULT_INSPECT_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Hard cap on artifact bytes read for `document.metadata_extract`,
+/// `document.index`, and `thumbnail.generate`. Larger objects are
+/// recorded as `skipped_too_large` instead of being buffered.
+const MAX_PROCESSING_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Bytes read first when sniffing an artifact's format.
+const SNIFF_BYTES: usize = 4096;
+
+/// Maximum characters of extracted text kept in the `index` metadata
+/// field's `excerpt` member (the full-text hash/counts are always
+/// recorded, so the excerpt is a preview, not the index itself).
+const INDEX_EXCERPT_CHARS: usize = 50_000;
+
+/// Chunk size for streaming uploads (`document.ingest`, thumbnails).
+const UPLOAD_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Maximum decoded thumbnail raster (width × height pixels) — 16 MP
+/// bounds decoded RGB samples at ~48 MiB.
+const MAX_THUMBNAIL_PIXELS: u64 = 16_000_000;
+
+/// Maximum decoded thumbnail payload accepted from a PDF image stream.
+const MAX_THUMBNAIL_DECODED_BYTES: usize = 64 * 1024 * 1024;
+
+/// Default `max_attempts` used by the `enqueue_*` helpers.
+const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 
 /// Default `retention_secs` for `storage.gc_staging` (24 h).
 const DEFAULT_GC_RETENTION_SECS: u64 = 86_400;
@@ -90,6 +181,30 @@ pub fn register_builtin(engine: &mut JobEngine) {
     engine.register(SYSTEM_PING_KIND, Arc::new(SystemPingHandler));
     engine.register(PDF_INSPECT_KIND, Arc::new(PdfInspectHandler));
     engine.register(STORAGE_GC_STAGING_KIND, Arc::new(StorageGcStagingHandler));
+    match DocumentMetadataExtractHandler::from_app_config() {
+        Ok(handler) => engine.register(
+            DOCUMENT_METADATA_EXTRACT_KIND,
+            Arc::new(handler),
+        ),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "skipping document.metadata_extract handler: storage config unavailable"
+        ),
+    }
+    match DocumentIndexHandler::from_app_config() {
+        Ok(handler) => engine.register(DOCUMENT_INDEX_KIND, Arc::new(handler)),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "skipping document.index handler: storage config unavailable"
+        ),
+    }
+    match ThumbnailGenerateHandler::from_app_config() {
+        Ok(handler) => engine.register(THUMBNAIL_GENERATE_KIND, Arc::new(handler)),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "skipping thumbnail.generate handler: storage config unavailable"
+        ),
+    }
 }
 
 /// `document.ingest` — writes job payload bytes into the configured
@@ -166,14 +281,28 @@ impl JobHandler for DocumentIngestHandler {
                 .any(|a| a.storage_uri == storage_uri);
 
             if !already_ingested {
+                // Stream the payload through the staging/commit path so
+                // the SHA-256 and byte count come from the `CommitReceipt`
+                // and a crash mid-upload never publishes a partial object.
+                // The payload is already fully in memory (JSON), so we
+                // chunk it rather than changing the wire contract.
                 let mut fs = FaultInjectingFs::new(self.storage.clone())
                     .map_err(|e| JobError::Failed(format!("storage init failed: {e}")))?;
-                fs.write(&object_name, &payload.bytes)
-                    .map_err(|e| JobError::Failed(format!("storage write failed: {e}")))?;
+                let mut upload = fs
+                    .begin_upload(&object_name)
+                    .map_err(|e| JobError::Failed(format!("storage upload failed: {e}")))?;
+                for chunk in payload.bytes.chunks(UPLOAD_CHUNK_BYTES) {
+                    upload
+                        .write_chunk(chunk)
+                        .map_err(|e| JobError::Failed(format!("storage upload failed: {e}")))?;
+                }
+                let receipt = upload
+                    .commit()
+                    .map_err(|e| JobError::Failed(format!("storage commit failed: {e}")))?;
 
                 let checksum = DocumentChecksum {
                     algorithm: ChecksumAlgorithm::Sha256,
-                    value: hex_lower(&Sha256::digest(&payload.bytes)),
+                    value: receipt.sha256.clone(),
                 };
                 let artifact = upload_artifact(
                     &ctx.pool,
@@ -183,7 +312,7 @@ impl JobHandler for DocumentIngestHandler {
                         storage_uri: storage_uri.clone(),
                         file_name: payload.file_name.clone(),
                         mime_type: payload.mime_type.clone(),
-                        size_bytes: payload.bytes.len() as u64,
+                        size_bytes: receipt.bytes,
                         checksum: Some(checksum),
                     },
                 )

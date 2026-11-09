@@ -139,7 +139,13 @@ pub struct JobsSection {
     pub default_max_attempts: u32,
     /// Base seconds for exponential retry backoff.
     pub backoff_base_secs: u64,
-    /// A `running` job older than this is reclaimed as `pending`.
+    /// A `running` job older than this is assumed abandoned (crashed
+    /// worker) and returned to `pending` by the engine's reaper. This
+    /// is the crash-recovery timeout: at engine startup
+    /// [`JobEngine::recover`](crate::crates::job_engine::JobEngine::recover)
+    /// requeues all `running` rows immediately, and `reap_stale` then
+    /// reclaims any job that stays `running` past this age (e.g. a job
+    /// orphaned while this engine was down, or claimed by a dead peer).
     pub stale_after_secs: u64,
 }
 
@@ -297,6 +303,14 @@ impl AppConfig {
                 "must be >= 1 (0 would leave every job pending forever)",
             ));
         }
+        // 0 would make every `running` job instantly reap-eligible,
+        // requeueing live work on every poll.
+        if self.jobs.stale_after_secs == 0 {
+            return Err(bad(
+                "jobs.stale_after_secs",
+                "must be >= 1 second (0 would reap every running job immediately)",
+            ));
+        }
         // Lenient loads leave secrets empty; only validate when set.
         if !self.secret_key.is_empty() {
             validate_secret_key(&self.secret_key)?;
@@ -324,6 +338,7 @@ impl AppConfig {
     /// | `JOB_MAX_ATTEMPTS`              | `jobs`             | `default_max_attempts`    |
     /// | `JOB_BACKOFF_BASE_SECS`         | `jobs`             | `backoff_base_secs`       |
     /// | `JOB_STALE_AFTER_SECS`          | `jobs`             | `stale_after_secs`        |
+    /// | `JOB_RECOVERY_TIMEOUT_SECS`      | `jobs`             | `stale_after_secs` (alias; applied after `JOB_STALE_AFTER_SECS`, so it wins when both are set) |
     /// | `APP_SECRET_KEY`                | secret             | `secret_key` (required)   |
     /// | `APP_DB_USER`                   | secret             | `db_user` (required)      |
     /// | `APP_DB_PASSWORD`               | secret             | `db_password` (required)  |
@@ -375,6 +390,11 @@ impl AppConfig {
             self.jobs.backoff_base_secs = v;
         }
         if let Some(v) = parse_env::<u64>("JOB_STALE_AFTER_SECS")? {
+            self.jobs.stale_after_secs = v;
+        }
+        // Alias for the crash-recovery timeout; applied second so it
+        // takes precedence when both variables are set.
+        if let Some(v) = parse_env::<u64>("JOB_RECOVERY_TIMEOUT_SECS")? {
             self.jobs.stale_after_secs = v;
         }
 

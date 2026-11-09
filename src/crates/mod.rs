@@ -5,10 +5,16 @@ pub mod document_engine;
 #[path = "engine-registry/src/lib.rs"]
 pub mod engine_registry;
 pub mod job_engine;
+#[path = "image-engine/src/lib.rs"]
+pub mod image_engine;
 #[path = "observability/src/lib.rs"]
 pub mod observability;
 #[path = "pdf-engine/src/lib.rs"]
 pub mod pdf_engine;
+#[path = "pipeline-engine/src/lib.rs"]
+pub mod pipeline_engine;
+#[path = "scheduler/src/lib.rs"]
+pub mod scheduler;
 #[path = "security-engine/src/lib.rs"]
 pub mod security_engine;
 pub mod shared_public;

@@ -21,12 +21,15 @@ use crate::crates::document_engine::audit::{DocumentAuditEvent, DocumentAuditEve
 use crate::crates::document_engine::document::Document;
 use crate::crates::document_engine::ids::{DocumentId, FolderId};
 use crate::crates::document_engine::lifecycle::{DocumentAccessLevel, DocumentPermission};
+use crate::crates::document_engine::metadata::DocumentMetadata;
 use crate::crates::document_engine::organization::{DocumentTag, Folder, TagAssignment};
 use crate::crates::document_engine::store::artifacts;
 use crate::crates::document_engine::store::documents;
 use crate::crates::document_engine::store::folders;
 use crate::crates::document_engine::store::history;
+use crate::crates::document_engine::store::metadata;
 use crate::crates::document_engine::store::permissions;
+use crate::crates::document_engine::store::relationships;
 use crate::crates::document_engine::store::schema;
 use crate::crates::document_engine::store::tags;
 use crate::crates::document_engine::store::versions;
@@ -36,8 +39,12 @@ use super::error::ServiceError;
 
 // Re-export the store's input types so adapters can name them without
 // reaching into `document_engine::store` internals.
+pub use crate::crates::document_engine::relationship::{
+    DocumentRelationship, DocumentRelationshipType,
+};
 pub use crate::crates::document_engine::store::artifacts::NewArtifact;
 pub use crate::crates::document_engine::store::documents::{DocumentPatch, NewDocument};
+pub use crate::crates::document_engine::store::relationships::RelatedDocument;
 
 /// Application-facing document service.
 ///
@@ -392,6 +399,130 @@ impl DocumentService {
     }
 
     // ------------------------------------------------------------------
+    // Metadata
+    // ------------------------------------------------------------------
+
+    /// Inserts or fully replaces the metadata row for a document.
+    /// `keywords` and `custom_fields` persist as JSON; records a
+    /// `metadata_updated` audit event. Returns
+    /// [`ServiceError::Store`]`(StoreError::NotFound)` when the document
+    /// does not exist.
+    pub async fn upsert_document_metadata(
+        &self,
+        metadata: &DocumentMetadata,
+    ) -> Result<(), ServiceError> {
+        Ok(metadata::upsert_document_metadata(&self.pool, metadata).await?)
+    }
+
+    /// Fetches the stored metadata row for a document; `None` when the
+    /// document has no metadata yet.
+    pub async fn get_document_metadata(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Option<DocumentMetadata>, ServiceError> {
+        Ok(metadata::get_document_metadata(&self.pool, document_id).await?)
+    }
+
+    /// Sets (or overwrites) a single custom field, creating the
+    /// metadata row with defaults when none exists. `key` must be
+    /// non-empty. Returns the updated [`DocumentMetadata`].
+    pub async fn set_custom_field(
+        &self,
+        document_id: &DocumentId,
+        key: &str,
+        value: &Value,
+    ) -> Result<DocumentMetadata, ServiceError> {
+        Ok(
+            metadata::set_custom_field(&self.pool, document_id, key, value).await?,
+        )
+    }
+
+    /// Removes a single custom field. Returns `true` when a field was
+    /// actually removed, `false` when the key was absent (or no
+    /// metadata row exists).
+    pub async fn remove_custom_field(
+        &self,
+        document_id: &DocumentId,
+        key: &str,
+    ) -> Result<bool, ServiceError> {
+        Ok(metadata::remove_custom_field(&self.pool, document_id, key).await?)
+    }
+
+    /// Deletes the metadata row for a document; the document itself is
+    /// not touched. Returns `false` when no row existed.
+    pub async fn delete_document_metadata(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<bool, ServiceError> {
+        Ok(metadata::delete_document_metadata(&self.pool, document_id).await?)
+    }
+
+    // ------------------------------------------------------------------
+    // Relationships
+    // ------------------------------------------------------------------
+
+    /// Creates a directed relationship from `source_document_id` to
+    /// `target_document_id`. Both documents must exist, self-links and
+    /// exact duplicates are rejected. Records a
+    /// `relationship_created` audit event on the source document.
+    pub async fn create_relationship(
+        &self,
+        source_document_id: &DocumentId,
+        target_document_id: &DocumentId,
+        relationship_type: DocumentRelationshipType,
+        created_by: Option<&str>,
+    ) -> Result<DocumentRelationship, ServiceError> {
+        Ok(relationships::create_relationship(
+            &self.pool,
+            source_document_id,
+            target_document_id,
+            relationship_type,
+            created_by,
+        )
+        .await?)
+    }
+
+    /// Deletes a relationship by id. Returns `false` when it did not
+    /// exist.
+    pub async fn delete_relationship(&self, id: &str) -> Result<bool, ServiceError> {
+        Ok(relationships::delete_relationship(&self.pool, id).await?)
+    }
+
+    /// Lists relationships where the document is the source (outgoing
+    /// links), oldest first.
+    pub async fn list_outgoing_relationships(
+        &self,
+        source_document_id: &DocumentId,
+    ) -> Result<Vec<DocumentRelationship>, ServiceError> {
+        Ok(
+            relationships::list_outgoing_relationships(&self.pool, source_document_id)
+                .await?,
+        )
+    }
+
+    /// Lists relationships where the document is the target (incoming
+    /// links), oldest first.
+    pub async fn list_incoming_relationships(
+        &self,
+        target_document_id: &DocumentId,
+    ) -> Result<Vec<DocumentRelationship>, ServiceError> {
+        Ok(
+            relationships::list_incoming_relationships(&self.pool, target_document_id)
+                .await?,
+        )
+    }
+
+    /// Returns all documents related to `document_id` in both
+    /// directions, deduplicated by document id. Outgoing links are
+    /// listed before incoming ones.
+    pub async fn related_documents(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Vec<RelatedDocument>, ServiceError> {
+        Ok(relationships::related_documents(&self.pool, document_id).await?)
+    }
+
+    // ------------------------------------------------------------------
     // Audit history
     // ------------------------------------------------------------------
 
@@ -517,5 +648,117 @@ mod tests {
         // Deleting the folder moves the document back to root.
         let doc = svc.get_document(&doc.id).await.unwrap().unwrap();
         assert!(doc.folder_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn metadata_roundtrip_through_facade() {
+        let svc = DocumentService::init(DocumentService::test_pool().await)
+            .await
+            .unwrap();
+        let doc = svc.create_document(&new_doc("meta.pdf")).await.unwrap();
+
+        assert!(svc.get_document_metadata(&doc.id).await.unwrap().is_none());
+
+        let meta = DocumentMetadata {
+            document_id: doc.id.clone(),
+            title: Some("Annual Report".to_string()),
+            author: Some("Ada".to_string()),
+            subject: None,
+            language: Some("en".to_string()),
+            keywords: vec!["finance".to_string()],
+            custom_fields: serde_json::Map::new(),
+        };
+        svc.upsert_document_metadata(&meta).await.unwrap();
+        let fetched = svc.get_document_metadata(&doc.id).await.unwrap().unwrap();
+        assert_eq!(fetched, meta);
+
+        // Custom fields can be patched without a full upsert.
+        let updated = svc
+            .set_custom_field(&doc.id, "financial_year", &Value::from(2026))
+            .await
+            .unwrap();
+        assert_eq!(updated.custom_fields["financial_year"], Value::from(2026));
+
+        assert!(svc.remove_custom_field(&doc.id, "financial_year").await.unwrap());
+        assert!(!svc.remove_custom_field(&doc.id, "financial_year").await.unwrap());
+        let fetched = svc.get_document_metadata(&doc.id).await.unwrap().unwrap();
+        assert!(!fetched.custom_fields.contains_key("financial_year"));
+
+        assert!(svc.delete_document_metadata(&doc.id).await.unwrap());
+        assert!(!svc.delete_document_metadata(&doc.id).await.unwrap());
+        assert!(svc.get_document_metadata(&doc.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn metadata_requires_existing_document() {
+        let svc = DocumentService::init(DocumentService::test_pool().await)
+            .await
+            .unwrap();
+        let meta = DocumentMetadata {
+            document_id: DocumentId::new("doc-missing"),
+            title: None,
+            author: None,
+            subject: None,
+            language: None,
+            keywords: Vec::new(),
+            custom_fields: serde_json::Map::new(),
+        };
+        assert!(matches!(
+            svc.upsert_document_metadata(&meta).await,
+            Err(ServiceError::Store(
+                crate::crates::document_engine::store::StoreError::NotFound { .. }
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn relationships_through_facade() {
+        let svc = DocumentService::init(DocumentService::test_pool().await)
+            .await
+            .unwrap();
+        let a = svc.create_document(&new_doc("a.pdf")).await.unwrap();
+        let b = svc.create_document(&new_doc("b.pdf")).await.unwrap();
+
+        let rel = svc
+            .create_relationship(
+                &a.id,
+                &b.id,
+                DocumentRelationshipType::Attachment,
+                Some("user-1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rel.source_document_id, a.id);
+        assert_eq!(rel.target_document_id, b.id);
+        assert_eq!(rel.created_by.as_deref(), Some("user-1"));
+
+        // Exact duplicates and self-links are rejected by the store.
+        assert!(
+            svc.create_relationship(&a.id, &b.id, DocumentRelationshipType::Attachment, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            svc.create_relationship(&a.id, &a.id, DocumentRelationshipType::Related, None)
+                .await
+                .is_err()
+        );
+
+        let outgoing = svc.list_outgoing_relationships(&a.id).await.unwrap();
+        assert_eq!(outgoing.len(), 1);
+        let incoming = svc.list_incoming_relationships(&b.id).await.unwrap();
+        assert_eq!(incoming.len(), 1);
+        assert!(svc.list_incoming_relationships(&a.id).await.unwrap().is_empty());
+
+        // `related_documents` sees the link from the target's side.
+        let related = svc.related_documents(&b.id).await.unwrap();
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].document.id, a.id);
+        assert_eq!(related[0].relationship_type, DocumentRelationshipType::Attachment);
+        assert!(!related[0].outgoing);
+
+        assert!(svc.delete_relationship(&rel.id).await.unwrap());
+        assert!(!svc.delete_relationship(&rel.id).await.unwrap());
+        assert!(svc.list_outgoing_relationships(&a.id).await.unwrap().is_empty());
     }
 }
