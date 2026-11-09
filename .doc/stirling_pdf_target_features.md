@@ -8,6 +8,22 @@ archival by Applaicon and used as the feature-parity target for KalaDoc.
 > an implementation requirement — reliable document primitives come
 > first, then higher-level engines.
 
+## Scope for KalaDoc
+
+- **Frontend features are out of scope for now.** Anything that exists
+  only to serve a web/desktop UI — drag-and-drop page rearrangement,
+  custom branding, multi-language interface, admin consoles, SSO/OIDC/LDAP
+  portals — is deferred. Engine capabilities underneath them remain in
+  scope where they make sense as library/API operations.
+- **The backend is the absolute target.** All work targets the engine
+  crates (`pdf-engine`, `conversion-engine`, `image-engine`,
+  `pipeline-engine`, `job_engine`, `security-engine`, `document_engine`)
+  and the services above them.
+- **The backend API will be constructed.** The existing axum REST API is
+  the seed; the full Stirling-style endpoint surface (per-operation
+  process endpoints, batch jobs, pipeline execution, OpenAPI) is to be
+  built on top of the engines — see section 10.
+
 ## 1. Advanced PDF editing
 
 - [ ] Edit existing PDF text.
