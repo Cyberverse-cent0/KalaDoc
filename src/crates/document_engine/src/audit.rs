@@ -23,6 +23,13 @@ pub enum DocumentAuditEventType {
     MetadataUpdated,
     RelationshipCreated,
     RelationshipDeleted,
+    /// A document processing job (metadata extract, index, thumbnail,
+    /// pdf op, ...) began running.
+    ProcessingStarted,
+    /// A document processing job completed successfully.
+    ProcessingCompleted,
+    /// A document processing job failed permanently (retries exhausted).
+    ProcessingFailed,
     #[serde(other)]
     Other,
 }
