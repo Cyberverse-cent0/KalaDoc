@@ -1,0 +1,135 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (without leading v). Empty = Cargo.toml version."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build ${{ matrix.slug }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            slug: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            slug: linux-aarch64
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            slug: macos-x86_64
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            slug: macos-aarch64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            slug: windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            if [ -z "$VERSION" ]; then
+              VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+            fi
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} --bin kaladoc
+
+      - name: Package archives
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/kaladoc"
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          cargo run --release --bin kaladoc-release -- package \
+            --target ${{ matrix.slug }} \
+            --binary "$BIN" \
+            --version "${{ steps.ver.outputs.version }}" \
+            --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.slug }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag and version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            if [ -z "$VERSION" ]; then
+              VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+            fi
+            TAG="v$VERSION"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Aggregate checksums and manifest
+        shell: bash
+        run: |
+          cargo run --release --bin kaladoc-release -- aggregate \
+            --dir release-assets \
+            --version "${{ steps.ver.outputs.version }}"
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo run --release --bin kaladoc-release -- publish \
+            --tag "${{ steps.ver.outputs.tag }}" \
+            --dir release-assets
