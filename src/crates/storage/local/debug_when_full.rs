@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use super::config::{FaultInjectionConfig, FaultKind, StorageConfig};
 use crate::crates::storage::backend::StorageBackend;
+use crate::crates::storage::stream::StreamLimits;
 
 /// Result alias used across the storage engine.
 pub type StorageResult<T> = Result<T, StorageError>;
@@ -31,6 +32,11 @@ pub enum StorageError {
     QuotaExceeded { path: PathBuf, limit: u64 },
     /// Entry not found under the storage root.
     NotFound { path: PathBuf },
+    /// A streaming upload exceeded a byte limit: either the
+    /// per-object `max_object_bytes` cap or the per-`write_chunk`
+    /// `max_chunk_bytes` cap from [`StreamLimits`]. `max_bytes`
+    /// reports the limit that was exceeded.
+    TooLarge { path: PathBuf, max_bytes: u64 },
 }
 
 impl fmt::Display for StorageError {
@@ -53,6 +59,11 @@ impl fmt::Display for StorageError {
                 )
             }
             Self::NotFound { path } => write!(f, "not found: {}", path.display()),
+            Self::TooLarge { path, max_bytes } => write!(
+                f,
+                "upload exceeds byte limit ({max_bytes} bytes) for {}",
+                path.display()
+            ),
         }
     }
 }
@@ -76,7 +87,7 @@ impl From<StorageError> for io::Error {
 }
 
 /// Fault kinds eligible for each operation type.
-fn write_faults() -> &'static [FaultKind] {
+pub(crate) fn write_faults() -> &'static [FaultKind] {
     &[
         FaultKind::DiskFull,
         FaultKind::PermissionDenied,
@@ -86,7 +97,7 @@ fn write_faults() -> &'static [FaultKind] {
     ]
 }
 
-fn read_faults() -> &'static [FaultKind] {
+pub(crate) fn read_faults() -> &'static [FaultKind] {
     &[
         FaultKind::DiskFull,
         FaultKind::PermissionDenied,
@@ -95,7 +106,7 @@ fn read_faults() -> &'static [FaultKind] {
     ]
 }
 
-fn delete_faults() -> &'static [FaultKind] {
+pub(crate) fn delete_faults() -> &'static [FaultKind] {
     &[
         FaultKind::PermissionDenied,
         FaultKind::IoError,
@@ -138,7 +149,7 @@ impl FaultInjector {
             return Ok(());
         }
         self.op_count += 1;
-        if self.op_count % self.config.every_n_ops as u64 != 0 {
+        if !self.op_count.is_multiple_of(self.config.every_n_ops as u64) {
             return Ok(());
         }
 
@@ -193,6 +204,8 @@ pub struct FaultInjectingFs {
     used_bytes: u64,
     /// Mutating ops since the last full reconcile.
     ops_since_reconcile: u64,
+    /// Per-upload limits enforced by streaming writers.
+    stream_limits: StreamLimits,
 }
 
 /// Mutating ops between full `dir_size` reconciliations.
@@ -213,7 +226,36 @@ impl FaultInjectingFs {
             injector,
             used_bytes,
             ops_since_reconcile: 0,
+            stream_limits: StreamLimits::default(),
         })
+    }
+
+    /// Builder-style setter: override the per-upload streaming limits
+    /// (per-object cap and per-chunk cap) enforced by
+    /// [`crate::crates::storage::stream::StreamingBackend`].
+    pub fn with_stream_limits(mut self, limits: StreamLimits) -> Self {
+        self.stream_limits = limits;
+        self
+    }
+
+    /// The streaming limits this backend enforces on uploads.
+    pub fn stream_limits(&self) -> StreamLimits {
+        self.stream_limits
+    }
+
+    /// Storage root directory (for staging-path construction).
+    pub(crate) fn root_dir(&self) -> &Path {
+        &self.config.root_dir
+    }
+
+    /// Route a fault-injection check through this backend's injector.
+    pub(crate) fn inject(
+        &mut self,
+        candidates: &[FaultKind],
+        op: &'static str,
+        path: &Path,
+    ) -> StorageResult<()> {
+        self.injector.maybe_fail(candidates, op, path)
     }
 
     /// Bytes currently accounted under the storage root.
@@ -231,7 +273,7 @@ impl FaultInjectingFs {
     }
 
     /// Resolve `name` under the root, rejecting traversal outside it.
-    fn resolve(&self, name: &str) -> StorageResult<PathBuf> {
+    pub(crate) fn resolve(&self, name: &str) -> StorageResult<PathBuf> {
         let path = self.config.root_dir.join(name);
         // Normalize `.`/`..` components to catch escapes.
         let mut normalized = PathBuf::new();
@@ -312,7 +354,12 @@ impl FaultInjectingFs {
     /// O(1) quota check against the in-memory counter. `old_len` is the
     /// size of the file being replaced (0 for new files) so overwrites
     /// don't double-count.
-    fn check_quota(&self, old_len: u64, incoming: u64, path: &Path) -> StorageResult<()> {
+    pub(crate) fn check_quota(
+        &self,
+        old_len: u64,
+        incoming: u64,
+        path: &Path,
+    ) -> StorageResult<()> {
         let Some(limit) = self.config.max_size_bytes else {
             return Ok(());
         };
@@ -332,7 +379,7 @@ impl FaultInjectingFs {
     /// Adjusts the usage counter after a mutation (`old_len` bytes
     /// replaced by `new_len`). No-op when no quota is configured —
     /// nothing consumes `used_bytes` in that case.
-    fn track_bytes(&mut self, old_len: u64, new_len: u64) {
+    pub(crate) fn track_bytes(&mut self, old_len: u64, new_len: u64) {
         if self.config.max_size_bytes.is_none() {
             return;
         }
@@ -341,10 +388,10 @@ impl FaultInjectingFs {
             .saturating_sub(old_len)
             .saturating_add(new_len);
         self.ops_since_reconcile += 1;
-        if self.ops_since_reconcile >= RECONCILE_EVERY_OPS {
-            if let Err(e) = self.reconcile() {
-                tracing::warn!(error = %e, "storage quota reconcile failed; keeping last known usage");
-            }
+        if self.ops_since_reconcile >= RECONCILE_EVERY_OPS
+            && let Err(e) = self.reconcile()
+        {
+            tracing::warn!(error = %e, "storage quota reconcile failed; keeping last known usage");
         }
     }
 }
@@ -380,17 +427,15 @@ impl StorageBackend for FaultInjectingFs {
     }
 
     fn prepare(&mut self) -> StorageResult<()> {
-        std::fs::create_dir_all(&self.config.root_dir).map_err(|source| {
-            StorageError::Io {
-                path: self.config.root_dir.clone(),
-                source,
-            }
+        std::fs::create_dir_all(&self.config.root_dir).map_err(|source| StorageError::Io {
+            path: self.config.root_dir.clone(),
+            source,
         })
     }
 }
 
 /// Size in bytes of the file at `path`, or 0 when absent/not a file.
-fn file_len(path: &Path) -> u64 {
+pub(crate) fn file_len(path: &Path) -> u64 {
     std::fs::metadata(path)
         .ok()
         .filter(|m| m.is_file())

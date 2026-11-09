@@ -16,7 +16,7 @@ pub struct StorageConfig {
 
 /// Controls deterministic fault injection so disk-full, permission,
 /// and IO failures can be exercised without real hardware faults.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FaultInjectionConfig {
     pub enabled: bool,
     /// Inject a fault on every Nth storage operation (0 = never).
@@ -47,16 +47,6 @@ impl Default for StorageConfig {
             max_size_bytes: None,
             filesystem: None,
             fault_injection: FaultInjectionConfig::default(),
-        }
-    }
-}
-
-impl Default for FaultInjectionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            every_n_ops: 0,
-            allowed_kinds: Vec::new(),
         }
     }
 }
@@ -110,10 +100,10 @@ impl StorageConfig {
         if let Ok(bytes) = std::env::var("KALADOC_STORAGE_MAX_BYTES") {
             cfg.max_size_bytes = bytes.parse().ok();
         }
-        if let Ok(fs) = std::env::var("KALADOC_FS_TYPE") {
-            if !fs.trim().is_empty() {
-                cfg.filesystem = Some(fs.trim().to_lowercase());
-            }
+        if let Ok(fs) = std::env::var("KALADOC_FS_TYPE")
+            && !fs.trim().is_empty()
+        {
+            cfg.filesystem = Some(fs.trim().to_lowercase());
         }
         if let Ok(v) = std::env::var("KALADOC_FAULT_INJECTION") {
             cfg.fault_injection.enabled = matches!(v.as_str(), "1" | "true" | "yes");

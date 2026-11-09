@@ -42,7 +42,7 @@ use crate::crates::application::Organization::init_db::{DbConfig, SessionConfig}
 use crate::crates::storage::local::config::StorageConfig;
 
 /// Fully resolved application configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AppConfig {
     pub database: DatabaseSection,
     pub storage: StorageSection,
@@ -180,21 +180,6 @@ struct FileConfig {
     jobs: JobsSection,
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            database: DatabaseSection::default(),
-            storage: StorageSection::default(),
-            runtime: RuntimeSection::default(),
-            jobs: JobsSection::default(),
-            secret_key: String::new(),
-            db_user: String::new(),
-            db_password: String::new(),
-            config_path: None,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Loading
 // ---------------------------------------------------------------------------
@@ -267,10 +252,7 @@ impl AppConfig {
             return Err(bad("database.max_connections", "must be >= 1"));
         }
         if self.database.acquire_timeout_secs == 0 {
-            return Err(bad(
-                "database.acquire_timeout_secs",
-                "must be >= 1 second",
-            ));
+            return Err(bad("database.acquire_timeout_secs", "must be >= 1 second"));
         }
         if self.database.session.ttl_secs == 0 {
             return Err(bad("database.session.ttl_secs", "must be >= 1 second"));
@@ -282,21 +264,21 @@ impl AppConfig {
                 "must be >= 1 second",
             ));
         }
-        if let Some(max) = self.storage.max_size_bytes {
-            if max == 0 {
-                return Err(bad(
-                    "storage.max_size_bytes",
-                    "0 would reject every write; omit it for no quota",
-                ));
-            }
+        if let Some(max) = self.storage.max_size_bytes
+            && max == 0
+        {
+            return Err(bad(
+                "storage.max_size_bytes",
+                "0 would reject every write; omit it for no quota",
+            ));
         }
-        if let Some(fs) = &self.storage.filesystem {
-            if fs.is_empty() || fs.contains('/') || fs.contains('\\') {
-                return Err(bad(
-                    "storage.filesystem",
-                    "must be a filesystem name, not a path",
-                ));
-            }
+        if let Some(fs) = &self.storage.filesystem
+            && (fs.is_empty() || fs.contains('/') || fs.contains('\\'))
+        {
+            return Err(bad(
+                "storage.filesystem",
+                "must be a filesystem name, not a path",
+            ));
         }
         // Catch typos in log_level here instead of at first log emit.
         if tracing_subscriber::filter::EnvFilter::try_new(&self.runtime.log_level).is_err() {
@@ -314,6 +296,10 @@ impl AppConfig {
                 "jobs.default_max_attempts",
                 "must be >= 1 (0 would leave every job pending forever)",
             ));
+        }
+        // Lenient loads leave secrets empty; only validate when set.
+        if !self.secret_key.is_empty() {
+            validate_secret_key(&self.secret_key)?;
         }
         Ok(())
     }
@@ -481,6 +467,30 @@ fn config_file_path(override_path: Option<&Path>) -> Result<Option<PathBuf>, Con
 
     let default = PathBuf::from("kaladoc.toml");
     Ok(default.is_file().then_some(default))
+}
+
+/// Validates `APP_SECRET_KEY` when one is configured: 32–1024 chars of
+/// printable ASCII without whitespace. Short keys are rejected because
+/// the key is destined for token signing/HMAC — brute-forceable
+/// secrets defeat the purpose.
+fn validate_secret_key(key: &str) -> Result<(), ConfigError> {
+    let bad = |reason: &str| ConfigError::InvalidValue {
+        field: "secret_key (APP_SECRET_KEY)".to_string(),
+        reason: reason.to_string(),
+    };
+    if key.len() < 32 {
+        return Err(bad("must be at least 32 characters"));
+    }
+    if key.len() > 1024 {
+        return Err(bad("must be at most 1024 characters"));
+    }
+    if !key.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(bad("must contain only printable ASCII characters"));
+    }
+    if key.chars().any(char::is_whitespace) {
+        return Err(bad("must not contain whitespace"));
+    }
+    Ok(())
 }
 
 /// Parses an optional env var. Empty/unset → `None`; a set-but-invalid

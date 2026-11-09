@@ -343,10 +343,10 @@ pub fn is_installed(cmd: &str) -> bool {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    if let Ok(meta) = std::fs::metadata(&full) {
-                        if meta.permissions().mode() & 0o111 != 0 {
-                            return true;
-                        }
+                    if let Ok(meta) = std::fs::metadata(&full)
+                        && meta.permissions().mode() & 0o111 != 0
+                    {
+                        return true;
                     }
                 }
                 #[cfg(not(unix))]

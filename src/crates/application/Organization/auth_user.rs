@@ -177,29 +177,65 @@ fn user_from_row(row: SqliteRow) -> AuthUser {
 }
 
 fn validate_new_user(new: &NewUser) -> Result<(), AuthError> {
-    let bad = |msg: &str| Err(AuthError::Validation(msg.to_string()));
-
     if new.first_name.trim().is_empty() {
-        return bad("first_name must not be empty");
+        return Err(AuthError::Validation(
+            "first_name must not be empty".to_string(),
+        ));
     }
     if new.last_name.trim().is_empty() {
-        return bad("last_name must not be empty");
+        return Err(AuthError::Validation(
+            "last_name must not be empty".to_string(),
+        ));
     }
-    if new.user_name.len() < 3 || new.user_name.len() > 32 {
+    validate_user_name(&new.user_name)?;
+    validate_email(&new.email)?;
+    validate_password(&new.password)?;
+    Ok(())
+}
+
+/// User names: 3–32 chars of ASCII letters, digits, `_`, `-`, `.`.
+pub(crate) fn validate_user_name(name: &str) -> Result<(), AuthError> {
+    let bad = |msg: &str| Err(AuthError::Validation(msg.to_string()));
+    if name.len() < 3 || name.len() > 32 {
         return bad("user_name must be 3–32 characters");
     }
-    if !new
-        .user_name
+    if !name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
     {
         return bad("user_name may only contain letters, digits, '_', '-' and '.'");
     }
-    if !new.email.contains('@') || new.email.contains(' ') {
+    Ok(())
+}
+
+/// Email addresses: single `@` with non-empty local and domain parts,
+/// no whitespace, bounded length.
+pub(crate) fn validate_email(email: &str) -> Result<(), AuthError> {
+    let bad = |msg: &str| Err(AuthError::Validation(msg.to_string()));
+    if email.is_empty() || email.len() > 254 {
+        return bad("email must be 1–254 characters");
+    }
+    if email.chars().any(char::is_whitespace) {
+        return bad("email must not contain whitespace");
+    }
+    let Some((local, domain)) = email.rsplit_once('@') else {
+        return bad("email is not a valid address");
+    };
+    if local.is_empty() || domain.is_empty() || !domain.contains('.') {
         return bad("email is not a valid address");
     }
-    if new.password.len() < 8 {
+    Ok(())
+}
+
+/// Passwords: 8–1024 chars. Upper bound prevents absurd allocations
+/// being fed to Argon2.
+pub(crate) fn validate_password(password: &str) -> Result<(), AuthError> {
+    let bad = |msg: &str| Err(AuthError::Validation(msg.to_string()));
+    if password.len() < 8 {
         return bad("password must be at least 8 characters");
+    }
+    if password.len() > 1024 {
+        return bad("password must be at most 1024 characters");
     }
     Ok(())
 }
@@ -225,15 +261,15 @@ fn verify_password(hash: &str, password: &str) -> bool {
 /// on `user_name`/`email` become dedicated variants; everything else is
 /// passed through as [`AuthError::Db`].
 fn classify_insert_error(e: sqlx::Error, new: &NewUser) -> AuthError {
-    if let sqlx::Error::Database(db) = &e {
-        if db.is_unique_violation() {
-            let msg = e.to_string().to_lowercase();
-            if msg.contains("user_name") {
-                return AuthError::DuplicateUserName(new.user_name.clone());
-            }
-            if msg.contains("email") {
-                return AuthError::DuplicateEmail(new.email.clone());
-            }
+    if let sqlx::Error::Database(db) = &e
+        && db.is_unique_violation()
+    {
+        let msg = e.to_string().to_lowercase();
+        if msg.contains("user_name") {
+            return AuthError::DuplicateUserName(new.user_name.clone());
+        }
+        if msg.contains("email") {
+            return AuthError::DuplicateEmail(new.email.clone());
         }
     }
     AuthError::Db(e)

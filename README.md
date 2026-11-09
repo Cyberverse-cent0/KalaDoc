@@ -6,7 +6,22 @@ KalaDoc is a modular document platform designed to ingest, organize, store, and 
 
 Built with Rust, KalaDoc prioritizes reliability, performance, security, and extensibility. Its modular engine architecture provides a foundation for document management, storage, PDF processing, conversion, automation, and AI-assisted workflows.
 
+`APP_SECRET_KEY` must be at least 32 characters (see Validation rules).
+
 ---
+
+## Validation rules
+
+Inputs are validated before they reach storage or the database:
+
+- **User name** — 3–32 chars, ASCII letters/digits plus `_`, `-`, `.`
+- **Email** — 1–254 chars, no whitespace, `local@domain.tld` shape
+- **Password** — 8–1024 chars (hashed with Argon2id before storage)
+- **`APP_SECRET_KEY`** — when set: 32–1024 chars, printable ASCII, no whitespace
+- **Filenames/uploads** — `security_engine` sanitizes names, sniffs magic
+  bytes (never trusts extensions), and enforces size/page/output limits
+- **Job payloads** — handlers confine paths to the storage root and
+  reject absolute paths / `..` components
 
 ## Overview
 
@@ -108,6 +123,8 @@ cargo test
 
 ```bash
 cargo fmt --all
+
+`APP_SECRET_KEY` must be at least 32 characters (see Validation rules).
 ```
 
 ### Run Clippy

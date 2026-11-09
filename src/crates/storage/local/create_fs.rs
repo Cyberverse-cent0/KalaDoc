@@ -3,8 +3,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::crates::shared_public::platform::{Platform, platform};
 use super::config::StorageConfig;
+use crate::crates::shared_public::platform::{Platform, platform};
 
 /// A probed description of a target storage device/partition.
 ///
@@ -102,9 +102,8 @@ pub fn create_fs_storage(
     }
 
     let mount = probe_mount(&cdisk_path);
-    let (total_bytes, free_bytes) = probe_size(&cdisk_path).map_or((None, None), |(t, f)| {
-        (Some(t), Some(f))
-    });
+    let (total_bytes, free_bytes) =
+        probe_size(&cdisk_path).map_or((None, None), |(t, f)| (Some(t), Some(f)));
 
     Ok(StorageTarget {
         path: cdisk_path.clone(),
