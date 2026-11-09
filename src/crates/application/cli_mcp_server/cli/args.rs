@@ -54,6 +54,19 @@ pub enum Commands {
     /// cancel, retry, and recover interrupted work.
     #[command(subcommand)]
     Jobs(JobsArgs),
+
+    /// Discover and inspect the built-in processing engines
+    /// (convert, image, pdf, pipeline, security).
+    #[command(subcommand)]
+    Engine(EngineArgs),
+
+    /// Inspect, resize, and convert raster images.
+    #[command(subcommand)]
+    Image(ImageArgs),
+
+    /// List and run built-in processing pipelines.
+    #[command(subcommand)]
+    Pipeline(PipelineArgs),
 }
 
 #[derive(Subcommand)]
@@ -177,6 +190,76 @@ pub enum JobsArgs {
 
     /// Reclaim jobs left in `running` state by a crashed worker.
     Recover,
+}
+
+#[derive(Subcommand)]
+pub enum EngineArgs {
+    /// List registered engines with their advertised capabilities.
+    List,
+
+    /// Show detailed capabilities for one engine.
+    Capabilities {
+        /// Engine name (e.g. `convert`, `image`, `pdf`, `pipeline`,
+        /// `security`).
+        name: String,
+    },
+
+    /// Run health checks for every registered engine.
+    Health,
+}
+
+#[derive(Subcommand)]
+pub enum ImageArgs {
+    /// Print image metadata (format, dimensions, pixel count, size).
+    Inspect {
+        /// Path to the image file.
+        file: std::path::PathBuf,
+    },
+
+    /// Resize an image to fit within a bounding box, preserving
+    /// aspect ratio. The output keeps the input format.
+    Resize {
+        /// Path to the image file.
+        file: std::path::PathBuf,
+        /// Maximum output width in pixels.
+        #[arg(long)]
+        width: Option<u32>,
+        /// Maximum output height in pixels.
+        #[arg(long)]
+        height: Option<u32>,
+        /// Output path (default: `<stem>.resized.<ext>` next to the
+        /// input).
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
+
+    /// Convert an image to another format
+    /// (png, jpeg/jpg, gif, webp, bmp).
+    Convert {
+        /// Path to the image file.
+        file: std::path::PathBuf,
+        /// Target format: `png`, `jpeg`/`jpg`, `gif`, `webp`, or `bmp`.
+        target: String,
+        /// Output path (default: the input path with the target
+        /// extension).
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PipelineArgs {
+    /// List built-in pipeline definitions.
+    List,
+
+    /// Run a built-in pipeline against a file and print the step
+    /// reports.
+    Run {
+        /// Pipeline name (e.g. `pdf.intake`, `pdf.extract-text`).
+        name: String,
+        /// Path to the input file.
+        file: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]

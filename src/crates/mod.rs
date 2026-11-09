@@ -1,3 +1,5 @@
+#[path = "api/src/lib.rs"]
+pub mod api;
 pub mod application;
 pub mod core;
 #[path = "document_engine/src/lib.rs"]

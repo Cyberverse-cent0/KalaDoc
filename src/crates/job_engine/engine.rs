@@ -107,7 +107,7 @@ impl JobEngine {
         let err = result.err().map(|e| e.to_string());
         store::complete(
             &self.pool,
-            job.id,
+            &job,
             err.map_or(Ok(()), Err),
             self.config.backoff_base.as_secs(),
             now_unix(),
@@ -748,5 +748,138 @@ mod tests {
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
         let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
         assert_eq!(jobs[0].status, JobStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn recover_with_fresh_engine_runs_job_to_succeeded() {
+        // Issue #1 scenario: engine A claims a job then "crashes";
+        // a brand-new engine B starts, recovers the orphaned job,
+        // and runs it to completion.
+        let pool = test_pool().await;
+        let eng_a = engine(pool.clone());
+        let job = eng_a
+            .enqueue(&NewJob {
+                kind: "x".into(),
+                payload: json!({}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+        // Simulate crash after claim: running with a dead worker_id.
+        mark_running(&pool, job.id, Some(now_unix())).await;
+
+        // Engine B is a different worker_id; its recover() must pick
+        // up the orphan regardless of which worker claimed it.
+        let mut eng_b = engine(pool.clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        struct Spy {
+            calls: Arc<AtomicUsize>,
+        }
+        impl JobHandler for Spy {
+            fn handle<'a>(
+                &'a self,
+                _ctx: &'a JobContext,
+                _job: &'a Job,
+            ) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'a>> {
+                Box::pin(async move {
+                    self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+        eng_b.register("x", Arc::new(Spy { calls: calls.clone() }));
+
+        assert_eq!(eng_b.recover().await.unwrap(), 1);
+        assert!(eng_b.run_once().await.unwrap());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        assert_eq!(jobs[0].status, JobStatus::Succeeded);
+        assert_eq!(jobs[0].worker_id.as_deref(), Some(eng_b.worker_id()));
+    }
+
+    #[tokio::test]
+    async fn complete_after_cancel_keeps_cancelled() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone());
+
+        // Ok path: claim → cancel mid-flight → complete(Ok) must not
+        // resurrect the job to `succeeded`.
+        let job_ok = enqueue_test_job(&eng).await;
+        let claimed_ok = store::claim_next(&pool, eng.worker_id(), now_unix())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed_ok.id, job_ok.id);
+        assert!(store::cancel_job(&pool, job_ok.id).await.unwrap());
+        store::complete(&pool, &claimed_ok, Ok(()), 0, now_unix())
+            .await
+            .unwrap();
+
+        // Err path: same race on the failure branch must not flip
+        // `cancelled` back to `pending`/`failed` either.
+        let job_err = enqueue_test_job(&eng).await;
+        let claimed_err = store::claim_next(&pool, eng.worker_id(), now_unix())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed_err.id, job_err.id);
+        assert!(store::cancel_job(&pool, job_err.id).await.unwrap());
+        store::complete(
+            &pool,
+            &claimed_err,
+            Err("late failure".into()),
+            0,
+            now_unix(),
+        )
+        .await
+        .unwrap();
+
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        for id in [job_ok.id, job_err.id] {
+            let job = jobs.iter().find(|j| j.id == id).unwrap();
+            assert_eq!(job.status, JobStatus::Cancelled, "job {id} resurrected");
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_ignores_stale_claim_after_requeue_and_reclaim() {
+        let pool = test_pool().await;
+        let eng = engine(pool.clone());
+        let job = enqueue_test_job(&eng).await;
+        let claimed = store::claim_next(&pool, eng.worker_id(), now_unix())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Simulate reap_stale + re-claim by another worker: same row,
+        // new ownership, bumped attempts.
+        sqlx::query(
+            "UPDATE jobs_tbl SET status = 'running', worker_id = 'other-worker',
+             attempts = attempts + 1 WHERE id = ?",
+        )
+        .bind(job.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The stale worker's completion must not touch the new claim.
+        store::complete(&pool, &claimed, Ok(()), 0, now_unix())
+            .await
+            .unwrap();
+        store::complete(
+            &pool,
+            &claimed,
+            Err("stale failure".into()),
+            0,
+            now_unix(),
+        )
+        .await
+        .unwrap();
+
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        assert_eq!(jobs[0].status, JobStatus::Running);
+        assert_eq!(jobs[0].worker_id.as_deref(), Some("other-worker"));
     }
 }

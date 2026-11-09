@@ -7,8 +7,11 @@
 pub mod auth;
 pub mod config;
 pub mod doctor;
+pub mod engine;
+pub mod image;
 pub mod init;
 pub mod jobs;
+pub mod pipeline;
 pub mod user;
 pub mod version;
 

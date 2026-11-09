@@ -10,7 +10,7 @@ use crate::crates::document_engine::relationship::{
     DocumentRelationship, DocumentRelationshipType,
 };
 
-use super::documents::{DOC_COLS, document_from_row, fetch_document};
+use super::documents::{document_from_row, fetch_document};
 use super::history::record_event;
 use super::{StoreError, StoreResult, enum_parse, enum_str, gen_id, now_rfc3339};
 
@@ -197,12 +197,12 @@ pub async fn related_documents(
     document_id: &DocumentId,
 ) -> StoreResult<Vec<RelatedDocument>> {
     let rows = sqlx::query(&format!(
-        "SELECT {DOC_COLS}, r.relationship_type AS rel_type, 1 AS outgoing
+        "SELECT d.*, r.relationship_type AS rel_type, 1 AS outgoing
          FROM document_relationships_tbl r
          JOIN documents_tbl d ON d.id = r.target_document_id
          WHERE r.source_document_id = ?
          UNION ALL
-         SELECT {DOC_COLS}, r.relationship_type AS rel_type, 0 AS outgoing
+         SELECT d.*, r.relationship_type AS rel_type, 0 AS outgoing
          FROM document_relationships_tbl r
          JOIN documents_tbl d ON d.id = r.source_document_id
          WHERE r.target_document_id = ?
