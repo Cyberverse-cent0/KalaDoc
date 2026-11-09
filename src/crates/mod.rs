@@ -1,6 +1,15 @@
 pub mod application;
 #[path = "document_engine/src/lib.rs"]
 pub mod document_engine;
+#[path = "engine-registry/src/lib.rs"]
+pub mod engine_registry;
 pub mod job_engine;
+#[path = "observability/src/lib.rs"]
+pub mod observability;
+#[path = "pdf-engine/src/lib.rs"]
+pub mod pdf_engine;
+#[path = "security-engine/src/lib.rs"]
+pub mod security_engine;
 pub mod shared_public;
 pub mod storage;
+pub mod core;

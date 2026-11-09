@@ -49,6 +49,10 @@ pub enum Commands {
     /// Manage user accounts.
     #[command(subcommand)]
     User(UserArgs),
+
+    /// Manage the durable job queue: run a worker, list jobs, enqueue work.
+    #[command(subcommand)]
+    Jobs(JobsArgs),
 }
 
 #[derive(Subcommand)]
@@ -118,6 +122,44 @@ pub enum UserArgs {
     Delete {
         /// Login name of the user to delete.
         username: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum JobsArgs {
+    /// Run the job worker loop: claims due jobs from the queue and
+    /// dispatches them to the registered handlers. Runs until the
+    /// process is interrupted (Ctrl+C).
+    Worker,
+
+    /// List jobs in the queue, newest first.
+    List {
+        /// Filter by status: pending, running, succeeded, failed, cancelled.
+        #[arg(long)]
+        status: Option<String>,
+        /// Maximum number of jobs to show.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+
+    /// Enqueue a job for a worker to pick up.
+    Enqueue {
+        /// Job kind — the handler registry key (e.g. `document.ingest`).
+        #[arg(long)]
+        kind: String,
+        /// JSON payload handed to the handler (default: `{}`).
+        #[arg(long)]
+        payload: Option<String>,
+        /// Scheduling priority; higher runs first among due jobs.
+        #[arg(long, default_value_t = 0)]
+        priority: i64,
+        /// Unix seconds before which the job must not run (default: now).
+        #[arg(long)]
+        run_at: Option<i64>,
+        /// Maximum attempts before the job is marked failed
+        /// (default: the configured `jobs.default_max_attempts`).
+        #[arg(long)]
+        max_attempts: Option<u32>,
     },
 }
 
