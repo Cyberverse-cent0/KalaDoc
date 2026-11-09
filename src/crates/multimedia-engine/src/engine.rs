@@ -106,14 +106,24 @@ impl ProcessingEngine for MediaEngine {
     }
 
     fn capabilities(&self) -> EngineCapabilities {
-        // Advertise only what is actually implemented: probing and
-        // generic conversion. Per-op advertisement lands as ops are
-        // wired into the engine surface.
+        // Advertise only what is actually implemented. The op modules
+        // under probe/, conversion/, video/, audio/, frames/,
+        // subtitles/, analysis/, packaging/, metadata/, encoding/
+        // and filters/ cover the operations listed here; finer-grained
+        // advertisement happens per-op via the runtime capability
+        // registry (codec/filter availability varies by FFmpeg build).
         EngineCapabilities {
             operations: vec![
                 EngineOperation::Inspect,
                 EngineOperation::Convert,
                 EngineOperation::ExtractMetadata,
+                EngineOperation::Merge,
+                EngineOperation::Split,
+                EngineOperation::Overlay,
+                EngineOperation::Watermark,
+                EngineOperation::Thumbnail,
+                EngineOperation::Compress,
+                EngineOperation::Compare,
             ],
             input_formats: vec![
                 "mp4".into(),
