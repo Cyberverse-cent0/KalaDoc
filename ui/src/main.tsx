@@ -3,7 +3,15 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
+import { applyTheme, loadPrefs } from './lib/prefs'
 import './index.css'
+
+applyTheme(loadPrefs().theme)
+if (loadPrefs().theme === 'system') {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () =>
+    applyTheme('system'),
+  )
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {

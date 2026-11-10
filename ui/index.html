@@ -4,6 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>KalaDoc</title>
+    <script>
+      // Apply persisted theme before first paint (avoids FOUC).
+      try {
+        var p = JSON.parse(localStorage.getItem('kaladoc.prefs') || '{}')
+        var t = p.theme === 'light' || p.theme === 'dark' ? p.theme : 'dark'
+        if (t === 'system') {
+          t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+        }
+        document.documentElement.dataset.theme = t
+      } catch (e) {
+        document.documentElement.dataset.theme = 'dark'
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

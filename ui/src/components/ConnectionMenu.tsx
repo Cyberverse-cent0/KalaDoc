@@ -84,9 +84,9 @@ export default function ConnectionMenu() {
   }
 
   return (
-    <div ref={ref} className="fixed bottom-4 right-4 z-50">
+    <div ref={ref} className="relative">
       {open && (
-        <div className="absolute bottom-14 right-0 w-80 rounded-xl border border-slate-700 bg-slate-900 p-4 shadow-2xl">
+        <div className="absolute right-0 top-full z-50 mt-2 w-80 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-2xl">
           {showForm ? (
             <ConnectForm
               onCancel={() => setShowForm(false)}
@@ -99,30 +99,30 @@ export default function ConnectionMenu() {
           ) : (
             <div className="space-y-3">
               <div>
-                <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                <p className="text-xs font-medium uppercase tracking-wide text-faint-foreground">
                   Connection
                 </p>
-                <p className="mt-1 break-all text-sm text-slate-200">{apiUrl}</p>
-                <p className="mt-0.5 break-all font-mono text-xs text-slate-500">
+                <p className="mt-1 break-all text-sm text-card-foreground">{apiUrl}</p>
+                <p className="mt-0.5 break-all font-mono text-xs text-faint-foreground">
                   {token ? `Bearer ${token.slice(0, 10)}…` : 'no token'}
                 </p>
                 {meQuery.data?.kind === 'session' && meQuery.data.user && (
-                  <p className="mt-1 text-xs text-slate-400">
+                  <p className="mt-1 text-xs text-muted-foreground">
                     Signed in as{' '}
-                    <span className="font-medium text-slate-200">
+                    <span className="font-medium text-card-foreground">
                       {meQuery.data.user.user_name}
                     </span>
                   </p>
                 )}
                 {meQuery.data?.kind === 'api_key' && (
-                  <p className="mt-1 text-xs text-slate-400">
+                  <p className="mt-1 text-xs text-muted-foreground">
                     API key:{' '}
                     <span className="font-mono">{meQuery.data.actor_id}</span>
                   </p>
                 )}
               </div>
               {state === 'error' && statusQuery.error instanceof ApiError && (
-                <p className="rounded-md border border-red-900 bg-red-950/50 px-2 py-1.5 text-xs text-red-300">
+                <p className="rounded-md border border-red-800 bg-red-950/50 px-2 py-1.5 text-xs text-red-300">
                   {statusQuery.error.message}
                 </p>
               )}
@@ -130,14 +130,14 @@ export default function ConnectionMenu() {
                 <button
                   type="button"
                   onClick={() => setShowForm(true)}
-                  className="flex-1 rounded-md bg-slate-800 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-700"
+                  className="flex-1 rounded-md bg-muted px-3 py-1.5 text-sm text-card-foreground hover:bg-border-strong"
                 >
                   Change
                 </button>
                 <button
                   type="button"
                   onClick={disconnect}
-                  className="rounded-md border border-red-900 bg-red-950/60 px-3 py-1.5 text-sm text-red-300 hover:bg-red-900/60"
+                  className="rounded-md border border-red-800 bg-red-950/60 px-3 py-1.5 text-sm text-red-300 hover:bg-red-900/60"
                 >
                   Sign out
                 </button>
@@ -154,7 +154,7 @@ export default function ConnectionMenu() {
           setOpen((v) => !v)
           if (!configured) setShowForm(true)
         }}
-        className="relative flex h-11 w-11 items-center justify-center rounded-full border border-slate-700 bg-slate-900 text-slate-300 shadow-lg hover:bg-slate-800"
+        className="relative flex h-8 w-8 items-center justify-center rounded-md border border-border bg-muted text-muted-foreground hover:bg-border-strong"
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
@@ -172,7 +172,7 @@ export default function ConnectionMenu() {
           <path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
         </svg>
         <span
-          className={`absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full border-2 border-slate-950 ${DOT[state]}`}
+          className={`absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full border-2 border-card ${DOT[state]}`}
         />
       </button>
     </div>
