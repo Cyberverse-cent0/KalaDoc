@@ -97,7 +97,6 @@ async fn dispatch(cli: &Cli, ctx: Context) -> Result<i32, CliError> {
         Commands::Pipeline(args) => command::pipeline::run(&ctx, args).await,
         Commands::Mcp(args) => command::mcp::run(&ctx, args).await,
         Commands::Video(args) => command::video::run(&ctx, args),
-        Commands::Mcp(args) => command::mcp::run(&ctx, args).await,
     }
 }
 

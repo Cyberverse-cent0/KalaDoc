@@ -33,13 +33,14 @@ mod tests {
 
     /// The engine names `EngineRegistry::builtin()` is documented to
     /// populate (see `engine_registry::registry::EngineRegistry::builtin`).
-    const BUILTIN_NAMES: [&str; 6] = [
+    const BUILTIN_NAMES: [&str; 7] = [
         "convert",
         "image",
         "multimedia",
         "pdf",
         "pipeline",
         "security",
+        "video",
     ];
 
     #[test]

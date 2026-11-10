@@ -516,9 +516,23 @@ mod tests {
     use super::super::super::args::{Cli, Commands, PipelineArgs};
     use clap::Parser;
 
+    /// `Cli`'s clap tree is very large (every command group incl. the
+    /// ~80-variant `video` tree); building it overflows the default
+    /// 2 MiB test-thread stack in debug builds, so parse on a
+    /// dedicated thread with a bigger stack.
+    fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || Cli::try_parse_from(args))
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
     #[test]
     fn run_dag_args_parse() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse(&[
             "kaladoc",
             "pipeline",
             "run-dag",
@@ -549,6 +563,6 @@ mod tests {
     #[test]
     fn run_dag_args_require_dag_and_input() {
         // Missing --input fails clap parsing.
-        assert!(Cli::try_parse_from(["kaladoc", "pipeline", "run-dag", "dag.json"]).is_err());
+        assert!(try_parse(&["kaladoc", "pipeline", "run-dag", "dag.json"]).is_err());
     }
 }

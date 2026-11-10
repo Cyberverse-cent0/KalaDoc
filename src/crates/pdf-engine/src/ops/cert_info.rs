@@ -146,8 +146,11 @@ pub fn extract_signer_certificates(
     } else {
         None
     };
+    // Keep the TempDir itself (not just its path) alive until extraction
+    // finishes — dropping it deletes the directory and every
+    // `openssl pkcs7` input file written into it.
     let workdir = if tool.is_some() {
-        tempfile::tempdir().ok().map(|d| d.path().to_path_buf())
+        tempfile::tempdir().ok()
     } else {
         None
     };
@@ -183,7 +186,7 @@ pub fn extract_signer_certificates(
         }
 
         // 2. Certificates embedded in the CMS /Contents blob.
-        if let (Some(tool), Some(dir)) = (tool.as_deref(), workdir.as_deref())
+        if let (Some(tool), Some(dir)) = (tool.as_deref(), workdir.as_ref().map(|t| t.path()))
             && let Some(cms) = signature_contents(&doc, dict)
         {
             for der in cms_certificates(tool, &cms, dir, sig_index) {
