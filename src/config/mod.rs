@@ -201,6 +201,11 @@ pub struct ApiSection {
     /// answer `404`. TOML: `disabled_groups = [...]` under `[api]`;
     /// env: `KALADOC_API_DISABLE` = comma-separated names.
     pub disabled_groups: Vec<String>,
+    /// Browser origins allowed cross-origin access (CORS). TOML:
+    /// `cors_origins = ["https://app.example.com"]` under `[api]`;
+    /// env: `KALADOC_API_CORS_ORIGINS` = comma-separated origins, `*`
+    /// allows any. Empty (default) sends no CORS headers.
+    pub cors_origins: Vec<String>,
 }
 
 impl Default for ApiSection {
@@ -209,6 +214,7 @@ impl Default for ApiSection {
             addr: "127.0.0.1:8080".to_string(),
             api_keys: Vec::new(),
             disabled_groups: Vec::new(),
+            cors_origins: Vec::new(),
         }
     }
 }
@@ -444,6 +450,7 @@ impl AppConfig {
     /// | `KALADOC_API_ADDR`               | `api`              | `addr`                     |
     /// | `KALADOC_API_KEYS`               | `api`              | `api_keys` (`name:key,…`)  |
     /// | `KALADOC_API_DISABLE`            | `api`              | `disabled_groups` (CSV)    |
+    /// | `KALADOC_API_CORS_ORIGINS`       | `api`              | `cors_origins` (CSV, `*`)  |
     /// | `APP_SECRET_KEY`                | secret             | `secret_key` (required)   |
     /// | `APP_DB_USER`                   | secret             | `db_user` (required)      |
     /// | `APP_DB_PASSWORD`               | secret             | `db_password` (required)  |
@@ -510,6 +517,9 @@ impl AppConfig {
         }
         if let Some(v) = parse_env::<String>("KALADOC_API_DISABLE")? {
             self.api.disabled_groups = parse_csv(&v);
+        }
+        if let Some(v) = parse_env::<String>("KALADOC_API_CORS_ORIGINS")? {
+            self.api.cors_origins = parse_csv(&v);
         }
 
         self.secret_key = env_secret("APP_SECRET_KEY", require_secrets)?;

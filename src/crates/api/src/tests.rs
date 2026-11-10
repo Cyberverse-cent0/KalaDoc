@@ -1930,3 +1930,124 @@ async fn schedules_crud_and_tick() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+fn public_json(method: &str, uri: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn auth_register_login_me_logout_flow() {
+    let (app, _token, _dir) = test_app().await;
+
+    // Register a new account — public endpoint issues a session token.
+    let res = app
+        .clone()
+        .oneshot(public_json(
+            "POST",
+            "/auth/register",
+            serde_json::json!({
+                "first_name": "New",
+                "last_name": "User",
+                "user_name": "new_user",
+                "email": "new@example.com",
+                "password": "sup3r-secret-pass"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    let token = body["token"].as_str().unwrap().to_string();
+    assert_eq!(body["user"]["user_name"], "new_user");
+    assert!(body["expires_at"].as_i64().unwrap() > 0);
+
+    // Duplicate username → 409 conflict.
+    let res = app
+        .clone()
+        .oneshot(public_json(
+            "POST",
+            "/auth/register",
+            serde_json::json!({
+                "first_name": "Dup",
+                "last_name": "User",
+                "user_name": "new_user",
+                "email": "dup@example.com",
+                "password": "sup3r-secret-pass"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+
+    // Login with the new credentials.
+    let res = app
+        .clone()
+        .oneshot(public_json(
+            "POST",
+            "/auth/login",
+            serde_json::json!({
+                "user_name": "new_user",
+                "password": "sup3r-secret-pass"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    let login_token = body["token"].as_str().unwrap().to_string();
+
+    // Wrong password → 401, indistinguishable from unknown user.
+    let res = app
+        .clone()
+        .oneshot(public_json(
+            "POST",
+            "/auth/login",
+            serde_json::json!({
+                "user_name": "new_user",
+                "password": "wrong-password"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // /auth/me returns the session profile.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/auth/me", &login_token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["kind"], "session");
+    assert_eq!(body["user"]["email"], "new@example.com");
+
+    // Logout revokes the session — the token stops working.
+    let res = app
+        .clone()
+        .oneshot(authed_json("POST", "/auth/logout", &login_token, serde_json::json!({})))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["logged_out"], true);
+
+    let res = app
+        .clone()
+        .oneshot(authed_get("/auth/me", &login_token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // The register-issued token still works independently.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/auth/me", &token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}

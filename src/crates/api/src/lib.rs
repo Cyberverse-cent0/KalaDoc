@@ -107,6 +107,7 @@
 //! # }
 //! ```
 
+pub mod account;
 pub mod auth;
 pub mod error;
 pub mod flags;
@@ -121,9 +122,12 @@ mod tests;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router, middleware};
 use serde_json::Value;
+use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 pub use error::ApiError;
 pub use state::ApiState;
@@ -135,6 +139,8 @@ pub use state::ApiState;
 /// extract [`state::ApiState`] via `State<Arc<ApiState>>`.
 pub fn router(state: Arc<ApiState>) -> Router {
     let protected = Router::new()
+        .route("/auth/logout", post(account::logout))
+        .route("/auth/me", get(account::me))
         .route("/engines", get(handlers::engines))
         .route(
             "/engines/{name}/operations",
@@ -253,12 +259,57 @@ pub fn router(state: Arc<ApiState>) -> Router {
             flags::require_enabled,
         ));
 
-    Router::new()
+    let app = Router::new()
         .route("/health", get(handlers::health))
         .route("/openapi.json", get(handlers::openapi))
+        // Public account endpoints — issue session tokens; everything
+        // they protect lives on `protected` behind Bearer auth.
+        .route("/auth/register", post(account::register))
+        .route("/auth/login", post(account::login))
         .merge(protected)
         .fallback(fallback)
-        .with_state(state)
+        .with_state(state.clone());
+
+    let app = match cors_layer(&state.cors_origins) {
+        Some(cors) => app.layer(cors),
+        None => app,
+    };
+    // Outermost: a panicking handler still yields the stable JSON error
+    // envelope instead of dropping the connection mid-response.
+    app.layer(CatchPanicLayer::custom(|_| {
+        ApiError::internal("internal server error").into_response()
+    }))
+}
+
+/// Builds a [`CorsLayer`] from configured origins, or `None` when the
+/// list is empty/unparseable (no CORS headers sent — the default).
+/// `"*"` allows any origin; other entries must be valid `Origin`
+/// header values (e.g. `https://app.example.com`). Credentials are
+/// never allowed — auth is `Authorization: Bearer`, not cookies.
+fn cors_layer(origins: &[String]) -> Option<CorsLayer> {
+    let parsed: Vec<_> = origins
+        .iter()
+        .map(|o| o.trim())
+        .filter(|o| !o.is_empty())
+        .collect();
+    if parsed.is_empty() {
+        return None;
+    }
+    let allow_origin = if parsed.iter().any(|o| *o == "*") {
+        AllowOrigin::any()
+    } else {
+        AllowOrigin::list(
+            parsed
+                .iter()
+                .filter_map(|o| axum::http::HeaderValue::from_str(o).ok()),
+        )
+    };
+    Some(
+        CorsLayer::new()
+            .allow_origin(allow_origin)
+            .allow_methods(AllowMethods::any())
+            .allow_headers(AllowHeaders::any()),
+    )
 }
 
 /// JSON 404 for unmatched routes — same error envelope as everything else.

@@ -14,6 +14,12 @@ const DOT: Record<ConnState, string> = {
   unconfigured: 'bg-slate-600',
 }
 
+interface MeResponse {
+  kind: 'session' | 'api_key'
+  actor_id?: string
+  user?: { user_name: string; email: string; first_name: string; last_name: string }
+}
+
 export default function ConnectionMenu() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -28,6 +34,14 @@ export default function ConnectionMenu() {
     queryFn: () => api.get('/engines'),
     enabled: configured,
     refetchInterval: 30_000,
+    retry: false,
+  })
+
+  const meQuery = useQuery({
+    queryKey: ['auth-me', apiUrl],
+    queryFn: () => api.get<MeResponse>('/auth/me'),
+    enabled: configured,
+    staleTime: 60_000,
     retry: false,
   })
 
@@ -47,12 +61,18 @@ export default function ConnectionMenu() {
     return () => document.removeEventListener('mousedown', onClickOutside)
   }, [])
 
-  function disconnect() {
+  async function disconnect() {
+    // Best-effort server-side session revocation; local logout always proceeds.
+    try {
+      await api.post('/auth/logout')
+    } catch {
+      // token may already be invalid — clearing locally is enough
+    }
     clearSettings()
     setOpen(false)
     setShowForm(false)
     void queryClient.invalidateQueries()
-    navigate('/connect')
+    navigate('/login')
   }
 
   function hostOf(url: string): string {
@@ -86,6 +106,20 @@ export default function ConnectionMenu() {
                 <p className="mt-0.5 break-all font-mono text-xs text-slate-500">
                   {token ? `Bearer ${token.slice(0, 10)}…` : 'no token'}
                 </p>
+                {meQuery.data?.kind === 'session' && meQuery.data.user && (
+                  <p className="mt-1 text-xs text-slate-400">
+                    Signed in as{' '}
+                    <span className="font-medium text-slate-200">
+                      {meQuery.data.user.user_name}
+                    </span>
+                  </p>
+                )}
+                {meQuery.data?.kind === 'api_key' && (
+                  <p className="mt-1 text-xs text-slate-400">
+                    API key:{' '}
+                    <span className="font-mono">{meQuery.data.actor_id}</span>
+                  </p>
+                )}
               </div>
               {state === 'error' && statusQuery.error instanceof ApiError && (
                 <p className="rounded-md border border-red-900 bg-red-950/50 px-2 py-1.5 text-xs text-red-300">
@@ -105,7 +139,7 @@ export default function ConnectionMenu() {
                   onClick={disconnect}
                   className="rounded-md border border-red-900 bg-red-950/60 px-3 py-1.5 text-sm text-red-300 hover:bg-red-900/60"
                 >
-                  Disconnect
+                  Sign out
                 </button>
               </div>
             </div>

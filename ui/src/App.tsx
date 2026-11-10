@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
 import ConnectPage from './pages/Connect'
+import LoginPage from './pages/Login'
 import SettingsPage from './pages/Settings'
 import DocumentsPage from './pages/Documents'
 import DocumentDetailPage from './pages/DocumentDetail'
@@ -10,13 +11,14 @@ import PipelinesPage from './pages/Pipelines'
 import { isConfigured } from './lib/settings'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  return isConfigured() ? <>{children}</> : <Navigate to="/connect" replace />
+  return isConfigured() ? <>{children}</> : <Navigate to="/login" replace />
 }
 
 export default function App() {
   return (
     <Routes>
       <Route path="/connect" element={<ConnectPage />} />
+      <Route path="/login" element={<LoginPage />} />
       <Route
         element={
           <RequireAuth>

@@ -10,6 +10,12 @@ export default function ConnectPage() {
         <div className="mt-5">
           <ConnectForm onSuccess={() => navigate('/documents')} />
         </div>
+        <p className="mt-4 text-center text-xs text-slate-500">
+          Have an account?{' '}
+          <a href="/login" className="text-sky-400 hover:underline">
+            Sign in or create one
+          </a>
+        </p>
       </div>
     </div>
   )

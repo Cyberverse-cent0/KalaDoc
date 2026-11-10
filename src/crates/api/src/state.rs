@@ -36,6 +36,9 @@ pub struct ApiState {
     /// Route groups disabled via `KALADOC_API_DISABLE` / TOML
     /// `api.disabled_groups`; see [`crate::crates::api::flags`].
     pub disabled_groups: BTreeSet<String>,
+    /// Browser origins allowed cross-origin access (`api.cors_origins`
+    /// / `KALADOC_API_CORS_ORIGINS`); empty means no CORS headers.
+    pub cors_origins: Vec<String>,
 }
 
 impl ApiState {
@@ -55,6 +58,7 @@ impl ApiState {
             storage_config: config.to_storage_config(),
             api_keys: config.api.api_keys.clone(),
             disabled_groups: config.api.disabled_groups.iter().cloned().collect(),
+            cors_origins: config.api.cors_origins.clone(),
         })
     }
 
@@ -75,6 +79,7 @@ impl ApiState {
             storage_config,
             api_keys: Vec::new(),
             disabled_groups: BTreeSet::new(),
+            cors_origins: Vec::new(),
         }
     }
 
