@@ -166,10 +166,13 @@ fn mux_impl(
     let format = normalize_format(output_format.unwrap_or("mp4"));
     let caps = rt.capabilities()?;
 
-    // Muxer must exist in this build.
-    if !caps.has_muxer(&format) {
+    // Muxer must exist in this build. The capability registry keys
+    // on ffmpeg muxer names, which differ from file extensions for
+    // a few containers (`mkv` → `matroska`, `m4a` → `ipod`, ...).
+    let muxer = muxer_name_for(&format);
+    if !caps.has_muxer(muxer) {
         return Err(MediaError::Unsupported(format!(
-            "output muxer '{format}' is not available in this FFmpeg build"
+            "output muxer '{muxer}' (.{format}) is not available in this FFmpeg build"
         )));
     }
 
@@ -283,6 +286,19 @@ fn check_input_size(len: usize, what: &str, limits: &MediaLimits) -> MediaResult
 /// user-supplied format string.
 fn normalize_format(format: &str) -> String {
     format.trim().trim_start_matches('.').to_ascii_lowercase()
+}
+
+/// Map an output container extension to the ffmpeg *muxer* name used
+/// for capability checks. Most extensions match muxer names; a few
+/// common ones differ.
+fn muxer_name_for(format: &str) -> &str {
+    match format {
+        "mkv" => "matroska",
+        "m4a" => "ipod",
+        "mp4" | "m4v" => "mp4",
+        "mov" => "mov",
+        _ => format,
+    }
 }
 
 /// Best-effort audio encoder default for a container.
@@ -498,6 +514,14 @@ mod tests {
 
     #[test]
     fn mux_streams_adds_mov_text_subtitles_to_mp4() {
+        // mov_text is the only mp4 subtitle encoder; builds without it
+        // (e.g. minimal ffmpeg) cannot mux subtitles into mp4 at all.
+        let rt = rt();
+        let caps = rt.capabilities().expect("capabilities");
+        if !caps.has_encoder("mov_text") {
+            eprintln!("skipping: ffmpeg build lacks the mov_text encoder");
+            return;
+        }
         let dir = TempDir::new("mux-test").unwrap();
         let video = lavfi_video(&dir);
         let audio = sine_wav(&dir);
@@ -509,7 +533,7 @@ mod tests {
             Some(&subs),
             &MuxStreamsOptions::default(),
             &MediaLimits::default(),
-            &rt(),
+            &rt,
         )
         .expect("mux_streams failed");
         let file = out.primary.unwrap();

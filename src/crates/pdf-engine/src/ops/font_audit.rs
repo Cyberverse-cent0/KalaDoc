@@ -190,6 +190,9 @@ mod tests {
             })
             .unwrap();
 
+        // The font program must be an indirect stream object — a
+        // stream nested in a dictionary is not valid PDF.
+        let font_file_id = doc.add_object(Stream::new(dictionary! {}, vec![1u8, 2, 3]));
         let descriptor_id = doc.add_object(dictionary! {
             "Type" => "FontDescriptor",
             "FontName" => "CustomFont",
@@ -200,7 +203,7 @@ mod tests {
             "Descent" => 0,
             "CapHeight" => 0,
             "StemV" => 0,
-            "FontFile2" => Stream::new(dictionary! {}, vec![1u8, 2, 3]),
+            "FontFile2" => lopdf::Object::Reference(font_file_id),
         });
         {
             let font = doc.get_dictionary_mut(font_id).unwrap();

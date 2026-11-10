@@ -818,10 +818,9 @@ fn adv_document_digest_sha256_known_answer() {
 fn adv_make_searchable_graceful_without_tools() {
     let pdf = pdf_text(&["scan me"]);
     match make_searchable(&pdf, None, &unlimited()) {
-        Ok((_bytes, report)) => {
+        Ok((_bytes, _report)) => {
             // Tools present: pipeline ran and produced PDF bytes.
             assert!(_bytes.starts_with(b"%PDF"));
-            assert!(report.pages_processed >= 0);
         }
         Err(e) => {
             // Tools absent: honest MissingTool, never fake output.

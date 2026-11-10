@@ -887,7 +887,13 @@ mod tests {
         // created_at from the pre-existing row is preserved.
         assert!(!fetched.created_at.is_empty());
 
-        // Audit events recorded for each mutation.
+        assert!(svc.delete_document_settings(&doc.id).await.unwrap());
+        assert!(!svc.delete_document_settings(&doc.id).await.unwrap());
+        assert!(svc.get_document_settings(&doc.id).await.unwrap().is_none());
+
+        // Audit events recorded for each mutation: update, set_locked,
+        // upsert, and the successful delete (the second delete removes
+        // nothing and records nothing).
         let history = svc.get_document_history(&doc.id).await.unwrap();
         let settings_events = history
             .iter()
@@ -897,10 +903,6 @@ mod tests {
             })
             .count();
         assert_eq!(settings_events, 4);
-
-        assert!(svc.delete_document_settings(&doc.id).await.unwrap());
-        assert!(!svc.delete_document_settings(&doc.id).await.unwrap());
-        assert!(svc.get_document_settings(&doc.id).await.unwrap().is_none());
     }
 
     #[tokio::test]

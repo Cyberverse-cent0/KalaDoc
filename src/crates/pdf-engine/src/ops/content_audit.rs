@@ -871,10 +871,12 @@ mod tests {
         );
 
         // Page-anchored risks carry the page number.
+        // `/Annots[0] /AA /E` also contains the substring
+        // `/Annots[0] /A`, so match the `/A` location exactly.
         let annot_risk = audit
             .risks
             .iter()
-            .find(|r| r.location.contains("/Annots[0] /A"))
+            .find(|r| r.location.ends_with("/Annots[0] /A"))
             .unwrap();
         assert_eq!(annot_risk.page, Some(1));
         assert_eq!(annot_risk.kind, RiskKind::Other); // URI action

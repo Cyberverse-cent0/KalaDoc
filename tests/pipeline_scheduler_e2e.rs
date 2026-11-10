@@ -28,7 +28,7 @@ use kaladoc::crates::document_engine::store::documents::{NewDocument, create_doc
 use kaladoc::crates::document_engine::store::metadata::get_document_metadata;
 use kaladoc::crates::document_engine::store::schema::init_document_store;
 use kaladoc::crates::job_engine::{
-    Job, JobContext, JobEngine, JobEngineConfig, JobError, JobHandler, JobStatus, NewJob,
+    Job, JobContext, JobEngine, JobEngineConfig, JobError, JobHandler, JobStatus,
     create_jobs_table, list_jobs,
 };
 use kaladoc::crates::pipeline_engine::{

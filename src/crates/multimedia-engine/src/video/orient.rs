@@ -172,6 +172,20 @@ pub fn orient(
             .push("no AAC audio encoder in this ffmpeg build; audio streams dropped".to_string());
     }
 
+    // libopenh264 converts pixels with a BT.709 matrix but writes no
+    // color metadata, so players assume BT.601 and shift colors.
+    // Tag the output BT.709 so the tags match what was encoded.
+    if video_encoder == "libopenh264" {
+        for (opt, val) in [
+            ("-color_primaries", "bt709"),
+            ("-color_trc", "bt709"),
+            ("-colorspace", "bt709"),
+        ] {
+            extra_args.push(OsString::from(opt));
+            extra_args.push(OsString::from(val));
+        }
+    }
+
     let dir = TempDir::new("orient")?;
     let input_path = dir.write("input.bin", input)?;
     let output_name = "output.mp4";

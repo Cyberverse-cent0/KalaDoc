@@ -22,12 +22,11 @@ use kaladoc::crates::application::services::documents::{DocumentService, NewArti
 use kaladoc::crates::application::services::ingestion::{
     DocumentIngestionService, IngestRequest, RecoveryOptions,
 };
-use kaladoc::crates::document_engine::artifact::{ChecksumAlgorithm, DocumentChecksum};
+use kaladoc::crates::document_engine::artifact::ChecksumAlgorithm;
 use kaladoc::crates::document_engine::audit::DocumentAuditEventType;
 use kaladoc::crates::document_engine::document::{
     DocumentOrigin, DocumentSource, DocumentStatus, DocumentType,
 };
-use kaladoc::crates::document_engine::ids::FolderId;
 use kaladoc::crates::document_engine::store::documents::NewDocument;
 use kaladoc::crates::document_engine::store::schema::init_document_store;
 use kaladoc::crates::job_engine::create_jobs_table;

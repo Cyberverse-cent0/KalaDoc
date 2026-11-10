@@ -15,8 +15,9 @@
 //!   `k+1` modulo `n`). Produces `min(n, page_count)` non-empty files;
 //!   each output preserves the original relative page order.
 //! - [`SplitMode::AtBookmarks`] — split at outline/bookmark
-//!   boundaries. Not yet available: this build returns
-//!   [`PdfError::UnsupportedOperation`] for this mode.
+//!   boundaries via [`split_at_outline`]; `level` is 1-based
+//!   (`1` = top-level bookmarks). A document without a matching
+//!   outline level yields a single unchanged output.
 //!
 //! `max_outputs` is enforced for every mode that produces a variable
 //! number of files; `max_pages`/`max_input_bytes` are enforced on the
@@ -94,9 +95,8 @@ pub enum SplitMode<'a> {
 /// Returns one `Vec<u8>` per output file. Fails with
 /// [`PdfError::InvalidInput`] on degenerate parameters (zero stride,
 /// empty document), [`PdfError::InvalidPageRange`] on malformed range
-/// specs, [`PdfError::LimitExceeded`] when the number of outputs would
-/// exceed `max_outputs`, and [`PdfError::UnsupportedOperation`] for
-/// [`SplitMode::AtBookmarks`].
+/// specs, and [`PdfError::LimitExceeded`] when the number of outputs
+/// would exceed `max_outputs`.
 pub fn split_mode(
     input: &[u8],
     mode: SplitMode<'_>,
@@ -117,7 +117,7 @@ pub fn split_mode(
 }
 
 /// Serialize `doc` restricted to the 1-based `pages` selection.
-fn chunk_pdf(doc: &lopdf::Document, pages: &[u32], limits: &EngineLimits) -> PdfResult<Vec<u8>> {
+fn chunk_pdf(doc: &lopdf::Document, pages: &[u32]) -> PdfResult<Vec<u8>> {
     let page_count = doc.get_pages().len() as u32;
     let keep: std::collections::BTreeSet<u32> = pages.iter().copied().collect();
     let delete: Vec<u32> = (1..=page_count).filter(|p| !keep.contains(p)).collect();
@@ -140,10 +140,7 @@ fn chunks_to_pdfs(
             chunks.len()
         )));
     }
-    chunks
-        .iter()
-        .map(|pages| chunk_pdf(doc, pages, limits))
-        .collect()
+    chunks.iter().map(|pages| chunk_pdf(doc, pages)).collect()
 }
 
 /// Greedy serialized-size split.
@@ -167,7 +164,7 @@ fn split_by_size(input: &[u8], max_bytes: u64, limits: &EngineLimits) -> PdfResu
     let mut chunk_end = 0u32; // last page confirmed to fit
     for page in 1..=page_count {
         let candidate: Vec<u32> = (chunk_start..=page).collect();
-        let size = chunk_pdf(&doc, &candidate, limits)?.len() as u64;
+        let size = chunk_pdf(&doc, &candidate)?.len() as u64;
         if size <= max_bytes {
             chunk_end = page;
             continue;
@@ -181,12 +178,10 @@ fn split_by_size(input: &[u8], max_bytes: u64, limits: &EngineLimits) -> PdfResu
         outputs.push(chunk_pdf(
             &doc,
             &(chunk_start..=chunk_end).collect::<Vec<_>>(),
-            limits,
         )?);
         chunk_start = page;
-        chunk_end = 0;
         // Re-test the single page at the new chunk start.
-        let size = chunk_pdf(&doc, &[page], limits)?.len() as u64;
+        let size = chunk_pdf(&doc, &[page])?.len() as u64;
         if size > max_bytes {
             return Err(PdfError::LimitExceeded(format!(
                 "page {page} alone serializes to {size} bytes, exceeding max_bytes {max_bytes}"
@@ -198,7 +193,6 @@ fn split_by_size(input: &[u8], max_bytes: u64, limits: &EngineLimits) -> PdfResu
         outputs.push(chunk_pdf(
             &doc,
             &(chunk_start..=chunk_end).collect::<Vec<_>>(),
-            limits,
         )?);
     }
     if let Some(max) = limits.max_outputs
@@ -473,14 +467,16 @@ mod tests {
             )
             .is_err()
         );
-        // Bookmark split is explicitly unsupported.
-        let err = split_mode(
+        // Bookmark split is implemented: a document without an outline
+        // yields a single unchanged output.
+        let outputs = split_mode(
             &input,
             SplitMode::AtBookmarks { level: 1 },
             &EngineLimits::default(),
         )
-        .unwrap_err();
-        assert!(matches!(err, PdfError::UnsupportedOperation(_)));
+        .unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(page_count(&outputs[0]), 2);
     }
 
     #[test]

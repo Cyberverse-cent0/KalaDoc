@@ -182,6 +182,9 @@ fn retime_arrow_line(line: &str, offset: i64, clamp: bool, fmt: SubFormat) -> Ti
         return TimingLine::NotTiming;
     };
     let start_tok = line[..pos].trim();
+    // VTT allows both `MM:SS.mmm` and `HH:MM:SS.mmm`; preserve each
+    // timestamp's original field count so retiming doesn't restyle cues.
+    let start_long = ts_has_hours(start_tok);
     let Some(start_ms) = parse_timestamp(start_tok) else {
         return TimingLine::NotTiming;
     };
@@ -192,6 +195,7 @@ fn retime_arrow_line(line: &str, offset: i64, clamp: bool, fmt: SubFormat) -> Ti
         .map(|(i, _)| i)
         .unwrap_or(right.len());
     let end_tok = &right[..end_tok_len];
+    let end_long = ts_has_hours(end_tok);
     let Some(end_ms) = parse_timestamp(end_tok) else {
         return TimingLine::NotTiming;
     };
@@ -209,12 +213,37 @@ fn retime_arrow_line(line: &str, offset: i64, clamp: bool, fmt: SubFormat) -> Ti
     }
     // End < start would be malformed input; still shift honestly.
     let new_end = shift_ms(end_ms, offset, clamp).unwrap_or(0);
+    let fmt_ts = |ms: i64, long: bool| match fmt {
+        SubFormat::Vtt => format_vtt_ts(ms, long),
+        _ => fmt.format_ts(ms),
+    };
     TimingLine::Shifted(format!(
         "{} --> {}{}",
-        fmt.format_ts(new_start.unwrap()),
-        fmt.format_ts(new_end),
+        fmt_ts(new_start.unwrap(), start_long),
+        fmt_ts(new_end, end_long),
         tail
     ))
+}
+
+/// Whether a timestamp token uses the three-field `H:MM:SS` form
+/// (vs. the two-field `MM:SS` shorthand).
+fn ts_has_hours(tok: &str) -> bool {
+    let hms = tok.split([',', '.']).next().unwrap_or("");
+    hms.split(':').count() == 3
+}
+
+/// Format milliseconds as a VTT timestamp, honoring the cue's
+/// original `MM:SS.mmm` vs `HH:MM:SS.mmm` style. Falls back to the
+/// long form whenever the value needs an hours field.
+fn format_vtt_ts(ms: i64, long_form: bool) -> String {
+    let (h, rem) = (ms / 3_600_000, ms % 3_600_000);
+    let (m, rem) = (rem / 60_000, rem % 60_000);
+    let (s, milli) = (rem / 1_000, rem % 1_000);
+    if long_form || h > 0 {
+        format!("{h:02}:{m:02}:{s:02}.{milli:03}")
+    } else {
+        format!("{m:02}:{s:02}.{milli:03}")
+    }
 }
 
 /// Retype one ASS `Dialogue:` line's start/end fields.

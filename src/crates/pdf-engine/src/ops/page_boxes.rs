@@ -32,9 +32,11 @@
 //! Use [`set_page_size`][super::page_size::set_page_size] or
 //! [`crop`][super::crop::crop] to change the media area instead.
 //!
-//! [`get_page_boxes`] is a pure read and tolerates encrypted input
-//! (box entries are numbers, not encrypted strings), matching
-//! [`get_page_sizes`][super::page_size::get_page_sizes].
+//! [`get_page_boxes`] is a pure read: encrypted input that `lopdf`
+//! can decrypt on its own (e.g. an empty user password) is read
+//! normally, while a password-protected document — whose page objects
+//! cannot be loaded without the key — fails with
+//! [`PdfError::Encrypted`] rather than reporting a bogus empty result.
 //! [`set_page_box`] and [`remove_page_box`] transform the document and
 //! return [`PdfError::Encrypted`] for encrypted input.
 
@@ -47,7 +49,7 @@ use crate::crates::core::engine::EngineLimits;
 use crate::crates::pdf_engine::error::{PdfError, PdfResult};
 
 use super::crop::{DEFAULT_MEDIA_BOX, inherited_rect, number_object};
-use super::load::{load_pdf, lopdf_err, reject_encrypted, save_pdf};
+use super::load::{doc_is_encrypted, load_pdf, lopdf_err, reject_encrypted, save_pdf};
 use super::pages::parse_page_range;
 
 /// One of the five page-box entries defined by the PDF spec.
@@ -165,14 +167,20 @@ fn page_id_for<'a>(
 /// (a range spec such as `"1-3,8"` or `"all"`, 1-based) as
 /// [`PageBoxInfo`] entries in selection order.
 ///
-/// This is a pure read: it tolerates encrypted input and never
-/// modifies the document.
+/// This is a pure read and never modifies the document. Encrypted
+/// input that `lopdf` decrypts transparently (empty user password) is
+/// read normally; a password-protected document fails with
+/// [`PdfError::Encrypted`] because its page objects cannot be loaded
+/// without the key.
 pub fn get_page_boxes(
     input: &[u8],
     pages: &str,
     limits: &EngineLimits,
 ) -> PdfResult<Vec<PageBoxInfo>> {
     let doc = load_pdf(input, limits)?;
+    if doc_is_encrypted(&doc) && doc.get_pages().is_empty() {
+        return Err(PdfError::Encrypted);
+    }
     let page_count = doc.get_pages().len() as u32;
     let selected = parse_page_range(pages, page_count)?;
     let pages_map = doc.get_pages();
@@ -377,10 +385,13 @@ mod tests {
         let pdf = pdf_with_pages(&["one", "two"]);
         for bx in PageBox::ALL {
             let rect = [1.0, 2.0, 300.0, 400.0];
+            // Page 2 keeps whatever it had before — for MediaBox the
+            // fixture already defines [0 0 595 842] on every page.
+            let before = own_box(&pdf, 2, bx.name());
             let out = set_page_box(&pdf, "1", bx, rect, &EngineLimits::default()).unwrap();
             approx_eq(&own_box(&out, 1, bx.name()).unwrap(), &rect);
             // Other pages untouched.
-            assert!(own_box(&out, 2, bx.name()).is_none());
+            assert_eq!(own_box(&out, 2, bx.name()), before);
             // Other box kinds on page 1 untouched (CropBox absent stays absent).
         }
         // Page 1 now has every box set; MediaBox got overwritten too.
@@ -477,9 +488,9 @@ mod tests {
             &own_box(&out, 2, "ArtBox").unwrap(),
             &[5.0, 5.0, 100.0, 100.0],
         );
-        // Removing an absent box is a harmless no-op.
+        // Removing an absent box is a harmless no-op; both pages remain.
         let out2 = remove_page_box(&pdf, "1", PageBox::BleedBox, &EngineLimits::default()).unwrap();
-        assert_eq!(page_count(&out2), 1);
+        assert_eq!(page_count(&out2), 2);
     }
 
     #[test]
@@ -527,8 +538,14 @@ mod tests {
             remove_page_box(&enc, "1", PageBox::CropBox, &EngineLimits::default()),
             Err(PdfError::Encrypted)
         ));
-        // The read op tolerates encrypted input.
-        assert!(get_page_boxes(&enc, "1", &EngineLimits::default()).is_ok());
+        // The read op cannot inspect a password-protected document
+        // either: lopdf loads only the trailer without the key, so the
+        // page tree is unreachable — it reports Encrypted rather than
+        // a misleading "no pages" range error.
+        assert!(matches!(
+            get_page_boxes(&enc, "1", &EngineLimits::default()),
+            Err(PdfError::Encrypted)
+        ));
     }
 
     #[test]

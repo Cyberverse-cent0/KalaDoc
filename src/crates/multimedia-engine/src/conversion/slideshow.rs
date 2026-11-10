@@ -159,7 +159,24 @@ pub fn slideshow(
     };
 
     let tmp = TempDir::new("slideshow")?;
-    let fps = options.fps;
+    // An explicit `duration_per_image` is a *time* contract: each
+    // image must occupy that many seconds on the output timeline.
+    // Frame timestamps quantize to the output frame interval, so the
+    // effective fps must be high enough to place at least two frames
+    // inside one dwell — otherwise a sub-second dwell collapses to a
+    // single (over-long) frame. Raise fps when needed and say so.
+    let mut fps = options.fps;
+    let mut fps_warning = None;
+    if let Some(d) = options.duration_per_image {
+        let needed = (2.0 / d).ceil();
+        if needed > fps {
+            fps = needed.min(240.0);
+            fps_warning = Some(format!(
+                "fps raised from {} to {fps} so duration_per_image {d}s is representable",
+                options.fps
+            ));
+        }
+    }
     let per_image = options.duration_per_image.unwrap_or_else(|| 1.0 / fps);
 
     // Write each image input to the temp dir.
@@ -180,6 +197,14 @@ pub fn slideshow(
     // Build the filtergraph: normalize each input, then concat.
     let filter = build_filter(images.len(), width, height, fps);
 
+    // Feed each image at 4x the output rate: the image2 demuxer's
+    // `-t` boundary is frame-quantized, and a sparse input rate can
+    // drop the trailing frame of a segment (seen as a missing image
+    // at exact `1/fps` dwells). Dense input frames let the `fps`
+    // filter pick the right output count deterministically.
+    let in_fps = fps * 4.0;
+    let in_fps_arg = format!("{in_fps}");
+
     // ffmpeg argv. `-y` overwrites; `-nostdin` is not needed because
     // stdin is /dev/null via `process::run`.
     let mut argv: Vec<OsString> = Vec::new();
@@ -188,7 +213,7 @@ pub fn slideshow(
             "-loop",
             "1",
             "-framerate",
-            &fps.to_string(),
+            &in_fps_arg,
             "-t",
             &per_image.to_string(),
             "-i",
@@ -244,6 +269,9 @@ pub fn slideshow(
     }
 
     let mut output = MediaOutput::single(format!("output.{format}"), bytes);
+    if let Some(w) = fps_warning {
+        output.warnings.push(w);
+    }
     if let Some(file) = output.primary.as_mut() {
         file.content_type = Some(match format.as_str() {
             "mp4" | "m4v" => "video/mp4".to_string(),
@@ -392,11 +420,17 @@ fn build_filter(n: usize, width: u32, height: u32, fps: f64) -> String {
         // setsar=1 + format=yuv420p make concat inputs uniform.
         parts.push(format!(
             "[{i}:v:0]scale={width}:{height}:force_original_aspect_ratio=decrease,\
-             pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p[v{i}]"
+             pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v{i}]"
         ));
     }
     let concat_inputs: String = (0..n).map(|i| format!("[v{i}]")).collect();
-    parts.push(format!("{concat_inputs}concat=n={n}:v=1:a=0[vout]"));
+    // `fps` runs once AFTER concat: resampling each branch separately
+    // quantizes every segment to whole output frames and can drop the
+    // boundary frame of the final image (observed as a missing last
+    // slide). Post-concat resampling keeps segment durations exact.
+    parts.push(format!(
+        "{concat_inputs}concat=n={n}:v=1:a=0,fps={fps}[vout]"
+    ));
     parts.join(";")
 }
 

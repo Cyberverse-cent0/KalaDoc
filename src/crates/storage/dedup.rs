@@ -573,7 +573,12 @@ mod tests {
         // Malformed digests yield None.
         assert_eq!(fs.cas_path_for("not-hex"), None);
 
-        let r1 = commit_and_register(&mut fs, "docs/a.pdf", &data_a);
+        // Commit WITHOUT registering: `commit_and_register` would
+        // already have created `cas/<sha>`, making the explicit
+        // registration below a dedup hit instead of a first store.
+        let mut up = fs.begin_upload("docs/a.pdf").unwrap();
+        up.write_chunk(&data_a).unwrap();
+        let r1 = up.commit().unwrap();
         assert_eq!(r1.sha256, sha_a);
 
         // First registration stores the CAS object (no dedup hit).

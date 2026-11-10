@@ -783,10 +783,14 @@ mod tests {
         let infos = list_links(&out, &limits()).unwrap();
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].page, 2);
-        // The Text comments survive everywhere.
+        // The Text comments survive everywhere, plus the page-2 Link.
         let annots = crate::crates::pdf_engine::ops::list_annotations(&out, &limits()).unwrap();
-        assert_eq!(annots.len(), 2);
-        assert!(annots.iter().all(|a| a.subtype == "Text"));
+        assert_eq!(annots.len(), 3);
+        assert_eq!(
+            annots.iter().filter(|a| a.subtype == "Text").count(),
+            2
+        );
+        assert!(annots.iter().any(|a| a.subtype == "Link"));
 
         // Remove the rest.
         let out = remove_links(&out, None, &limits()).unwrap();

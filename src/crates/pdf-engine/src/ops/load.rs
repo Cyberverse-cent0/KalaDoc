@@ -75,11 +75,346 @@ pub(crate) fn check_page_limit(page_count: usize, limits: &EngineLimits) -> PdfR
 /// [`PdfError::InvalidInput`] instead of aborting the caller.
 pub(crate) fn load_pdf(bytes: &[u8], limits: &EngineLimits) -> PdfResult<Document> {
     check_input_limits(bytes.len(), limits)?;
-    let doc = catch_unwind(AssertUnwindSafe(|| Document::load_mem(bytes)))
+    let mut doc = catch_unwind(AssertUnwindSafe(|| Document::load_mem(bytes)))
         .map_err(|_| PdfError::InvalidInput("malformed PDF crashed the parser".to_string()))?
         .map_err(load_err)?;
+    // lopdf 0.47 withholds every indirect object when an encrypted
+    // document's password is unknown: the trailer survives but the page
+    // tree does not, so `get_pages()` reports 0 and `catalog()` fails.
+    // Reader ops are contracted to tolerate encrypted input, so fall
+    // back to a surface load that keeps the object structure.
+    if doc_is_encrypted(&doc)
+        && doc.catalog().is_err()
+        && let Some(surface) = encrypted_surface_doc(bytes, &doc)
+    {
+        doc = surface;
+    }
     check_page_limit(doc.get_pages().len(), limits)?;
     Ok(doc)
+}
+
+/// Reload an encrypted document's *surface* structure: same bytes with
+/// the `/Encrypt` trailer entry removed, then restored on the reloaded
+/// trailer.
+///
+/// Only strings and streams are encrypted in PDF — dictionary keys,
+/// names, numbers and object structure stay plaintext — so the stripped
+/// load parses the page tree, page boxes and the `/Info` reference
+/// normally while string/stream contents remain ciphertext. Restoring
+/// `/Encrypt` keeps [`doc_is_encrypted`] and [`reject_encrypted`]
+/// working exactly as before.
+///
+/// Returns `None` when the trailer cannot be located or rewritten, in
+/// which case the caller keeps the trailer-only document (the previous
+/// behavior: encrypted, but with no readable objects).
+fn encrypted_surface_doc(bytes: &[u8], probe: &Document) -> Option<Document> {
+    let encrypt = probe.trailer.get(b"Encrypt").ok()?.clone();
+    let stripped = strip_encrypt_entry(bytes)?;
+    let mut doc = catch_unwind(AssertUnwindSafe(|| Document::load_mem(&stripped)))
+        .ok()?
+        .ok()?;
+    // If stripping did not take (e.g. an earlier /Prev trailer section
+    // still declares encryption), the surface load is no better than
+    // the probe — keep the original.
+    if doc_is_encrypted(&doc) && doc.catalog().is_err() {
+        return None;
+    }
+    doc.trailer.set(b"Encrypt", encrypt);
+    Some(doc)
+}
+
+/// Remove the `/Encrypt` entry from the document's trailer dictionary
+/// in the raw bytes.
+///
+/// `startxref` names either a classic `xref` table followed by a
+/// `trailer << … >>` dictionary, or a cross-reference stream object
+/// whose own dictionary *is* the trailer. In both cases the dictionary
+/// is `<< … >>` delimited, so deleting the entry shifts only bytes that
+/// no xref offset points at.
+fn strip_encrypt_entry(bytes: &[u8]) -> Option<Vec<u8>> {
+    let (dict_start, dict_end) = trailer_dict_range(bytes)?;
+    let (key_start, value_end) = find_dict_entry(bytes, dict_start, dict_end, b"Encrypt")?;
+    let mut out = Vec::with_capacity(bytes.len());
+    out.extend_from_slice(&bytes[..key_start]);
+    out.push(b' ');
+    out.extend_from_slice(&bytes[value_end..]);
+    Some(out)
+}
+
+/// Byte range `[start, end)` of the trailer dictionary, where `start`
+/// points at its opening `<<` and `end` just past the closing `>>`.
+fn trailer_dict_range(bytes: &[u8]) -> Option<(usize, usize)> {
+    let sx = bytes.windows(9).rposition(|w| w == b"startxref")?;
+    let section_start = skip_pdf_ws(bytes, sx + 9);
+    let (offset, next) = scan_pdf_uint(bytes, section_start)?;
+    // `startxref` names the byte offset of the xref section; if it does
+    // not point where we are reading, the file is not laid out as
+    // expected and the rewrite is unsafe.
+    if offset != section_start {
+        return None;
+    }
+    let i = skip_pdf_ws(bytes, next);
+
+    if bytes[i..].starts_with(b"xref") {
+        // Classic table: `xref` … `trailer` `<< … >>`.
+        let mut j = i;
+        loop {
+            j = find_subslice(bytes, j, b"trailer")?;
+            let k = skip_pdf_ws(bytes, j + 7);
+            if bytes[k..].starts_with(b"<<") {
+                return Some((k, dict_end(bytes, k)?));
+            }
+            j += 7;
+        }
+    }
+
+    // Cross-reference stream: `N G obj << … >>`.
+    let (_, i) = scan_pdf_uint(bytes, i)?;
+    let i = skip_pdf_ws(bytes, i);
+    let (_, i) = scan_pdf_uint(bytes, i)?;
+    let i = skip_pdf_ws(bytes, i);
+    if !bytes[i..].starts_with(b"obj") {
+        return None;
+    }
+    let j = skip_pdf_ws(bytes, i + 3);
+    if !bytes[j..].starts_with(b"<<") {
+        return None;
+    }
+    Some((j, dict_end(bytes, j)?))
+}
+
+fn is_pdf_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x00)
+}
+
+fn is_pdf_delim(b: u8) -> bool {
+    matches!(
+        b,
+        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
+    )
+}
+
+fn skip_pdf_ws(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && is_pdf_ws(bytes[i]) {
+        i += 1;
+    }
+    i
+}
+
+fn scan_pdf_uint(bytes: &[u8], mut i: usize) -> Option<(usize, usize)> {
+    let start = i;
+    let mut value: usize = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        value = value
+            .checked_mul(10)?
+            .checked_add((bytes[i] - b'0') as usize)?;
+        i += 1;
+    }
+    (i > start).then_some((value, i))
+}
+
+fn find_subslice(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    haystack
+        .get(from..)?
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| from + p)
+}
+
+/// Index just past the literal string `(...)` starting at `start`.
+fn literal_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    debug_assert_eq!(bytes[start], b'(');
+    let mut depth = 1usize;
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the hex string `<…>` starting at `start` (`<<` dict
+/// opens are handled by the caller before this is reached).
+fn hex_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    debug_assert_eq!(bytes[start], b'<');
+    bytes[start + 1..]
+        .iter()
+        .position(|&b| b == b'>')
+        .map(|p| start + 1 + p + 1)
+}
+
+/// Index just past the `%` comment starting at `start`.
+fn comment_end(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => return i + 1,
+            b'\r' => {
+                // Swallow a following \n so CRLF ends the comment once.
+                return if bytes.get(i + 1) == Some(&b'\n') {
+                    i + 2
+                } else {
+                    i + 1
+                };
+            }
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+/// Index just past the `>>` matching the `<<` at `start`.
+fn dict_end(bytes: &[u8], start: usize) -> Option<usize> {
+    debug_assert_eq!(&bytes[start..start + 2], b"<<");
+    let mut depth = 1usize;
+    let mut i = start + 2;
+    while i + 1 < bytes.len() {
+        match bytes[i] {
+            b'<' if bytes[i + 1] == b'<' => {
+                depth += 1;
+                i += 2;
+            }
+            b'>' if bytes[i + 1] == b'>' => {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            b'(' => i = literal_string_end(bytes, i)?,
+            b'<' => i = hex_string_end(bytes, i)?,
+            b'%' => i = comment_end(bytes, i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the `]` matching the `[` at `start`.
+fn array_end(bytes: &[u8], start: usize) -> Option<usize> {
+    debug_assert_eq!(bytes[start], b'[');
+    let mut depth = 1usize;
+    let mut i = start + 1;
+    while i < bytes.len() {
+        i = skip_pdf_ws(bytes, i);
+        if i >= bytes.len() {
+            return None;
+        }
+        match bytes[i] {
+            b']' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            _ => i = skip_pdf_value(bytes, i)?,
+        }
+    }
+    None
+}
+
+/// Index just past the PDF object value starting at `i` (which must
+/// already point at its first byte).
+fn skip_pdf_value(bytes: &[u8], i: usize) -> Option<usize> {
+    match *bytes.get(i)? {
+        b'<' if bytes.get(i + 1) == Some(&b'<') => dict_end(bytes, i),
+        b'<' => hex_string_end(bytes, i),
+        b'(' => literal_string_end(bytes, i),
+        b'[' => array_end(bytes, i),
+        b'/' => {
+            // Name object: `/` followed by regular characters.
+            let mut j = i + 1;
+            while j < bytes.len() && !is_pdf_ws(bytes[j]) && !is_pdf_delim(bytes[j]) {
+                j += 1;
+            }
+            Some(j.max(i + 1))
+        }
+        _ => {
+            // Number, keyword (`true`/`false`/`null`) or bare token:
+            // runs until whitespace or a delimiter.
+            let start = i;
+            let mut j = i;
+            while j < bytes.len() && !is_pdf_ws(bytes[j]) && !is_pdf_delim(bytes[j]) {
+                j += 1;
+            }
+            if j == i {
+                return None;
+            }
+            // An indirect reference is three tokens (`N G R`) but one
+            // object value — e.g. `/Encrypt 5 0 R` or `/Length 12 0 R`.
+            // When the first token is an object number, try to extend
+            // the span over `G R`.
+            if bytes[start..j].iter().all(|b| b.is_ascii_digit())
+                && let Some((_, g_end)) = scan_pdf_uint(bytes, skip_pdf_ws(bytes, j))
+            {
+                let r_pos = skip_pdf_ws(bytes, g_end);
+                if bytes.get(r_pos) == Some(&b'R')
+                    && bytes
+                        .get(r_pos + 1)
+                        .is_none_or(|&b| is_pdf_ws(b) || is_pdf_delim(b))
+                {
+                    return Some(r_pos + 1);
+                }
+            }
+            Some(j)
+        }
+    }
+}
+
+/// Find a top-level `key` entry in the dictionary spanning
+/// `[dict_start, dict_end)` (the `<<`/`>>` delimiters included). Returns
+/// the span covering `/key` and its value, so the caller can excise it.
+///
+/// Entries are walked key-by-key rather than searched for, so a `/Name`
+/// *value* equal to the key cannot produce a false match.
+fn find_dict_entry(
+    bytes: &[u8],
+    dict_start: usize,
+    dict_end: usize,
+    key: &[u8],
+) -> Option<(usize, usize)> {
+    let mut i = dict_start + 2;
+    while i < dict_end {
+        i = skip_pdf_ws(bytes, i);
+        if i >= dict_end || bytes[i..].starts_with(b">>") {
+            return None;
+        }
+        if bytes[i] != b'/' {
+            return None;
+        }
+        let key_start = i;
+        let name_start = i + 1;
+        let mut j = name_start;
+        while j < dict_end && !is_pdf_ws(bytes[j]) && !is_pdf_delim(bytes[j]) {
+            j += 1;
+        }
+        let is_target = &bytes[name_start..j] == key;
+        i = skip_pdf_ws(bytes, j);
+        let value_end = skip_pdf_value(bytes, i)?;
+        if is_target {
+            return Some((key_start, value_end));
+        }
+        i = value_end;
+    }
+    None
 }
 
 /// Reject encrypted input for operations that transform content.

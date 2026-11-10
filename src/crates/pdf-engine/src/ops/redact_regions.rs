@@ -671,7 +671,10 @@ fn rewrite_content_stream(
     let mut ctm = Mat::IDENTITY;
     let mut gstack: Vec<Mat> = Vec::new();
     let mut kept: Vec<Operation> = Vec::with_capacity(content.operations.len());
+    // Removed ops of any kind (decides whether the stream is rewritten);
+    // text-showing removals are counted separately for the report.
     let mut removed_here = 0usize;
+    let mut text_removed = 0usize;
 
     for op in content.operations {
         let operator = op.operator.as_str();
@@ -758,6 +761,7 @@ fn rewrite_content_stream(
                 machine.advance(w);
                 if intersects {
                     removed_here += 1;
+                    text_removed += 1;
                 } else {
                     kept.push(op);
                 }
@@ -768,6 +772,7 @@ fn rewrite_content_stream(
                 machine.advance(w);
                 if intersects {
                     removed_here += 1;
+                    text_removed += 1;
                 } else {
                     kept.push(op);
                 }
@@ -785,6 +790,7 @@ fn rewrite_content_stream(
                 machine.advance(w);
                 if intersects {
                     removed_here += 1;
+                    text_removed += 1;
                 } else {
                     kept.push(op);
                 }
@@ -807,7 +813,7 @@ fn rewrite_content_stream(
     if removed_here == 0 {
         return Ok(()); // nothing changed — leave the stream untouched
     }
-    report.text_ops_removed += removed_here;
+    report.text_ops_removed += text_removed;
 
     let encoded = Content { operations: kept }.encode().map_err(lopdf_err)?;
     stream.content = encoded;
@@ -1045,9 +1051,12 @@ mod tests {
     #[test]
     fn appends_black_fill_and_label() {
         let input = pdf_with_pages(&["secret"]);
+        // A region away from the text keeps the original ops in the
+        // stream so the overlay's position relative to them is
+        // observable (covered text would be removed outright).
         let regions = [Redaction {
             page: 1,
-            rect: text_rect(),
+            rect: far_rect(),
         }];
         let (out, _report) = redact_regions(&input, &regions, Some("REDACTED"), &limits()).unwrap();
         let doc = LopdfDocument::load_mem(&out).unwrap();

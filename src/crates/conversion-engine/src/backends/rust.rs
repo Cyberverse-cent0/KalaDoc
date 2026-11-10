@@ -1503,10 +1503,75 @@ fn named_entity(name: &str) -> Option<char> {
         ("zwj", '\u{200D}'),
         ("lrm", '\u{200E}'),
         ("rlm", '\u{200F}'),
+        // HTML4 Latin-1 accented letters (uppercase then lowercase).
+        ("Agrave", 'À'),
+        ("Aacute", 'Á'),
+        ("Acirc", 'Â'),
+        ("Atilde", 'Ã'),
+        ("Auml", 'Ä'),
+        ("Aring", 'Å'),
+        ("AElig", 'Æ'),
+        ("Ccedil", 'Ç'),
+        ("Egrave", 'È'),
+        ("Eacute", 'É'),
+        ("Ecirc", 'Ê'),
+        ("Euml", 'Ë'),
+        ("Igrave", 'Ì'),
+        ("Iacute", 'Í'),
+        ("Icirc", 'Î'),
+        ("Iuml", 'Ï'),
+        ("ETH", 'Ð'),
+        ("Ntilde", 'Ñ'),
+        ("Ograve", 'Ò'),
+        ("Oacute", 'Ó'),
+        ("Ocirc", 'Ô'),
+        ("Otilde", 'Õ'),
+        ("Ouml", 'Ö'),
+        ("Oslash", 'Ø'),
+        ("Ugrave", 'Ù'),
+        ("Uacute", 'Ú'),
+        ("Ucirc", 'Û'),
+        ("Uuml", 'Ü'),
+        ("Yacute", 'Ý'),
+        ("THORN", 'Þ'),
+        ("agrave", 'à'),
+        ("aacute", 'á'),
+        ("acirc", 'â'),
+        ("atilde", 'ã'),
+        ("auml", 'ä'),
+        ("aring", 'å'),
+        ("aelig", 'æ'),
+        ("ccedil", 'ç'),
+        ("egrave", 'è'),
+        ("eacute", 'é'),
+        ("ecirc", 'ê'),
+        ("euml", 'ë'),
+        ("igrave", 'ì'),
+        ("iacute", 'í'),
+        ("icirc", 'î'),
+        ("iuml", 'ï'),
+        ("eth", 'ð'),
+        ("ntilde", 'ñ'),
+        ("ograve", 'ò'),
+        ("oacute", 'ó'),
+        ("ocirc", 'ô'),
+        ("otilde", 'õ'),
+        ("ouml", 'ö'),
+        ("oslash", 'ø'),
+        ("ugrave", 'ù'),
+        ("uacute", 'ú'),
+        ("ucirc", 'û'),
+        ("uuml", 'ü'),
+        ("yacute", 'ý'),
+        ("thorn", 'þ'),
+        ("yuml", 'ÿ'),
     ];
+    // Exact match first: case-insensitive fallback alone would map
+    // `&eacute;` to 'É' (via `Eacute`) and `&alpha;` to 'Α'.
     TABLE
         .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .find(|(n, _)| *n == name)
+        .or_else(|| TABLE.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)))
         .map(|(_, c)| *c)
 }
 
@@ -2972,8 +3037,11 @@ mod tests {
         assert!(!content.contains("alert"));
         assert!(!content.contains("color: red"));
         assert!(!content.contains("pic.png"));
-        // Heading uses the larger bold font size (H1 = 20pt).
-        assert!(content.contains(" 20 Tf"), "H1 size missing: {content}");
+        // Heading uses the larger bold font size (H1 = 20pt). lopdf
+        // serializes the f32 size as "20.0", so match that form (the
+        // markdown test above parses sizes properly for the same
+        // reason).
+        assert!(content.contains("20.0 Tf"), "H1 size missing: {content}");
         // List item rendered with a bullet.
         assert!(content.contains("\u{2022} one") || content.contains("one"));
     }

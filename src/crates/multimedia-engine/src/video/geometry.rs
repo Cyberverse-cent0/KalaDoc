@@ -634,7 +634,7 @@ fn probe_video_size(path: &Path, rt: &Runtime, limits: &MediaLimits) -> MediaRes
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=width,height",
+        "stream=codec_type,width,height",
         "-of",
         "json",
     ])

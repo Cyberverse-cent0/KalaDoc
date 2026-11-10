@@ -350,7 +350,18 @@ impl AppConfig {
             ));
         }
         // Catch typos in log_level here instead of at first log emit.
-        if tracing_subscriber::filter::EnvFilter::try_new(&self.runtime.log_level).is_err() {
+        // `EnvFilter::try_new` alone is too lenient: it accepts almost
+        // any text as a bare "target" directive (e.g. "definitely not
+        // a filter {{{"), which would compile fine yet match nothing.
+        // Real directives never contain whitespace, so reject those.
+        let log_level_valid =
+            tracing_subscriber::filter::EnvFilter::try_new(&self.runtime.log_level).is_ok()
+                && self
+                    .runtime
+                    .log_level
+                    .split(',')
+                    .all(|d| !d.trim().chars().any(char::is_whitespace));
+        if !log_level_valid {
             return Err(bad(
                 "runtime.log_level",
                 "is not a valid tracing filter (e.g. \"info\", \"debug\")",

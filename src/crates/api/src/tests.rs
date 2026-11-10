@@ -1849,7 +1849,9 @@ async fn schedules_crud_and_tick() {
     assert_eq!(schedule["name"], "gc");
     assert_eq!(schedule["next_run_at"], past);
 
-    // Upsert same name → still one row.
+    // Upsert same name → still one row. `next_run_at` must be passed
+    // again: an upsert without it reschedules to `now + interval`,
+    // which would no longer be due at the `past`-based tick below.
     let res = app
         .clone()
         .oneshot(authed_json(
@@ -1857,7 +1859,8 @@ async fn schedules_crud_and_tick() {
             "/schedules",
             &token,
             serde_json::json!({
-                "name": "gc", "kind": "system.ping", "interval_secs": 120
+                "name": "gc", "kind": "system.ping", "interval_secs": 120,
+                "next_run_at": past
             }),
         ))
         .await

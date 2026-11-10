@@ -191,11 +191,6 @@ impl<'a> ZipArchive<'a> {
         self.entries.len()
     }
 
-    /// Whether the archive has no entries.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     /// Decompress and return the full contents of entry `index`.
     ///
     /// Encrypted entries, unsupported compression methods, truncated

@@ -12,7 +12,6 @@ use std::process::Command;
 use std::time::Duration;
 
 use kaladoc::crates::application::services::storage::StorageService;
-use kaladoc::crates::storage::backend::StorageBackend;
 use kaladoc::crates::storage::local::config::StorageConfig;
 use kaladoc::crates::storage::local::debug_when_full::{FaultInjectingFs, StorageError};
 use kaladoc::crates::storage::stream::{

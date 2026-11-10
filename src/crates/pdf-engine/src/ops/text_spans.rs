@@ -812,6 +812,7 @@ mod tests {
                 Operation::new("BT", vec![]),
                 Operation::new("Tf", vec!["F1".into(), 12.into()]),
                 Operation::new("Td", vec![100.into(), 700.into()]),
+                Operation::new("TL", vec![14.into()]),
                 Operation::new(
                     "TJ",
                     vec![Object::Array(vec![

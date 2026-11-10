@@ -230,8 +230,13 @@ impl StreamScan<'_, '_> {
                         Object::String(bytes, _) => self.show_string(bytes),
                         // Large negative kern in a TJ array implies a
                         // word space — same approximation lopdf makes.
+                        // Skip when the text already ends in
+                        // whitespace (strings often carry their own
+                        // trailing space, which would double up).
                         Object::Integer(n) if *n < -100 => {
-                            self.line_text.push(' ');
+                            if !self.line_text.ends_with(char::is_whitespace) {
+                                self.line_text.push(' ');
+                            }
                         }
                         _ => {}
                     }
@@ -628,7 +633,7 @@ mod tests {
                 (0, "Chapter One"),
                 (1, "Section A"),
                 (1, "Section B"),
-                (1, "Subsection A1"),
+                (2, "Subsection A1"),
             ]
         );
         assert!(entries.iter().all(|e| e.page == Some(1)));

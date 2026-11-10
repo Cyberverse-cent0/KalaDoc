@@ -165,12 +165,17 @@ pub fn all_frames(
     let pattern_name = format!("frame_%06d.{ext}");
     let pattern_path = dir.file(&pattern_name);
 
-    // Frame-count bound: request one more than allowed so exceeding
-    // the cap is detectable after collection.
-    let allowed_frames = match (
-        options.max_frames.map(|v| v as u64),
-        limits.max_output_files.map(u64::from),
-    ) {
+    // Two distinct caps:
+    // - `options.max_frames` is a user-facing "give me at most N
+    //   frames" request — excess frames are truncated with a warning.
+    // - `limits.max_output_files` is a hard resource bound — exceeding
+    //   it is `LimitExceeded`.
+    // `allowed_frames` (the tighter of the two) only bounds the
+    // ffmpeg `-frames:v` argument; post-collection checks below apply
+    // the semantics above.
+    let opt_cap = options.max_frames.map(|v| v as u64);
+    let lim_cap = limits.max_output_files.map(u64::from);
+    let allowed_frames = match (opt_cap, lim_cap) {
         (None, None) => u64::MAX,
         (a, b) => [a, b]
             .into_iter()
@@ -249,14 +254,30 @@ pub fn all_frames(
         });
     }
 
-    // Enforce the frame-count caps explicitly (the -frames:v bound is
-    // allowed+1, so count > allowed means the cap was exceeded).
-    if (files.len() as u64) > allowed_frames {
+    // Hard resource cap first: `limits.max_output_files` is not
+    // negotiable.
+    if let Some(lim) = lim_cap
+        && (files.len() as u64) > lim
+    {
         return Err(MediaError::LimitExceeded(format!(
-            "frame extraction produced {} frames, exceeding the cap of {allowed_frames}",
+            "frame extraction produced {} frames, exceeding max_output_files {lim}",
             files.len()
         )));
     }
+
+    // `options.max_frames` truncates: keep the first N frames and say
+    // so in the warnings.
+    let mut truncate_note = None;
+    let files: Vec<String> = match opt_cap {
+        Some(cap) if (files.len() as u64) > cap => {
+            truncate_note = Some(format!(
+                "frame count truncated to max_frames={cap} ({} produced)",
+                files.len()
+            ));
+            files.into_iter().take(cap as usize).collect()
+        }
+        _ => files,
+    };
 
     // Read frames back under the byte cap; primary = first frame.
     let mut media_files: Vec<MediaFile> = Vec::with_capacity(files.len());
@@ -291,6 +312,9 @@ pub fn all_frames(
         warnings: Vec::new(),
     };
     result.warnings.push(format!("extracted {count} frames"));
+    if let Some(note) = truncate_note {
+        result.warnings.push(note);
+    }
     if !out.stderr.is_empty() {
         result.warnings.push(out.stderr);
     }

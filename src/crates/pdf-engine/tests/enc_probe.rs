@@ -1,4 +1,3 @@
-use kaladoc::crates::core::engine::EngineLimits;
 use kaladoc::crates::pdf_engine::{PdfEngine, PdfPermissions};
 use lopdf::content::{Content, Operation};
 use lopdf::{Document, Object, Stream, dictionary};

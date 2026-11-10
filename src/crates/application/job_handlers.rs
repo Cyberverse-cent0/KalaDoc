@@ -324,6 +324,8 @@ pub const PDF_OPS: &[&str] = &[
     "verify_signatures",
     "extract_metadata",
     "extract_text",
+    "extract_spans",
+    "search_text",
     "extract_images",
     "ocr",
     "ocr_detailed",
@@ -382,6 +384,9 @@ pub const PDF_OPS: &[&str] = &[
     "normalize_orientation",
     "object_report",
     "permissions_report",
+    "signer_certificates",
+    "extract_tables",
+    "extract_key_values",
     "recompress_streams",
     "redact_pages",
     "redact_regions",
@@ -439,6 +444,8 @@ pub const PDF_OPS: &[&str] = &[
     "lock_fields",
     "make_searchable",
     "merge",
+    "import_pages",
+    "replace_pages",
     "merge_mode",
     "normalize_rotations",
     "nup",
@@ -2795,7 +2802,7 @@ fn extra_pdf_inputs(
             out.push(bytes);
         }
     }
-    for key in ["other_pdf_b64", "second_pdf_b64"] {
+    for key in ["other_pdf_b64", "second_pdf_b64", "source_pdf_b64"] {
         if let Some(b) = b64_param(params, &[key])? {
             out.push(b);
             break;
@@ -3081,6 +3088,48 @@ fn dup_pos_param(params: &serde_json::Value) -> Result<pe::DupPos, OpFailure> {
 /// Parses `params.mode` into a [`pe::MergeMode`] for
 /// [`PdfEngine::merge_mode`]. Defaults to
 /// [`pe::MergeMode::Sequential`].
+/// First extra PDF input for single-source ops (`import_pages`,
+/// `replace_pages`). Accepts `params.source_pdf_b64`,
+/// `params.inputs[]`, `params.other_pdf_b64`/`second_pdf_b64`, or the
+/// resolved `other` artifact — same decoding rules as
+/// [`extra_pdf_inputs`].
+fn single_source_pdf(
+    params: &serde_json::Value,
+    other: Option<&[u8]>,
+    op: &str,
+) -> Result<Vec<u8>, OpFailure> {
+    let mut extra = extra_pdf_inputs(params, other)?;
+    if extra.is_empty() {
+        return Err(op_param_error(format!(
+            "{op} requires a source PDF \
+             (params.source_pdf_b64, params.inputs, or params.other_pdf_b64)"
+        )));
+    }
+    Ok(extra.remove(0))
+}
+
+/// Parse `params.position` for `import_pages`: `"start"`, `"end"`,
+/// `"before"` or `"after"` (the latter two require `params.page`,
+/// a 1-based target page number). Default `"end"`.
+fn import_pos_param(params: &serde_json::Value) -> Result<pe::ImportPos, OpFailure> {
+    let pos = opt_str(params, "position").unwrap_or_else(|| "end".to_string());
+    match pos.trim().to_ascii_lowercase().as_str() {
+        "start" | "first" | "prepend" => Ok(pe::ImportPos::Start),
+        "end" | "last" | "append" => Ok(pe::ImportPos::End),
+        "before" => {
+            let page = req_u32(params, "page")?;
+            Ok(pe::ImportPos::Before(page))
+        }
+        "after" => {
+            let page = req_u32(params, "page")?;
+            Ok(pe::ImportPos::After(page))
+        }
+        other => Err(op_param_error(format!(
+            "params.position must be start, end, before or after, got {other:?}"
+        ))),
+    }
+}
+
 fn merge_mode_param(params: &serde_json::Value) -> Result<pe::MergeMode, OpFailure> {
     let p = merged_params(params);
     match opt_str(&p, "mode")
@@ -3477,6 +3526,19 @@ fn dispatch_pdf_op(
                 .map_err(op_engine_error)?;
             report_outcome(&pages)
         }
+        "extract_spans" => {
+            let spans = engine
+                .extract_spans(input, pages_ref)
+                .map_err(op_engine_error)?;
+            report_outcome(&spans)
+        }
+        "search_text" => {
+            let pattern = req_str(params, "pattern")?;
+            let matches = engine
+                .search_text(input, &pattern, pages_ref)
+                .map_err(op_engine_error)?;
+            report_outcome(&matches)
+        }
         "extract_images" => {
             let images = engine
                 .extract_images(input, pages_ref)
@@ -3587,6 +3649,18 @@ fn dispatch_pdf_op(
         "permissions_report" => {
             let report = engine.permissions_report(input).map_err(op_engine_error)?;
             report_outcome(&report)
+        }
+        "signer_certificates" => {
+            let certs = engine.signer_certificates(input).map_err(op_engine_error)?;
+            report_outcome(&certs)
+        }
+        "extract_tables" => {
+            let report = engine.extract_tables(input).map_err(op_engine_error)?;
+            report_outcome(&report)
+        }
+        "extract_key_values" => {
+            let pairs = engine.extract_key_values(input).map_err(op_engine_error)?;
+            report_outcome(&pairs)
         }
         "get_trim_boxes" => {
             let boxes = engine.get_trim_boxes(input).map_err(op_engine_error)?;
@@ -4707,6 +4781,26 @@ fn dispatch_pdf_op(
             inputs.push(input);
             inputs.extend(extra.iter().map(Vec::as_slice));
             let bytes = engine.merge(&inputs).map_err(op_engine_error)?;
+            pdf_outcome(op, artifact_id, bytes)
+        }
+        "import_pages" => {
+            let p = merged_params(params);
+            let source = single_source_pdf(params, other, op)?;
+            let source_pages = req_str(&p, "source_pages")?;
+            let position = import_pos_param(&p)?;
+            let bytes = engine
+                .import_pages(input, &source, &source_pages, position)
+                .map_err(op_engine_error)?;
+            pdf_outcome(op, artifact_id, bytes)
+        }
+        "replace_pages" => {
+            let p = merged_params(params);
+            let source = single_source_pdf(params, other, op)?;
+            let source_pages = req_str(&p, "source_pages")?;
+            let target_pages = req_str(&p, "target_pages")?;
+            let bytes = engine
+                .replace_pages(input, &source, &source_pages, &target_pages)
+                .map_err(op_engine_error)?;
             pdf_outcome(op, artifact_id, bytes)
         }
         "merge_mode" => {

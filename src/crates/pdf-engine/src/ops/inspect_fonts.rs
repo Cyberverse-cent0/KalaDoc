@@ -300,7 +300,15 @@ fn font_embedded(
             b"FontFile3".as_slice(),
         ]
         .iter()
-        .any(|key| descriptor.get(key).is_ok())
+        // A font program is a stream object; a bare key (e.g. `null`)
+        // does not make the font embedded.
+        .any(|key| {
+            descriptor
+                .get(key)
+                .ok()
+                .and_then(|o| doc.dereference(o).ok())
+                .is_some_and(|(_, o)| o.as_stream().is_ok())
+        })
     {
         return true;
     }
@@ -416,6 +424,9 @@ mod tests {
             })
             .unwrap();
 
+        // The font program must be an indirect stream object — a
+        // stream nested in a dictionary is not valid PDF.
+        let font_file_id = doc.add_object(Stream::new(dictionary! {}, vec![1u8, 2, 3]));
         let descriptor_id = doc.add_object(dictionary! {
             "Type" => "FontDescriptor",
             "FontName" => "Courier",
@@ -426,7 +437,7 @@ mod tests {
             "Descent" => 0,
             "CapHeight" => 0,
             "StemV" => 0,
-            "FontFile2" => Stream::new(dictionary! {}, vec![1u8, 2, 3]),
+            "FontFile2" => Object::Reference(font_file_id),
         });
         {
             let font = doc.get_dictionary_mut(font_id).unwrap();
@@ -448,6 +459,8 @@ mod tests {
     fn detects_embedded_via_descendant_fonts() {
         let mut doc = Document::load_mem(&pdf_with_pages(&["x"])).unwrap();
 
+        // Indirect stream object, as a real font program would be.
+        let font_file_id = doc.add_object(Stream::new(dictionary! {}, vec![9u8]));
         let descendant_descriptor = doc.add_object(dictionary! {
             "Type" => "FontDescriptor",
             "FontName" => "CIDFont",
@@ -458,7 +471,7 @@ mod tests {
             "Descent" => 0,
             "CapHeight" => 0,
             "StemV" => 0,
-            "FontFile3" => Stream::new(dictionary! {}, vec![9u8]),
+            "FontFile3" => Object::Reference(font_file_id),
         });
         let descendant_id = doc.add_object(dictionary! {
             "Type" => "Font",

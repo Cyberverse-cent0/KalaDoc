@@ -173,26 +173,29 @@ fn definition_problems_rejected_before_execution() {
         Err(PipelineError::InvalidDefinition(_))
     ));
 
-    // Unknown engine.
+    // Unknown engine. `image` is a real registered engine now, so use
+    // a name no dispatcher arm knows.
     let bad_engine = PipelineDefinition {
         name: "bad".to_string(),
         description: None,
-        steps: vec![PipelineStep::new("x", "image", "resize")],
+        steps: vec![PipelineStep::new("x", "not-an-engine", "resize")],
     };
     assert!(matches!(
         engine.run_pipeline(&bad_engine, MINIMAL_PDF),
-        Err(PipelineError::UnknownEngine { engine, .. }) if engine == "image"
+        Err(PipelineError::UnknownEngine { engine, .. }) if engine == "not-an-engine"
     ));
 
-    // Unsupported operation on a known engine.
+    // Unsupported operation on a known engine. (`pdf.merge` is
+    // implemented — extra inputs arrive as base64 `other_inputs`
+    // params — so pick an operation name nothing dispatches.)
     let bad_op = PipelineDefinition {
         name: "bad".to_string(),
         description: None,
-        steps: vec![PipelineStep::new("x", "pdf", "merge")],
+        steps: vec![PipelineStep::new("x", "pdf", "not-an-operation")],
     };
     assert!(matches!(
         engine.run_pipeline(&bad_op, MINIMAL_PDF),
-        Err(PipelineError::UnsupportedOperation { operation, .. }) if operation == "merge"
+        Err(PipelineError::UnsupportedOperation { operation, .. }) if operation == "not-an-operation"
     ));
 
     // Non-object params.
@@ -537,8 +540,9 @@ fn engine_metadata_and_capabilities() {
     ] {
         assert!(caps.operations.contains(&op), "missing {op:?}");
     }
-    // merge needs multiple inputs — must not be advertised.
-    assert!(!caps.operations.contains(&EngineOperation::Merge));
+    // Multi-input ops are expressible: extra documents arrive as
+    // base64 `other_inputs` params, so merge IS advertised.
+    assert!(caps.operations.contains(&EngineOperation::Merge));
     assert!(caps.input_formats.contains(&"pdf".to_string()));
     assert!(caps.limits.max_input_bytes.is_some());
 }

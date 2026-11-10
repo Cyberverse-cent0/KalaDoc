@@ -681,14 +681,6 @@ fn group_lines(fragments: &[PosFragment]) -> Vec<TextLine> {
 
 // ---- table detection ------------------------------------------------------
 
-/// A cluster of fragment x-starts treated as one table column.
-struct ColumnCluster {
-    /// Mean x of member fragment starts.
-    center: f64,
-    /// Number of distinct lines touching this cluster.
-    support: usize,
-}
-
 /// Distance from `x` to the nearest cluster center, if within
 /// [`COL_MEMBER_TOLERANCE`]. Returns the cluster index.
 fn nearest_cluster(x: f64, centers: &[f64]) -> Option<usize> {
@@ -966,10 +958,12 @@ fn parse_kv(text: &str) -> Option<(String, String)> {
     if let Some(idx) = t.find(|c| c == ' ' || c == '\t') {
         let key = t[..idx].trim();
         let value = t[idx + 1..].trim();
+        // (uppercase letter or digit present, or very short — a
+        // lone lowercase word like "plain" is prose, not a label)
         let labelish = key
             .chars()
             .any(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-            || key.chars().count() <= 20;
+            || key.chars().count() <= 3;
         if valid_key(key)
             && !value.is_empty()
             && labelish

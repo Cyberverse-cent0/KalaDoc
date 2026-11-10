@@ -432,7 +432,8 @@ fn valid_rate(s: &str) -> bool {
 /// checks (`mkv` files are muxed by the `matroska` muxer, etc.).
 fn muxer_name(ext: &str) -> &'static str {
     match ext {
-        "mp4" | "m4v" | "mov" => "mp4_mov",
+        "mp4" | "m4v" => "mp4",
+        "mov" => "mov",
         "mkv" => "matroska",
         "webm" => "webm",
         "avi" => "avi",

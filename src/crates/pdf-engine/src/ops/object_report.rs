@@ -459,7 +459,11 @@ mod tests {
         // standalone {K: V} object (stream and page-resource dicts are
         // nested, not indirect objects).
         assert_eq!(report.stats.dictionaries, 4);
-        assert_eq!(report.stats.streams, 2);
+        // Two content streams plus the cross-reference stream: lopdf's
+        // default `Document::with_version("1.5")` writes a /Type /XRef
+        // stream object, and the census honestly counts every indirect
+        // object in `doc.objects` — including that file-format stream.
+        assert_eq!(report.stats.streams, 3);
         assert_eq!(report.page_objects, 1);
 
         let image = report
@@ -476,15 +480,18 @@ mod tests {
         let content = report
             .biggest_streams
             .iter()
-            .find(|s| s.filters.is_empty())
+            .find(|s| s.filters.is_empty() && s.name_hint == "stream")
             .expect("unfiltered content stream reported");
         assert_eq!(content.filtered_len, content.raw_len);
 
-        // Both streams are uncompressed-known? Only the content stream
-        // counts toward uncompressed bytes.
+        // Both the content stream and the /XRef stream carry no
+        // /Filter, so both contribute their raw length; the filtered
+        // image stream contributes nothing.
+        let uncompressed_expected: usize =
+            report.biggest_streams.iter().map(|s| s.filtered_len).sum();
         assert_eq!(
-            report.uncompressed_stream_bytes, content.raw_len,
-            "filtered stream contributes no uncompressed bytes"
+            report.uncompressed_stream_bytes, uncompressed_expected,
+            "only unfiltered streams contribute uncompressed bytes"
         );
     }
 
@@ -506,19 +513,24 @@ mod tests {
         });
         doc.trailer.set("Root", catalog_id);
 
-        // 25 streams of increasing size.
+        // 25 streams of increasing size. Sizes start at 1000 bytes so
+        // every fixture stream dwarfs the cross-reference stream lopdf
+        // adds on save (a real indirect object the census counts — see
+        // `reports_every_variant_and_stream_details`), keeping it out
+        // of the top-20 window.
         for i in 0..25usize {
-            doc.add_object(Stream::new(dictionary! {}, vec![0u8; i + 1]));
+            doc.add_object(Stream::new(dictionary! {}, vec![0u8; 1000 + i]));
         }
 
         let mut buf = Vec::new();
         doc.save_to(&mut buf).unwrap();
         let report = object_report(&buf, &EngineLimits::default()).unwrap();
 
-        assert_eq!(report.stats.streams, 25);
+        // 25 fixture streams + 1 cross-reference stream.
+        assert_eq!(report.stats.streams, 26);
         assert_eq!(report.biggest_streams.len(), 20);
-        assert_eq!(report.biggest_streams[0].raw_len, 25);
-        assert_eq!(report.biggest_streams[19].raw_len, 6);
+        assert_eq!(report.biggest_streams[0].raw_len, 1024);
+        assert_eq!(report.biggest_streams[19].raw_len, 1005);
     }
 
     #[test]

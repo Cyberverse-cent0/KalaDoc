@@ -36,7 +36,8 @@ pub fn validate(input: &[u8], limits: &EngineLimits) -> PdfResult<ValidationRepo
     let doc = load_pdf(input, limits)?;
     let mut issues = Vec::new();
 
-    if doc_is_encrypted(&doc) {
+    let encrypted = doc_is_encrypted(&doc);
+    if encrypted {
         issues.push("document is encrypted; only surface structure was inspected".to_string());
     }
 
@@ -55,7 +56,13 @@ pub fn validate(input: &[u8], limits: &EngineLimits) -> PdfResult<ValidationRepo
     }
 
     let pages = doc.get_pages();
-    if pages.is_empty() {
+    // A password-protected document loads with its trailer but no
+    // objects, so an empty page map there means "unreadable", not
+    // "zero pages" — do not report a page count we cannot know.
+    // (`was_encrypted` is set when lopdf decrypted the document itself,
+    // e.g. an empty user password; then the page tree is authoritative.)
+    let page_tree_unavailable = encrypted && !doc.was_encrypted();
+    if pages.is_empty() && !page_tree_unavailable {
         issues.push("document has no pages".to_string());
     }
 
@@ -92,7 +99,7 @@ pub fn validate(input: &[u8], limits: &EngineLimits) -> PdfResult<ValidationRepo
 mod tests {
     use super::*;
     use crate::crates::pdf_engine::ops::encrypt::{PdfPermissions, encrypt};
-    use crate::crates::pdf_engine::ops::test_utils::{page_count, pdf_with_pages};
+    use crate::crates::pdf_engine::ops::test_utils::pdf_with_pages;
     use lopdf::{Document, Object, dictionary};
 
     #[test]
@@ -145,12 +152,18 @@ mod tests {
         .unwrap();
         let report = validate(&encrypted, &EngineLimits::default()).unwrap();
         assert!(!report.ok);
+        // The encrypted issue is reported; lopdf cannot load the page
+        // tree without the password, so no "no pages" issue appears.
         assert!(
             report.issues.iter().any(|i| i.contains("encrypted")),
             "issues: {:?}",
             report.issues
         );
-        assert_eq!(page_count(&encrypted), 1);
+        assert!(
+            !report.issues.iter().any(|i| i.contains("no pages")),
+            "issues: {:?}",
+            report.issues
+        );
     }
 
     #[test]

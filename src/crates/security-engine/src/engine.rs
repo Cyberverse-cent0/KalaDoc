@@ -117,7 +117,15 @@ mod tests {
         ResourceLimits, SecurityError, SniffedFormat, sniff_format, validate_upload,
     };
 
-    const PDF: &[u8] = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF";
+    // `validate_pdf` runs a real `lopdf` structural parse, so the
+    // fixture must be a loadable document — same minimal PDF the
+    // lib.rs tests prove acceptable (has objects, trailer, /Root).
+    const PDF: &[u8] = b"%PDF-1.4\n\
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>endobj\n\
+trailer<</Root 1 0 R/ID[<0123456789abcdef0123456789abcdef><0123456789abcdef0123456789abcdef>]>>\n\
+%%EOF";
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n....";
     const ZIP: &[u8] = b"PK\x03\x04\x14\x00....";
     const MAX: u64 = 10 * 1024 * 1024;

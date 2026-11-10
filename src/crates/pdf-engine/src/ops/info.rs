@@ -13,7 +13,10 @@ use super::load::{doc_is_encrypted, load_pdf};
 /// [`inspect`] and serializable for CLI/MCP output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PdfInfo {
-    /// Number of pages in the document's page tree.
+    /// Number of pages in the document's page tree. For a
+    /// password-protected encrypted document the page tree cannot be
+    /// loaded without the key, so this is a raw-structure estimate
+    /// (see [`inspect`]).
     pub page_count: u32,
     /// `/Title` from the document information dictionary, if present
     /// and decodable. `None` for encrypted documents (strings cannot be
@@ -35,13 +38,25 @@ pub struct PdfInfo {
 ///
 /// Unlike the transforming ops, inspect tolerates encrypted documents so
 /// callers can at least learn page count and encryption state; metadata
-/// string fields are reported as `None` in that case.
+/// string fields are reported as `None` in that case. A
+/// password-protected document loads with only its trailer — lopdf
+/// cannot parse ciphertext without the key — so `page_count` falls
+/// back to a raw `/Type /Page` scan, an estimate that may undercount
+/// pages stored inside object streams.
 pub fn inspect(input: &[u8], limits: &EngineLimits) -> PdfResult<PdfInfo> {
     let doc = load_pdf(input, limits)?;
     let encrypted = doc_is_encrypted(&doc);
 
+    // lopdf decrypts transparently when the user password is empty;
+    // otherwise a password-protected document yields no page objects
+    // at all, and the raw scan is the only count available.
+    let page_count = match doc.get_pages().len() {
+        0 if encrypted => raw_page_count(input),
+        n => n as u32,
+    };
+
     Ok(PdfInfo {
-        page_count: doc.get_pages().len() as u32,
+        page_count,
         title: info_string(&doc, b"Title", encrypted),
         author: info_string(&doc, b"Author", encrypted),
         creator: info_string(&doc, b"Creator", encrypted),
@@ -49,6 +64,66 @@ pub fn inspect(input: &[u8], limits: &EngineLimits) -> PdfResult<PdfInfo> {
         encrypted,
         file_size_bytes: input.len() as u64,
     })
+}
+
+/// PDF whitespace bytes (white-space character set, PDF 32000-1 §7.2.2).
+fn is_pdf_white(b: u8) -> bool {
+    matches!(b, 0 | 9 | 10 | 12 | 13 | 32)
+}
+
+/// Bytes that may delimit a name token: whitespace plus the structural
+/// delimiters. Used to prove `/Page` is a complete name (not the prefix
+/// of `/Pages`, `/PageMode`, ...) and that a candidate `/Type` is a
+/// complete key.
+fn is_pdf_delimiter(b: u8) -> bool {
+    is_pdf_white(b)
+        || matches!(
+            b,
+            b'/' | b'<' | b'>' | b'[' | b']' | b'(' | b')' | b'{' | b'}'
+        )
+}
+
+/// Best-effort page count for encrypted documents whose objects lopdf
+/// could not load: count `/Type` → `/Page` name pairs in the raw bytes.
+///
+/// Encryption protects strings and streams, not dictionaries, so page
+/// dictionaries remain visible as plaintext `<< /Type /Page ... >>`.
+/// The `/Page` must be a complete name token (rejecting `/Pages` and
+/// friends) and a `/Type` key must precede it with only whitespace in
+/// between (`/Type/Page` adjacency is legal PDF). Pages packed inside
+/// object streams are invisible to this scan and go uncounted — the
+/// result is an estimate, which is acceptable because it is only used
+/// for encrypted input whose `encrypted` flag warns the caller.
+fn raw_page_count(input: &[u8]) -> u32 {
+    let mut count = 0u32;
+    let mut i = 0usize;
+    while i + 5 <= input.len() {
+        if &input[i..i + 5] == b"/Page" {
+            let end_ok = i + 5 >= input.len() || is_pdf_delimiter(input[i + 5]);
+            if end_ok {
+                // Look back a bounded window for the nearest `/Type`.
+                let window_start = i.saturating_sub(48);
+                let mut j = i;
+                let mut typed = false;
+                while j > window_start {
+                    j -= 1;
+                    if j + 5 <= i
+                        && &input[j..j + 5] == b"/Type"
+                        && is_pdf_delimiter(input[j + 5])
+                        && input[j + 5..i].iter().all(|&b| is_pdf_white(b))
+                    {
+                        typed = true;
+                        break;
+                    }
+                }
+                if typed {
+                    count += 1;
+                }
+            }
+        }
+        i += 1;
+    }
+    count
 }
 
 fn info_string(doc: &Document, key: &[u8], encrypted: bool) -> Option<String> {

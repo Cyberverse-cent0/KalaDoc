@@ -41,8 +41,8 @@ use kaladoc::crates::storage::local::config::StorageConfig;
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as LopdfDocument, Object, Stream, dictionary};
 use serde_json::json;
+use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Row, SqlitePool};
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
