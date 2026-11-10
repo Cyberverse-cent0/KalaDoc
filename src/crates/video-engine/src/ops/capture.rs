@@ -33,9 +33,7 @@ use std::sync::OnceLock;
 
 use crate::crates::video_engine::error::VideoResult;
 use crate::crates::video_engine::model::CaptureDevice;
-use crate::crates::video_engine::ops::{
-    find_tool, run_tool, FFMPEG, PROBE_TIMEOUT,
-};
+use crate::crates::video_engine::ops::{FFMPEG, PROBE_TIMEOUT, find_tool, run_tool};
 
 /// Split a `-devices` data line into (demux_flag, mux_flag, name,
 /// description). Returns `None` for headers, separators and blanks.
@@ -68,9 +66,10 @@ fn parse_device_line(line: &str) -> Option<(bool, bool, &str, Option<&str>)> {
     } else {
         (false, false, trimmed_end.trim_start())
     };
-    // Name and description are separated by a run of 2+ spaces (a
-    // single space never occurs inside a device name).
-    let (name, description) = match rest.find("  ") {
+    // Device names never contain spaces; the description (when present)
+    // follows the first whitespace run — a single space when the name
+    // exceeds ffmpeg's name column width.
+    let (name, description) = match rest.find(char::is_whitespace) {
         Some(idx) => {
             let name = rest[..idx].trim();
             let desc = rest[idx..].trim();
@@ -78,8 +77,12 @@ fn parse_device_line(line: &str) -> Option<(bool, bool, &str, Option<&str>)> {
         }
         None => (rest.trim(), None),
     };
-    if name.is_empty() || name.contains('=') {
-        return None; // legend lines like "D. = Demuxing supported"
+    if name.is_empty()
+        || name.contains('=')
+        || name.chars().all(|c| c == '-' || c == '=')
+        || description.is_some_and(|d| d.starts_with('='))
+    {
+        return None; // legend lines like "D. = Demuxing supported", "---"
     }
     Some((demux, mux, name, description))
 }
@@ -98,8 +101,7 @@ pub(crate) fn list_devices() -> VideoResult<Vec<CaptureDevice>> {
     )?;
     if !output.status.success() {
         return Err(crate::crates::video_engine::ops::tool_failure(
-            FFMPEG,
-            &output,
+            FFMPEG, &output,
         ));
     }
 
@@ -281,8 +283,7 @@ pub(crate) fn list_protocols() -> VideoResult<Vec<CaptureDevice>> {
     )?;
     if !output.status.success() {
         return Err(crate::crates::video_engine::ops::tool_failure(
-            FFMPEG,
-            &output,
+            FFMPEG, &output,
         ));
     }
 
@@ -301,10 +302,7 @@ pub(crate) fn list_protocols() -> VideoResult<Vec<CaptureDevice>> {
         }
         // Protocol names are bare single tokens; skip headers, the
         // "Supported file protocols:" title, and blank lines.
-        if trimmed.is_empty()
-            || trimmed.contains(':')
-            || trimmed.chars().any(char::is_whitespace)
-        {
+        if trimmed.is_empty() || trimmed.contains(':') || trimmed.chars().any(char::is_whitespace) {
             continue;
         }
         if direction.is_empty() {
@@ -353,16 +351,13 @@ pub(crate) fn list_hwaccels() -> VideoResult<Vec<CaptureDevice>> {
     )?;
     if !output.status.success() {
         return Err(crate::crates::video_engine::ops::tool_failure(
-            FFMPEG,
-            &output,
+            FFMPEG, &output,
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
-        .filter(|line| {
-            !line.is_empty() && *line != "Hardware acceleration methods:"
-        })
+        .filter(|line| !line.is_empty() && *line != "Hardware acceleration methods:")
         .map(|name| CaptureDevice {
             kind: "hwaccel".to_string(),
             name: name.to_string(),

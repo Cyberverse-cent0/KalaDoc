@@ -159,8 +159,10 @@ fn list_filters(program: &std::path::Path, kind: &str) -> Vec<String> {
         .collect()
 }
 
-/// `ffmpeg -<flag>` name lists (muxers/demuxers/protocols/hwaccels):
-/// second column is the name, preceded by a `D`/`E` flag column.
+/// `ffmpeg -<flag>` name lists. `-muxers`/`-demuxers` print a
+/// `D`/`E` flag column before the name under a short `---` rule;
+/// `-protocols` and `-hwaccels` are plain name lists under section
+/// headers — each gets its own parser.
 fn list_names(program: &std::path::Path, flag: &str) -> Vec<String> {
     let args = vec!["-hide_banner".to_string(), flag.to_string()];
     let Ok(out) = run_tool(FFMPEG, program, &args, PROBE_TIMEOUT) else {
@@ -169,11 +171,59 @@ fn list_names(program: &std::path::Path, flag: &str) -> Vec<String> {
     if !out.status.success() {
         return Vec::new();
     }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .skip_while(|l| !l.trim_start().starts_with("------"))
+    let text = String::from_utf8_lossy(&out.stdout);
+    match flag {
+        "-protocols" => parse_protocols(&text),
+        "-hwaccels" => parse_hwaccels(&text),
+        _ => parse_flag_table(&text),
+    }
+}
+
+/// True for the `---`/`------` rule line that separates ffmpeg's
+/// legend block from the entry rows.
+fn is_rule_line(line: &str) -> bool {
+    let t = line.trim();
+    t.len() >= 3 && t.chars().all(|c| c == '-')
+}
+
+/// `-muxers`/`-demuxers`: legend lines, a dashes rule, then rows of
+/// `<flags> <name> <description>` — the name is the second token.
+fn parse_flag_table(text: &str) -> Vec<String> {
+    text.lines()
+        .skip_while(|l| !is_rule_line(l))
         .skip(1)
+        .take_while(|l| !l.trim().is_empty())
         .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
+        .collect()
+}
+
+/// `-protocols`: `Input:`/`Output:` section headers followed by
+/// one-name-per-line entries.
+fn parse_protocols(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let t = line.trim();
+            // Single-token lines that aren't section labels.
+            if t.is_empty() || t.contains(char::is_whitespace) || t.ends_with(':') {
+                return None;
+            }
+            Some(t.to_string())
+        })
+        .filter(|name| {
+            // Drop header words that are single tokens ("Formats:",
+            // "Supported", ...) — protocol names never contain ':'.
+            !name.contains(':')
+        })
+        .collect()
+}
+
+/// `-hwaccels`: one header line, then one accelerator name per line.
+fn parse_hwaccels(text: &str) -> Vec<String> {
+    text.lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
         .collect()
 }
 

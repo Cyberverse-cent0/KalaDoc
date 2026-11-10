@@ -30,7 +30,22 @@ use crate::crates::video_engine::model::{
     QualityReport, StreamFilter, StreamSelection, SubtitleStyle, VideoInfo,
 };
 use crate::crates::video_engine::ops;
+use crate::crates::video_engine::ops::audio_time::{AudioSpeedParams, ChannelLayout, LoopParams};
 use crate::crates::video_engine::ops::av_visual::VisualStyle;
+use crate::crates::video_engine::ops::composite::{
+    PictureInPictureParams, SideBySideParams, SplitScreenParams,
+};
+use crate::crates::video_engine::ops::enhance::{
+    DeinterlaceMethod, DenoiseParams, FpsConvertParams, SharpenParams, UpscaleParams,
+};
+use crate::crates::video_engine::ops::hdr::HdrToneMapParams;
+use crate::crates::video_engine::ops::interpolate::InterpolateParams;
+use crate::crates::video_engine::ops::metadata_export::ExportFormat;
+use crate::crates::video_engine::ops::preview::{PreviewFormat, PreviewParams};
+use crate::crates::video_engine::ops::proxy::ProxyParams;
+use crate::crates::video_engine::ops::stabilize::StabilizeParams;
+use crate::crates::video_engine::ops::sync::SyncParams;
+use crate::crates::video_engine::ops::waveform::WaveformParams;
 use crate::crates::video_engine::ops::{FFMPEG, FFPROBE, tool_available};
 use crate::crates::video_engine::runtime;
 
@@ -893,6 +908,396 @@ impl VideoEngine {
     /// `ffprobe -version` first line.
     pub fn ffprobe_version(&self) -> VideoResult<String> {
         runtime::ffprobe_version()
+    }
+
+    // ------------------------------------------------------------------
+    // Audio time ops
+    // ------------------------------------------------------------------
+
+    /// Reverse the audio track (`areverse`).
+    pub fn audio_reverse(&self, input: &[u8], limits: &EngineLimits) -> VideoResult<Vec<u8>> {
+        ops::audio_time::audio_reverse(input, limits)
+    }
+
+    /// Repeat the audio `params.count` additional times.
+    pub fn audio_loop(
+        &self,
+        input: &[u8],
+        params: LoopParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::audio_time::audio_loop(input, params, limits)
+    }
+
+    /// Change audio tempo by `params.factor` without pitch shift.
+    pub fn audio_speed(
+        &self,
+        input: &[u8],
+        params: AudioSpeedParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::audio_time::audio_speed(input, params, limits)
+    }
+
+    /// Trim the audio to `[start_ms, end_ms)` into `format`.
+    pub fn audio_trim(
+        &self,
+        input: &[u8],
+        start_ms: u64,
+        end_ms: u64,
+        format: &str,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::audio_time::audio_trim(input, start_ms, end_ms, format, limits)
+    }
+
+    /// Convert the audio channel layout to `layout`.
+    pub fn audio_channels(
+        &self,
+        input: &[u8],
+        layout: &ChannelLayout,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::audio_time::audio_channels(input, layout, limits)
+    }
+
+    /// Transcode the audio stream to `target_format`
+    /// (`mp3`, `wav`, `flac`, `ogg`, `opus`, `m4a`, `aac`).
+    pub fn audio_convert(
+        &self,
+        input: &[u8],
+        target_format: &str,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::audio_time::audio_convert(input, target_format, limits)
+    }
+
+    // ------------------------------------------------------------------
+    // Chapters
+    // ------------------------------------------------------------------
+
+    /// List embedded chapters (millisecond bounds).
+    pub fn chapters_list(&self, input: &[u8]) -> VideoResult<Vec<ops::chapters::ChapterInfo>> {
+        ops::chapters::chapters_list(input)
+    }
+
+    /// Replace the chapter table with `chapters`
+    /// (`(start_ms, end_ms, title)`).
+    pub fn chapters_set(
+        &self,
+        input: &[u8],
+        chapters: &[(i64, i64, &str)],
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::chapters::chapters_set(input, chapters, limits)
+    }
+
+    /// Remove every embedded chapter.
+    pub fn chapters_remove(&self, input: &[u8], limits: &EngineLimits) -> VideoResult<Vec<u8>> {
+        ops::chapters::chapters_remove(input, limits)
+    }
+
+    /// Shift every chapter by `offset_ms` milliseconds.
+    pub fn chapters_shift(
+        &self,
+        input: &[u8],
+        offset_ms: i64,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::chapters::chapters_shift(input, offset_ms, limits)
+    }
+
+    // ------------------------------------------------------------------
+    // Compositing
+    // ------------------------------------------------------------------
+
+    /// Composite `params.overlay` onto `params.base` as picture-in-picture.
+    pub fn picture_in_picture(
+        &self,
+        params: &PictureInPictureParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::composite::picture_in_picture(params, limits)
+    }
+
+    /// Stack `params.left`/`params.right` per `params.orientation`.
+    pub fn side_by_side(
+        &self,
+        params: &SideBySideParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::composite::side_by_side(params, limits)
+    }
+
+    /// Stack `params.top` over `params.bottom` (equal widths required).
+    pub fn split_screen(
+        &self,
+        params: &SplitScreenParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::composite::split_screen(params, limits)
+    }
+
+    // ------------------------------------------------------------------
+    // Enhancement / HDR / frame-rate
+    // ------------------------------------------------------------------
+
+    /// Spatial/temporal denoise per `params`.
+    pub fn denoise(
+        &self,
+        input: &[u8],
+        params: DenoiseParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::enhance::denoise(input, params, limits)
+    }
+
+    /// Sharpen per `params`.
+    pub fn sharpen(
+        &self,
+        input: &[u8],
+        params: SharpenParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::enhance::sharpen(input, params, limits)
+    }
+
+    /// Deinterlace using `method`.
+    pub fn deinterlace(
+        &self,
+        input: &[u8],
+        method: DeinterlaceMethod,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::enhance::deinterlace(input, method, limits)
+    }
+
+    /// Convert to a constant frame rate per `params`.
+    pub fn fps_convert(
+        &self,
+        input: &[u8],
+        params: FpsConvertParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::enhance::fps_convert(input, params, limits)
+    }
+
+    /// Upscale per `params` algorithm/scale.
+    pub fn upscale(
+        &self,
+        input: &[u8],
+        params: UpscaleParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::enhance::upscale(input, params, limits)
+    }
+
+    /// Detect HDR characteristics of `input`.
+    pub fn hdr_detect(&self, input: &[u8]) -> VideoResult<ops::hdr::HdrInfo> {
+        ops::hdr::hdr_detect(input)
+    }
+
+    /// Tone-map HDR `input` per `params`.
+    pub fn hdr_tone_map(
+        &self,
+        input: &[u8],
+        params: &HdrToneMapParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::hdr::hdr_tone_map(input, params, limits)
+    }
+
+    /// Frame-rate conversion / interpolation per `params`.
+    pub fn interpolate_video(
+        &self,
+        input: &[u8],
+        params: &InterpolateParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::interpolate::interpolate_video(input, params, limits)
+    }
+
+    // ------------------------------------------------------------------
+    // Proxy / segmentation / sync
+    // ------------------------------------------------------------------
+
+    /// Generate a low-res proxy per `params`.
+    pub fn generate_proxy(
+        &self,
+        input: &[u8],
+        params: &ProxyParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::proxy::generate_proxy(input, params, limits)
+    }
+
+    /// Split `input` into `segment_secs`-long segments of `format`.
+    pub fn split_by_duration(
+        &self,
+        input: &[u8],
+        segment_secs: f64,
+        format: &str,
+        limits: &EngineLimits,
+    ) -> VideoResult<ops::segment::SplitResult> {
+        ops::segment::split_by_duration(input, segment_secs, format, limits)
+    }
+
+    /// Split `input` at scene changes (threshold `threshold`).
+    pub fn split_by_scenes(
+        &self,
+        input: &[u8],
+        threshold: f64,
+        format: &str,
+        limits: &EngineLimits,
+    ) -> VideoResult<ops::segment::SplitResult> {
+        ops::segment::split_by_scenes(input, threshold, format, limits)
+    }
+
+    /// Split `input` into `parts` equal-duration segments.
+    pub fn split_equal(
+        &self,
+        input: &[u8],
+        parts: u32,
+        format: &str,
+        limits: &EngineLimits,
+    ) -> VideoResult<ops::segment::SplitResult> {
+        ops::segment::split_equal(input, parts, format, limits)
+    }
+
+    /// Extract `[start_ms, end_ms)` of `input` into `format`.
+    pub fn extract_segment(
+        &self,
+        input: &[u8],
+        start_ms: u64,
+        end_ms: u64,
+        format: &str,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::segment::extract_segment(input, start_ms, end_ms, format, limits)
+    }
+
+    /// Measure A/V sync offsets.
+    pub fn av_sync_report(&self, input: &[u8]) -> VideoResult<ops::sync::SyncReport> {
+        ops::sync::av_sync_report(input)
+    }
+
+    /// Apply manual A/V sync correction per `params`.
+    pub fn av_sync_fix(
+        &self,
+        input: &[u8],
+        params: &SyncParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::sync::av_sync_fix(input, params, limits)
+    }
+
+    /// Automatically align audio/video start times.
+    pub fn av_sync_auto(&self, input: &[u8], limits: &EngineLimits) -> VideoResult<Vec<u8>> {
+        ops::sync::av_sync_auto(input, limits)
+    }
+
+    // ------------------------------------------------------------------
+    // Validation / waveform / concat / metadata / preview / stabilize
+    // ------------------------------------------------------------------
+
+    /// Full media validation report.
+    pub fn validate_media(
+        &self,
+        input: &[u8],
+        limits: &EngineLimits,
+    ) -> VideoResult<ops::validate::ValidationReport> {
+        ops::validate::validate_media(input, limits)
+    }
+
+    /// Cheap sanity check: returns `true` when `input` looks like media.
+    pub fn validate_quick(&self, input: &[u8]) -> VideoResult<bool> {
+        ops::validate::validate_quick(input)
+    }
+
+    /// Render an audio waveform/spectrogram image per `params`.
+    pub fn audio_waveform_image(
+        &self,
+        input: &[u8],
+        params: &WaveformParams,
+    ) -> VideoResult<Vec<u8>> {
+        ops::waveform::audio_waveform_image(input, params)
+    }
+
+    /// Concatenate heterogeneous inputs into `format`.
+    pub fn concat_hetero(
+        &self,
+        inputs: &[Vec<u8>],
+        format: &str,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::concat_filter::concat_hetero(inputs, format, limits)
+    }
+
+    /// Structured metadata report for `input`.
+    pub fn metadata_report(
+        &self,
+        input: &[u8],
+    ) -> VideoResult<ops::metadata_export::MetadataReport> {
+        ops::metadata_export::metadata_report(input)
+    }
+
+    /// Export metadata as `format` (json/xml/csv/text).
+    pub fn metadata_export(&self, input: &[u8], format: ExportFormat) -> VideoResult<Vec<u8>> {
+        ops::metadata_export::metadata_export(input, format)
+    }
+
+    /// Set container metadata tags (`(key, value)` pairs).
+    pub fn metadata_set(
+        &self,
+        input: &[u8],
+        tags: &[(String, String)],
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::metadata_export::metadata_set(input, tags, limits)
+    }
+
+    /// Diff the metadata of `a` and `b`.
+    pub fn metadata_compare(
+        &self,
+        a: &[u8],
+        b: &[u8],
+    ) -> VideoResult<ops::metadata_export::MetadataDiff> {
+        ops::metadata_export::metadata_compare(a, b)
+    }
+
+    /// Render an animated preview per `params`.
+    pub fn video_preview(
+        &self,
+        input: &[u8],
+        params: &PreviewParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::preview::video_preview(input, params, limits)
+    }
+
+    /// Whether this ffmpeg build can encode `format` previews.
+    pub fn preview_encoder_available(&self, format: PreviewFormat) -> bool {
+        ops::preview::preview_encoder_available(format)
+    }
+
+    /// Stabilize shaky footage per `params.algo`.
+    pub fn stabilize_video(
+        &self,
+        input: &[u8],
+        params: &StabilizeParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::stabilize::stabilize_video(input, params, limits)
+    }
+
+    /// Stabilize with the best available backend (vidstab → deshake).
+    pub fn stabilize_auto(
+        &self,
+        input: &[u8],
+        params: &StabilizeParams,
+        limits: &EngineLimits,
+    ) -> VideoResult<Vec<u8>> {
+        ops::stabilize::stabilize_auto(input, params, limits)
     }
 }
 

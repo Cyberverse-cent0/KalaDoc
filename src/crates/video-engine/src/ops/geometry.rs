@@ -261,8 +261,19 @@ pub(crate) fn rotate(input: &[u8], degrees: f64, limits: &EngineLimits) -> Video
     }
     let ctx = prepare(input, limits, "rotate")?;
     let radians = degrees.to_radians();
+    // ffmpeg's rotate defaults ow/oh to the input size, clipping
+    // right-angle rotations; pass the rotated bounding box explicitly
+    // (rounded up to even for yuv420p).
+    let (w, h) = (f64::from(ctx.width), f64::from(ctx.height));
+    let sin = radians.sin().abs();
+    let cos = radians.cos().abs();
+    let out_w = ((w * cos + h * sin).ceil() as u64 + 1) & !1;
+    let out_h = ((w * sin + h * cos).ceil() as u64 + 1) & !1;
+    check_output_pixels(limits, out_w, out_h)?;
     // Six decimals (~0.00006°) is far below pixel precision.
-    ctx.execute(&format!("rotate={radians:.6}:fillcolor=black"))
+    ctx.execute(&format!(
+        "rotate={radians:.6}:ow={out_w}:oh={out_h}:fillcolor=black"
+    ))
 }
 
 /// Mirror `input` horizontally or vertically.

@@ -160,8 +160,12 @@ to `pending` on every poll tick. The CLI surface lives under
 `kaladoc jobs` (`worker`, `list`, `enqueue`, `cancel`, `retry`,
 `recover`); built-in handlers (`document.ingest`,
 `document.metadata_extract`, `document.index`, `thumbnail.generate`,
-`pdf.inspect`, `video.probe`, `video.thumbnail`, `video.transcode`,
-`video.trim`, `storage.gc_staging`, `system.ping`) are registered by
+`pdf.inspect`, the 28 `video.*` kinds (probe, thumbnail, transcode,
+trim, remux, extract_frames, subtitles_extract, analyze,
+package_hls, metadata_set/strip, extract_streams, audio_volume,
+contact_sheet, speed, reverse, loop, freeze, resize, crop, rotate,
+flip, gif, slideshow, normalize, loudness, scene_frames, merge_av),
+`storage.gc_staging`, `system.ping`) are registered by
 `application::job_handlers::register_builtin`.
 Config: `[jobs]` section / `JOB_*` env vars → `AppConfig::to_job_config`.
 See `.doc/job_engine.md` for usage.
@@ -175,11 +179,15 @@ Pure domain layer — persistence/execution wiring is still planned.
 Video/audio processing engine (`crates/video-engine`) implementing
 `ProcessingEngine` as `name = "video"`, `kind = EngineKind::Video`.
 All operations shell out to external `ffmpeg`/`ffprobe` binaries on
-`PATH` — never bundled — and are exposed via the CLI
-(`kaladoc video probe|thumbnail|trim|transcode|concat|extract-audio`)
-and job kinds (`video.probe`, `video.thumbnail`, `video.transcode`,
-`video.trim`). Registered in `EngineRegistry::builtin()` alongside the
-other engines. See `.doc/video_engine.md`.
+`PATH` — never bundled — and are exposed via the `kaladoc video`
+CLI (~80 subcommands covering probe/trim/transcode/remux, geometry,
+tempo, audio processing, frames/slideshows, subtitles, filters,
+overlays, stream ops, analysis/loudness/quality, HLS/DASH packaging,
+and runtime capability discovery) and 28 `video.*` job kinds.
+Runtime capability discovery (`media_capabilities`,
+`ffmpeg -encoders`-backed encode presets) advertises only what the
+host ffmpeg build supports. Registered in `EngineRegistry::builtin()`
+alongside the other engines. See `.doc/video_engine.md`.
 
 ### `deployments::require`
 Standalone deployment prerequisite checker: verifies `rust`, `cargo`, `tar`,

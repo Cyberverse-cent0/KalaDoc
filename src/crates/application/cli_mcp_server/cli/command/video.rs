@@ -71,7 +71,15 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             profile,
             ext,
             output_file: output,
-        } => encode(ctx, &engine, file, profile, ext.as_deref(), output.as_deref(), &limits),
+        } => encode(
+            ctx,
+            &engine,
+            file,
+            profile,
+            ext.as_deref(),
+            output.as_deref(),
+            &limits,
+        ),
         VideoArgs::Presets => presets(ctx, &engine),
 
         // Geometry
@@ -251,13 +259,7 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             "orient",
             output.as_deref(),
             &limits,
-            |input| {
-                engine.orient(
-                    input,
-                    matches!(orientation, OrientArg::Landscape),
-                    &limits,
-                )
-            },
+            |input| engine.orient(input, matches!(orientation, OrientArg::Landscape), &limits),
         ),
 
         // Tempo / time ops
@@ -479,12 +481,7 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
         } => {
             let input = read_input(file)?;
             let bytes = engine
-                .audio_spectrogram(
-                    &input,
-                    width.unwrap_or(800),
-                    height.unwrap_or(400),
-                    &limits,
-                )
+                .audio_spectrogram(&input, width.unwrap_or(800), height.unwrap_or(400), &limits)
                 .map_err(map_video_error)?;
             let out = output_file.clone();
             check_output(&out, &[file])?;
@@ -496,7 +493,15 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             weights,
             no_normalize,
             output_file: output,
-        } => audio_mix(ctx, &engine, files, weights, *no_normalize, output.as_deref(), &limits),
+        } => audio_mix(
+            ctx,
+            &engine,
+            files,
+            weights,
+            *no_normalize,
+            output.as_deref(),
+            &limits,
+        ),
         VideoArgs::Crossfade {
             files,
             duration,
@@ -525,7 +530,18 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             keyframes,
             format,
             output_dir,
-        } => frames(ctx, &engine, file, *every, *fps, *all, *keyframes, format, output_dir.as_deref(), &limits),
+        } => frames(
+            ctx,
+            &engine,
+            file,
+            *every,
+            *fps,
+            *all,
+            *keyframes,
+            format,
+            output_dir.as_deref(),
+            &limits,
+        ),
         VideoArgs::ImageSequence {
             file,
             format,
@@ -553,14 +569,30 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             file,
             threshold,
             output_dir,
-        } => scene_frames(ctx, &engine, file, *threshold, output_dir.as_deref(), &limits),
+        } => scene_frames(
+            ctx,
+            &engine,
+            file,
+            *threshold,
+            output_dir.as_deref(),
+            &limits,
+        ),
         VideoArgs::Slideshow {
             files,
             fps,
             duration,
             ext,
             output_file: output,
-        } => slideshow(ctx, &engine, files, *fps, *duration, ext, output.as_deref(), &limits),
+        } => slideshow(
+            ctx,
+            &engine,
+            files,
+            *fps,
+            *duration,
+            ext,
+            output.as_deref(),
+            &limits,
+        ),
         VideoArgs::ToGif {
             file,
             fps,
@@ -583,7 +615,16 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             width,
             height,
             output_file: output,
-        } => audio_to_video(ctx, &engine, file, *style, *width, *height, output.as_deref(), &limits),
+        } => audio_to_video(
+            ctx,
+            &engine,
+            file,
+            *style,
+            *width,
+            *height,
+            output.as_deref(),
+            &limits,
+        ),
         VideoArgs::GifToVideo {
             file,
             ext,
@@ -623,25 +664,57 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             track,
             format,
             output_file: output,
-        } => subtitles(ctx, &engine, file, *track, format, output.as_deref(), &limits),
+        } => subtitles(
+            ctx,
+            &engine,
+            file,
+            *track,
+            format,
+            output.as_deref(),
+            &limits,
+        ),
         VideoArgs::SubsConvert {
             file,
             from,
             to,
             output_file: output,
-        } => subs_convert(ctx, &engine, file, from.as_deref(), to, output.as_deref(), &limits),
+        } => subs_convert(
+            ctx,
+            &engine,
+            file,
+            from.as_deref(),
+            to,
+            output.as_deref(),
+            &limits,
+        ),
         VideoArgs::SubsShift {
             file,
             offset,
             format,
             output_file: output,
-        } => subs_shift(ctx, &engine, file, *offset, format, output.as_deref(), &limits),
+        } => subs_shift(
+            ctx,
+            &engine,
+            file,
+            *offset,
+            format,
+            output.as_deref(),
+            &limits,
+        ),
         VideoArgs::BurnSubs {
             file,
             subs_file,
             style,
             output_file: output,
-        } => burn_subs(ctx, &engine, file, subs_file, style.as_deref(), output.as_deref(), &limits),
+        } => burn_subs(
+            ctx,
+            &engine,
+            file,
+            subs_file,
+            style.as_deref(),
+            output.as_deref(),
+            &limits,
+        ),
 
         // Filters / overlays / stream ops
         VideoArgs::Filter {
@@ -649,7 +722,15 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             vf,
             af,
             output_file: output,
-        } => filter(ctx, &engine, file, vf.as_deref(), af.as_deref(), output.as_deref(), &limits),
+        } => filter(
+            ctx,
+            &engine,
+            file,
+            vf.as_deref(),
+            af.as_deref(),
+            output.as_deref(),
+            &limits,
+        ),
         VideoArgs::Filters => filters(ctx, &engine),
         VideoArgs::Overlay {
             file,
@@ -658,7 +739,17 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             y,
             opacity,
             output_file: output,
-        } => overlay(ctx, &engine, file, image, *x, *y, *opacity, output.as_deref(), &limits),
+        } => overlay(
+            ctx,
+            &engine,
+            file,
+            image,
+            *x,
+            *y,
+            *opacity,
+            output.as_deref(),
+            &limits,
+        ),
         VideoArgs::Text {
             file,
             text,
@@ -667,7 +758,18 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             size,
             color,
             output_file: output,
-        } => draw_text(ctx, &engine, file, text, *x, *y, *size, color.as_deref(), output.as_deref(), &limits),
+        } => draw_text(
+            ctx,
+            &engine,
+            file,
+            text,
+            *x,
+            *y,
+            *size,
+            color.as_deref(),
+            output.as_deref(),
+            &limits,
+        ),
         VideoArgs::ChromaKey {
             foreground,
             background,
@@ -709,7 +811,15 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             audio,
             ext,
             output_file: output,
-        } => merge_av(ctx, &engine, video, audio, ext.as_deref(), output.as_deref(), &limits),
+        } => merge_av(
+            ctx,
+            &engine,
+            video,
+            audio,
+            ext.as_deref(),
+            output.as_deref(),
+            &limits,
+        ),
         VideoArgs::SetMetadata {
             file,
             tags,
@@ -719,7 +829,14 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             file,
             ext,
             output_file: output,
-        } => strip_metadata(ctx, &engine, file, ext.as_deref(), output.as_deref(), &limits),
+        } => strip_metadata(
+            ctx,
+            &engine,
+            file,
+            ext.as_deref(),
+            output.as_deref(),
+            &limits,
+        ),
         VideoArgs::CoverArt {
             file,
             image,
@@ -728,34 +845,22 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
 
         // Analysis / loudness / quality
         VideoArgs::Analyze { file } => analyze(ctx, &engine, file, &limits),
-        VideoArgs::Scenes {
-            file,
-            threshold,
-        } => scenes(ctx, &engine, file, *threshold, &limits),
-        VideoArgs::BlackFrames { file } => intervals(
-            ctx,
-            &engine,
-            file,
-            "black-frames",
-            &limits,
-            |input| engine.detect_black_frames(input, &limits),
-        ),
-        VideoArgs::FreezeFrames { file } => intervals(
-            ctx,
-            &engine,
-            file,
-            "freeze-frames",
-            &limits,
-            |input| engine.detect_freeze_frames(input, &limits),
-        ),
-        VideoArgs::Silences { file } => intervals(
-            ctx,
-            &engine,
-            file,
-            "silences",
-            &limits,
-            |input| engine.detect_silence(input, &limits),
-        ),
+        VideoArgs::Scenes { file, threshold } => scenes(ctx, &engine, file, *threshold, &limits),
+        VideoArgs::BlackFrames { file } => {
+            intervals(ctx, &engine, file, "black-frames", &limits, |input| {
+                engine.detect_black_frames(input, &limits)
+            })
+        }
+        VideoArgs::FreezeFrames { file } => {
+            intervals(ctx, &engine, file, "freeze-frames", &limits, |input| {
+                engine.detect_freeze_frames(input, &limits)
+            })
+        }
+        VideoArgs::Silences { file } => {
+            intervals(ctx, &engine, file, "silences", &limits, |input| {
+                engine.detect_silence(input, &limits)
+            })
+        }
         VideoArgs::Loudness { file } => loudness(ctx, &engine, file, &limits),
         VideoArgs::NormalizeLufs {
             file,
@@ -775,21 +880,34 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             reference,
             distorted,
             metrics,
-        } => quality(ctx, &engine, reference, distorted, metrics.as_deref(), &limits),
+        } => quality(
+            ctx,
+            &engine,
+            reference,
+            distorted,
+            metrics.as_deref(),
+            &limits,
+        ),
 
         // Packaging
-        VideoArgs::Hls {
+        VideoArgs::Hls { file, output_dir } => package(
+            ctx,
+            &engine,
             file,
-            output_dir,
-        } => package(ctx, &engine, file, "hls", output_dir.as_deref(), &limits, |e, input, l| {
-            e.package_hls(input, l)
-        }),
-        VideoArgs::Dash {
+            "hls",
+            output_dir.as_deref(),
+            &limits,
+            |e, input, l| e.package_hls(input, l),
+        ),
+        VideoArgs::Dash { file, output_dir } => package(
+            ctx,
+            &engine,
             file,
-            output_dir,
-        } => package(ctx, &engine, file, "dash", output_dir.as_deref(), &limits, |e, input, l| {
-            e.package_dash(input, l)
-        }),
+            "dash",
+            output_dir.as_deref(),
+            &limits,
+            |e, input, l| e.package_dash(input, l),
+        ),
         VideoArgs::Faststart {
             file,
             output_file: output,
@@ -804,7 +922,9 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
 
         // Runtime inspection
         VideoArgs::Devices => device_list(ctx, &engine.list_devices().map_err(map_video_error)?),
-        VideoArgs::Protocols => device_list(ctx, &engine.list_protocols().map_err(map_video_error)?),
+        VideoArgs::Protocols => {
+            device_list(ctx, &engine.list_protocols().map_err(map_video_error)?)
+        }
         VideoArgs::Hwaccels => device_list(ctx, &engine.list_hwaccels().map_err(map_video_error)?),
         VideoArgs::Capabilities => capabilities(ctx, &engine),
         VideoArgs::Versions => versions(ctx, &engine),
@@ -1011,10 +1131,7 @@ fn concat(
         .concat(&inputs, &ext, &EngineLimits::default())
         .map_err(map_video_error)?;
 
-    let out = pick_out(
-        output,
-        Ok(files[0].with_file_name(format!("concat.{ext}"))),
-    )?;
+    let out = pick_out(output, Ok(files[0].with_file_name(format!("concat.{ext}"))))?;
     check_output_multi(&out, files)?;
     write_output(&out, &bytes)?;
     report(ctx, &files[0], &out, "concat", bytes.len())
@@ -1053,7 +1170,9 @@ fn remux(
 ) -> Result<i32, CliError> {
     let ext = sanitize_extension(target_ext)?;
     let input = read_input(file)?;
-    let bytes = engine.remux(&input, &ext, limits).map_err(map_video_error)?;
+    let bytes = engine
+        .remux(&input, &ext, limits)
+        .map_err(map_video_error)?;
     let out = pick_out(output, Ok(file.with_extension(&ext)))?;
     check_output(&out, &[file])?;
     write_output(&out, &bytes)?;
@@ -1070,14 +1189,11 @@ fn encode(
     limits: &EngineLimits,
 ) -> Result<i32, CliError> {
     let presets = engine.encode_presets();
-    let profile = presets
-        .get(profile)
-        .cloned()
-        .ok_or_else(|| {
-            CliError::Usage(format!(
-                "unknown encode preset {profile:?}; run `kaladoc video presets` to list them"
-            ))
-        })?;
+    let profile = presets.get(profile).cloned().ok_or_else(|| {
+        CliError::Usage(format!(
+            "unknown encode preset {profile:?}; run `kaladoc video presets` to list them"
+        ))
+    })?;
     let ext = match ext {
         Some(e) => sanitize_extension(e)?,
         None => "mp4".to_string(),
@@ -1144,7 +1260,9 @@ fn audio_merge(
 ) -> Result<i32, CliError> {
     require_multi(files, "audio-merge")?;
     let inputs = read_inputs(files)?;
-    let bytes = engine.audio_merge(&inputs, limits).map_err(map_video_error)?;
+    let bytes = engine
+        .audio_merge(&inputs, limits)
+        .map_err(map_video_error)?;
     let out = pick_out(output, marked_same_ext(&files[0], "merged"))?;
     check_output_multi(&out, files)?;
     write_output(&out, &bytes)?;
@@ -1754,10 +1872,7 @@ fn chroma_key(
         )
         .map_err(map_video_error)?;
     let out = pick_out(output, marked_same_ext(foreground, "keyed"))?;
-    check_output_multi(
-        &out,
-        &[foreground.to_path_buf(), background.to_path_buf()],
-    )?;
+    check_output_multi(&out, &[foreground.to_path_buf(), background.to_path_buf()])?;
     write_output(&out, &bytes)?;
     report(ctx, foreground, &out, "chroma-key", bytes.len())
 }
@@ -1828,9 +1943,9 @@ fn set_metadata(
 ) -> Result<i32, CliError> {
     let mut map = BTreeMap::new();
     for tag in tags {
-        let (k, v) = tag.split_once('=').ok_or_else(|| {
-            CliError::Usage(format!("--tag must be key=value, got {tag:?}"))
-        })?;
+        let (k, v) = tag
+            .split_once('=')
+            .ok_or_else(|| CliError::Usage(format!("--tag must be key=value, got {tag:?}")))?;
         let key = k.trim();
         if key.is_empty() {
             return Err(CliError::Usage(format!("empty tag key in {tag:?}")));
@@ -1967,11 +2082,7 @@ fn intervals(
     emit_intervals(ctx, kind, &segs)
 }
 
-fn emit_intervals(
-    ctx: &Context,
-    kind: &str,
-    segs: &[(f64, f64)],
-) -> Result<i32, CliError> {
+fn emit_intervals(ctx: &Context, kind: &str, segs: &[(f64, f64)]) -> Result<i32, CliError> {
     let v = serde_json::json!({ "kind": kind, "intervals": segs });
     if ctx.emit_structured(&v)? {
         return Ok(0);
@@ -1989,7 +2100,9 @@ fn loudness(
     limits: &EngineLimits,
 ) -> Result<i32, CliError> {
     let input = read_input(file)?;
-    let report = engine.measure_loudness(&input, limits).map_err(map_video_error)?;
+    let report = engine
+        .measure_loudness(&input, limits)
+        .map_err(map_video_error)?;
     if emit_kv(
         ctx,
         &report,
@@ -2012,7 +2125,9 @@ fn audio_stats(
     limits: &EngineLimits,
 ) -> Result<i32, CliError> {
     let input = read_input(file)?;
-    let stats = engine.audio_stats(&input, limits).map_err(map_video_error)?;
+    let stats = engine
+        .audio_stats(&input, limits)
+        .map_err(map_video_error)?;
     if ctx.emit_structured(&stats)? {
         return Ok(0);
     }
@@ -2069,7 +2184,11 @@ fn package(
     kind: &'static str,
     output_dir: Option<&Path>,
     limits: &EngineLimits,
-    pack: impl FnOnce(&VideoEngine, &[u8], &EngineLimits) -> crate::crates::video_engine::VideoResult<MediaOutput>,
+    pack: impl FnOnce(
+        &VideoEngine,
+        &[u8],
+        &EngineLimits,
+    ) -> crate::crates::video_engine::VideoResult<MediaOutput>,
 ) -> Result<i32, CliError> {
     let input = read_input(file)?;
     let out = pack(engine, &input, limits).map_err(map_video_error)?;
@@ -2101,11 +2220,7 @@ fn capabilities(ctx: &Context, engine: &VideoEngine) -> Result<i32, CliError> {
     let protocols = engine.list_protocols().map_err(map_video_error)?;
     let hwaccels = engine.list_hwaccels().map_err(map_video_error)?;
     let encode_presets: Vec<&str> = engine.encode_presets().keys().copied().collect();
-    let filter_presets: Vec<&str> = engine
-        .filter_presets()
-        .iter()
-        .map(|p| p.name)
-        .collect();
+    let filter_presets: Vec<&str> = engine.filter_presets().iter().map(|p| p.name).collect();
     let report = serde_json::json!({
         "ffmpeg": ffmpeg,
         "ffprobe": ffprobe,
@@ -2121,10 +2236,7 @@ fn capabilities(ctx: &Context, engine: &VideoEngine) -> Result<i32, CliError> {
     }
     println!("ffmpeg: {ffmpeg}");
     println!("ffprobe: {ffprobe}");
-    println!(
-        "hwaccel: {}",
-        hwaccel.as_deref().unwrap_or("(software)")
-    );
+    println!("hwaccel: {}", hwaccel.as_deref().unwrap_or("(software)"));
     println!("devices: {}", devices.len());
     println!("protocols: {}", protocols.len());
     println!("hwaccels: {}", hwaccels.len());
@@ -2384,16 +2496,20 @@ fn parse_csv_u32(s: Option<&str>) -> Result<Option<Vec<u32>>, CliError> {
                 if t.is_empty() {
                     continue;
                 }
-                out.push(t.parse::<u32>().map_err(|_| {
-                    CliError::Usage(format!("invalid stream ordinal {t:?}"))
-                })?);
+                out.push(
+                    t.parse::<u32>()
+                        .map_err(|_| CliError::Usage(format!("invalid stream ordinal {t:?}")))?,
+                );
             }
             Ok(Some(out))
         }
     }
 }
 
-fn pick_out(output: Option<&Path>, default: Result<PathBuf, CliError>) -> Result<PathBuf, CliError> {
+fn pick_out(
+    output: Option<&Path>,
+    default: Result<PathBuf, CliError>,
+) -> Result<PathBuf, CliError> {
     match output {
         Some(p) => Ok(p.to_path_buf()),
         None => default,
@@ -2412,11 +2528,7 @@ fn render_value(v: &serde_json::Value) -> String {
 /// Emit `value` via [`Context::emit_structured`]; on table output,
 /// print the listed top-level keys as `key: value` lines (nulls
 /// skipped). Returns `true` when structured output was written.
-fn emit_kv<T: Serialize>(
-    ctx: &Context,
-    value: &T,
-    keys: &[&str],
-) -> Result<bool, CliError> {
+fn emit_kv<T: Serialize>(ctx: &Context, value: &T, keys: &[&str]) -> Result<bool, CliError> {
     if ctx.emit_structured(value)? {
         return Ok(true);
     }

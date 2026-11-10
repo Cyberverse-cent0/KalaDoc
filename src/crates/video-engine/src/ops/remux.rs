@@ -33,6 +33,7 @@ fn muxer_for(ext: &str) -> &str {
         "mkv" => "matroska",
         "m4a" => "ipod",
         "aac" => "adts",
+        "ts" | "mpegts" => "mpegts",
         other => other,
     }
 }

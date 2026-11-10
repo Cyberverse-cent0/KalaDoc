@@ -64,8 +64,8 @@ pub use engine::SecurityEngine;
 pub use error::{SecurityError, SecurityResult};
 pub use filename::sanitize_filename;
 pub use limits::ResourceLimits;
-pub use sniff::{sniff_format, AudioContainer, SniffedFormat, VideoContainer};
-pub use validate::{validate_pdf, validate_upload, ValidationReport};
+pub use sniff::{AudioContainer, SniffedFormat, VideoContainer, sniff_format};
+pub use validate::{ValidationReport, validate_pdf, validate_upload};
 
 #[cfg(test)]
 mod tests {

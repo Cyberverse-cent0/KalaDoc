@@ -45,6 +45,7 @@ KalaDoc follows a modular architecture with clearly defined responsibilities.
 | Storage Engine | Physical document storage, path confinement, and quota management |
 | Document Engine | Document identity, metadata, versions, and lifecycle management |
 | Job Engine | Background task execution and job persistence |
+| Video Engine | ffmpeg/ffprobe-backed video and audio processing |
 | Shared Public | Shared platform detection and public utilities |
 | Deployments | Platform-specific dependency and environment checks |
 
@@ -99,7 +100,7 @@ The technology stack is intentionally modular so that infrastructure and process
 - Cargo.
 - Git.
 - Platform-specific dependencies required by the enabled engines.
-- `ffmpeg` and `ffprobe` binaries on `PATH` (required by the video engine — detected, never bundled).
+- `ffmpeg` and `ffprobe` binaries on `PATH` (required by the video engine — detected at runtime, never bundled; see `.doc/video_engine.md`).
 
 ### Clone the repository
 
@@ -201,7 +202,7 @@ Planned development areas include:
 - PDF manipulation and rendering.
 - Image processing and OCR.
 - Document format conversion.
-- Video processing via the ffmpeg-backed video engine.
+- Video and audio processing via the ffmpeg-backed video engine (`kaladoc video`, `video.*` jobs — see `.doc/video_engine.md`).
 - Pipeline-based document automation.
 - CLI and MCP integrations.
 
