@@ -134,6 +134,19 @@ pub fn extract_signer_certificates(
 ) -> PdfResult<Vec<SignerCert>> {
     let doc = load_pdf(input, limits)?;
     let sig_dicts = collect_signature_dicts(&doc);
+    #[cfg(test)]
+    eprintln!(
+        "DEBUG sig_dicts={} contents={:?} cert_keys={:?}",
+        sig_dicts.len(),
+        sig_dicts
+            .iter()
+            .map(|d| signature_contents(&doc, d).map(|c| c.len()))
+            .collect::<Vec<_>>(),
+        sig_dicts
+            .iter()
+            .map(|d| d.has(b"Cert"))
+            .collect::<Vec<_>>()
+    );
 
     // CMS-embedded certificates need openssl; probe lazily — only when
     // at least one signature carries a usable /Contents blob. When the
