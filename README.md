@@ -2,188 +2,199 @@
 
 **A Rust-powered document management and processing platform.**
 
-KalaDoc is a modular document platform designed to ingest, organize, store, and process documents through a unified application architecture.
+KalaDoc ingests, organizes, stores, and processes documents through a single
+application with three interfaces: a command-line tool (`kaladoc`), an HTTP API
+(`kaladoc serve`), and MCP tools for AI assistants (`kaladoc mcp`).
 
-Built with Rust, KalaDoc prioritizes reliability, performance, security, and extensibility. Its modular engine architecture provides a foundation for document management, storage, PDF processing, video processing, conversion, automation, and AI-assisted workflows.
+This document describes what KalaDoc can do **today** — the current release
+baseline — and how to get started with it.
 
-`APP_SECRET_KEY` must be at least 32 characters (see Validation rules).
+`APP_SECRET_KEY` must be at least 32 characters (see Configuration).
 
 ---
 
-## Validation rules
+## What KalaDoc can do
 
-Inputs are validated before they reach storage or the database:
+KalaDoc ships **7 processing engines** behind one registry. Every engine is
+reachable three ways: directly from the CLI, as a durable background job, and
+through the HTTP API. `kaladoc engine list` and `kaladoc engine health` show
+what is registered and which external tools are available.
 
-- **User name** — 3–32 chars, ASCII letters/digits plus `_`, `-`, `.`
-- **Email** — 1–254 chars, no whitespace, `local@domain.tld` shape
-- **Password** — 8–1024 chars (hashed with Argon2id before storage)
-- **`APP_SECRET_KEY`** — when set: 32–1024 chars, printable ASCII, no whitespace
-- **Filenames/uploads** — `security_engine` sanitizes names, sniffs magic
-  bytes (never trusts extensions), and enforces size/page/output limits
-- **Job payloads** — handlers confine paths to the storage root and
-  reject absolute paths / `..` components
-
-## Overview
-
-KalaDoc is designed around a simple principle:
-
-> Documents should be managed through a unified system, while specialized engines handle the complexity of processing them.
-
-The application separates business logic, document management, physical storage, and processing capabilities into well-defined components.
-
-Its architecture is designed to support multiple interfaces, including command-line tools, APIs, and Model Context Protocol (MCP) integrations.
-
-## Architecture
-
-KalaDoc follows a modular architecture with clearly defined responsibilities.
-
-| Component | Responsibility |
+| Engine | What it does |
 |---|---|
-| Configuration | Layered application configuration and runtime settings |
-| Core | Shared domain types, primitives, and engine contracts |
-| Application | Business services, document facade, and CLI adapter |
-| Storage Engine | Local and remote (S3) document storage, path confinement, quota |
-| Document Engine | Document identity, metadata, versions, and lifecycle management |
-| Job Engine | Durable background task queue, dispatch, and crash recovery |
-| Scheduler | Recurring jobs driven through the job queue |
-| Engine Registry | Unified registry of processing engines and health checks |
-| Security Engine | Upload validation, filename sanitization, magic-byte sniffing |
-| PDF Engine | PDF manipulation (100+ operations: merge, split, sign, OCR, ...) |
-| Image Engine | Image processing operations |
-| Multimedia Engine | Audio/video processing via managed `ffmpeg`/`ffprobe` processes |
-| Video Engine | ffmpeg/ffprobe-backed video and audio processing (`kaladoc video`, `/media/*` REST endpoints, `video.*` jobs) |
-| Conversion Engine | Document format conversion through pluggable backends |
-| Pipeline Engine | Multi-step document processing pipelines |
-| API | HTTP API (axum) exposing documents, jobs, engines, and pipelines |
-| Observability | Logging, health checks, and request tracing |
-| Shared Public | Shared platform detection and public utilities |
-| Deployments | Platform-specific dependency and environment checks |
+| **PDF** | 155 operations — the full Stirling-PDF-style surface |
+| **Image** | Inspect, resize, convert, rotate, compress, thumbnail, metadata, validate |
+| **Multimedia** | Audio/video via managed `ffmpeg`/`ffprobe` processes |
+| **Video** | ~94 subcommands — the largest media surface |
+| **Conversion** | Format conversion via pandoc / LibreOffice / poppler |
+| **Pipeline** | Multi-step document processing DAGs |
+| **Security** | Upload validation, magic-byte sniffing, resource limits |
 
-Specialized engines implement a common `ProcessingEngine` contract and are registered in `EngineRegistry::builtin()`; they integrate through shared application services rather than calling each other directly.
+### PDF operations (155)
 
-For a detailed explanation of architectural decisions, boundaries, and implementation status, see [`.doc/Architecture.md`](.doc/Architecture.md).
+Organize & pages: `merge`, `merge_mode`, `split`, `split_mode`,
+`split_at_outline`, `single_page`, `extract_pages`, `remove_pages`,
+`replace_pages`, `reorder`, `rotate`, `swap_pages`, `duplicate_pages`,
+`insert_blank`, `remove_blank_pages`, `interleave`, `nup`, `booklet`,
+`poster`, `page_count`, `page_labels` (`get/set/clear`), `page_boxes`
+(`get/set/remove`), `page_rotations`, `page_size` (`get/set`), `resize`,
+`crop`/`clear_crop`, `trim_preset`, `scale_content`, `normalize_orientation`,
+`normalize_rotations`, `set_view_crop`, `repair`
 
-## Project Structure
+Content & editing: `edit_text`, `add_freetext`, `add_ink`, `list_ink`,
+`remove_ink`, `draw_text`, `draw_shapes`, `text_markup`, `overlay`, `stamp`,
+`watermark`, `add_page_numbers`, `headers_footers`, `bates`, `redact`,
+`redact_pages`, `redact_regions`, `remove_hidden_text`, `add_comment`,
+`remove_annotations`, `list_annotations`, `add_links`, `list_links`,
+`remove_links`, `set_transition`, `list_transitions`, `clear_transitions`,
+`set_outline`, `list_outline`, `remove_outline`, `build_outline_from_text`
 
-```text
-KalaDoc/
-├── src/
-│   ├── config/                 # Application configuration
-│   ├── core/                   # Shared domain types and contracts
-│   ├── crates/
-│   │   ├── api/                 # HTTP API (axum)
-│   │   ├── application/         # Application services, job handlers, CLI
-│   │   ├── conversion-engine/   # Format conversion (pandoc/LibreOffice/poppler)
-│   │   ├── core/                # Engine contracts (ProcessingEngine, limits)
-│   │   ├── document_engine/     # Document management and persistence
-│   │   ├── engine-registry/     # Processing-engine registry
-│   │   ├── image-engine/        # Image processing
-│   │   ├── job_engine/          # Durable background job queue
-│   │   ├── multimedia-engine/   # Audio/video via ffmpeg/ffprobe
-│   │   ├── observability/       # Logging, health, request IDs
-│   │   ├── pdf-engine/          # PDF processing (100+ ops)
-│   │   ├── pipeline-engine/     # Multi-step processing pipelines
-│   │   ├── scheduler/           # Recurring-job schedules
-│   │   ├── security-engine/     # Upload validation and sniffing
-│   │   ├── shared_public/       # Shared platform utilities
-│   │   └── storage/             # Local filesystem + remote S3 backends
-│   ├── deployments/            # Deployment and dependency checks
-│   └── main.rs                 # Application entry point
-├── .doc/
-│   └── Architecture.md         # Architecture documentation
-├── Cargo.toml
-├── Cargo.lock
-└── README.md
-```
+Forms & fields: `list_form_fields`, `fill_form`, `create_text_field`,
+`edit_field_props`, `delete_form_field`, `lock_fields`, `unlock_fields`,
+`clear_form`
 
-*The structure above describes the main architectural areas; additional modules may be introduced as the platform evolves.*
+Security & signatures: `encrypt`, `decrypt`, `sign`, `verify_signatures`,
+`signer_certificates`, `parse_certificate`, `timestamp_document`,
+`timestamp_query`, `list_signature_timestamps`, `has_timestamps`,
+`build_timestamp_request`, `request_external_timestamp`, `permissions_report`,
+`sanitize`, `validate`, `audit_content`, `inspect_javascript`, `to_pdfa`,
+`to_pdfua`, `to_pdfx`
 
-## Technology
+Extraction & inspection: `extract_text`, `extract_spans`, `search_text`,
+`extract_images`, `remove_images`, `dedup_images`, `replace_image`,
+`extract_tables`, `extract_key_values`, `extract_metadata`, `set_metadata`,
+`clear_metadata`, `get_xmp`, `set_xmp`, `get_document_dates`,
+`set_document_dates`, `inspect`, `inspect_structure`, `object_report`,
+`inspect_fonts`, `audit_fonts`, `list_layers`, `set_layer_visibility`,
+`list_oc_marked_content`, `remove_oc_properties`, `list_articles`,
+`remove_articles`, `compare`, `document_digest`
 
-KalaDoc uses the Rust ecosystem to build a reliable and efficient application.
+Attachments & portfolio: `list_attachments`, `add_attachment`,
+`extract_attachment`, `remove_attachment`, `create_portfolio`,
+`list_portfolio`
 
-Key technologies include:
+Output & optimization: `render`, `render_pages`, `ocr`, `ocr_detailed`,
+`make_searchable`, `clean_scan`, `deskew`, `detect_orientation`,
+`grayscale`, `invert_colors`, `compress`, `recompress_streams`,
+`garbage_collect`, `linearize`, `flatten`, `convert`, `import_pages`,
+`add_named_destinations`, `list_named_destinations`,
+`remove_named_destination`, `remove_named_objects`, `add_print_marks`,
+`set_page_box`, `remove_page_box`, `clear_page_labels`
 
-- **Rust** — Primary implementation language.
-- **Tokio** — Asynchronous runtime.
-- **SQLx** — Database access and persistence.
-- **SQLite** — Initial application database.
-- **Serde** — Data serialization and deserialization.
-- **Tracing** — Structured application diagnostics.
+### Image operations
 
-The technology stack is intentionally modular so that infrastructure and processing capabilities can evolve independently.
+`inspect`, `resize`, `convert`, `rotate`, `compress`, `thumbnail`,
+`metadata`, `validate` — plus the full engine-level operation set registered
+in the engine registry (format conversion across PNG/JPEG/WebP/TIFF/GIF and
+CMYK handling).
 
-## Development
+### Video operations (~94 `kaladoc video` subcommands)
+
+- **Probe/inspect:** `probe`, `thumbnail`, `inspect`
+- **Transcode/encode:** `transcode`, `encode`, `remux`, `encode presets`
+- **Geometry:** `resize`, `crop`, `pad`, `rotate`, `flip`, `letterbox`,
+  `pillarbox`, `autocrop`, `transpose`, `orient`
+- **Timing:** `trim`, `speed`, `reverse`, `loop`, `freeze`
+- **Audio:** `volume`, `normalize`, `audio-merge`, `audio-concat`, `fade`,
+  `remove-audio`, `channels`, `eq`, `denoise`, `compress-audio`, `pitch`,
+  `spectrogram`, `mix`, `crossfade`, `delay`, `extract-audio`, `replace-audio`
+- **Frames/slideshows:** `frames`, `image-sequence`, `contact-sheet`,
+  `scene-frames`, `slideshow`, `to-gif`, `to-webp`, `to-apng`,
+  `audio-to-video`, `gif-to-video`
+- **Subtitles/streams:** `subtitles`, `subs-convert`, `subs-shift`,
+  `burn-subs`, `extract-streams`, `select-streams`
+- **Compositing:** `filter`, `filters`, `overlay`, `text`, `chroma-key`
+- **Packaging/analysis:** HLS/DASH packaging, concat, loudness/quality
+  analysis, hardware-acceleration discovery
+
+All video operations are also available as `video.*` background jobs (50 job
+kinds) and `/media/*` REST endpoints.
+
+### Conversion
+
+Pluggable backends (`pandoc`, `libreoffice`, `poppler`) convert between
+document formats including HTML→PDF, URL→PDF, EPUB, CBZ/CBR, image→PDF,
+EML→PDF, and the pandoc matrix (docx, odt, markdown, rst, ...). Backends are
+detected at runtime; missing tools report `unavailable`, never crash.
+
+### Pipelines
+
+Define multi-step processing DAGs and run them as a unit — steps dispatch to
+any engine's operations. Available via `kaladoc pipeline list|run|run-dag`,
+`POST /pipelines/run`, and MCP `pipeline_run`.
+
+### Background jobs & scheduling
+
+- Durable SQLite-backed job queue: `jobs worker|list|enqueue|cancel|retry|recover`
+- Crash recovery reaps stale `running` jobs automatically
+- Recurring schedules: `kaladoc schedule list|create|delete|tick`
+- Job kinds: `document.pdf_op`, `document.convert`, `image.*`, `video.*`
+  (50 kinds), `media.*`, `pipeline.run`, and more (64 job handlers total)
+
+### Storage
+
+- Local filesystem storage with per-document versioning, folders, quotas,
+  and atomic upload staging (`storage/stream`)
+- Optional S3-compatible remote backend (AWS S3, MinIO, R2) — env-only config
+- Documents support metadata, tags, related-document links, audit history,
+  restore/purge lifecycle
+
+### Security
+
+- Bearer-token auth on the HTTP API (`kaladoc auth login`)
+- Magic-byte format sniffing (PDF, images, audio, video) — never trusts
+  extensions
+- Filename sanitization, path confinement, size/page/output limits
+- Passwords hashed with Argon2id; `APP_SECRET_KEY` ≥ 32 chars
+
+### MCP (AI assistant) tools
+
+`kaladoc mcp` exposes ~28 tools: `system_info`, `system_health`,
+`engine_list`, `engine_health`, `storage_status`, `document_list`,
+`document_search`, `document_get`, `document_history`, `document_versions`,
+`document_artifacts`, `document_tags`, `document_create`, `document_ingest`,
+`document_rename`, `document_move`, `document_delete`, `document_restore`,
+`document_restore_version`, `folder_list`, `folder_create`, `job_enqueue`,
+`job_list`, `job_cancel`, `pipeline_list`, `pipeline_run`.
+
+---
+
+## Getting started
 
 ### Prerequisites
 
-- Rust toolchain (stable).
-- Cargo.
-- Git.
-- Platform-specific dependencies required by the enabled engines.
-- `ffmpeg` and `ffprobe` binaries on `PATH` (required by the video engine — detected at runtime, never bundled; see `.doc/video_engine.md`).
-
-### Clone the repository
-
-```bash
-git clone https://github.com/Cyberverse-cent0/KalaDoc.git
-cd KalaDoc
-```
+- Rust stable toolchain + Cargo
+- Git
+- External tools are **detected, not bundled** — install what you need:
+  - `ffmpeg` + `ffprobe` — video/multimedia engine
+  - `pdftoppm` + `tesseract` — PDF rendering & OCR
+  - `openssl` — digital signing
+  - `pandoc` / `libreoffice` — conversion backends
 
 ### Build
 
 ```bash
-cargo check
+git clone https://github.com/Cyberverse-cent0/KalaDoc.git
+cd KalaDoc
+cargo build --release
 ```
 
-### Run tests
+### Initialize
 
 ```bash
-cargo test
-```
-
-### Format the code
-
-```bash
-cargo fmt --all
-```
-
-### Run Clippy
-
-```bash
-cargo clippy --all-targets --all-features -- -D warnings
-```
-
-## Database Initialization
-
-KalaDoc provides a database initialization mode.
-
-Configure the required environment variables:
-
-```bash
-export APP_SECRET_KEY="your-application-secret"
+export APP_SECRET_KEY="your-application-secret"   # >= 32 chars
 export APP_DB_USER="your-database-user"
 export APP_DB_PASSWORD="your-database-password"
+
+cargo run --release -- init        # creates/migrates the SQLite database
+cargo run --release -- doctor      # verify config, database, storage health
 ```
 
-Initialize the database:
+### Configuration
 
-```bash
-cargo run -- init
-# or, once built:
-cargo run --release -- init
-```
-
-(`--init-db` remains as a hidden legacy alias for `kaladoc init`.)
-
-Use appropriate secrets for your environment. Do not commit credentials, production secrets, or populated environment files to version control.
-
-## Configuration
-
-Configuration resolves in layers: built-in defaults → `kaladoc.toml`
-(or the file named by `KALADOC_CONFIG` / `--config`) → environment
-variables. Inspect the merged result with `kaladoc config show` /
-`kaladoc config get <dotted.key>`; secrets are always redacted.
+Config resolves in layers: built-in defaults → `kaladoc.toml` (or
+`KALADOC_CONFIG` / `--config`) → environment variables. Secrets are never
+written to the config file.
 
 ```toml
 [database]
@@ -195,27 +206,27 @@ root_dir = "./storage"
 max_size_bytes = 10737418240   # optional quota
 
 [api]
-addr = "127.0.0.1:8080"        # kaladoc serve bind address
+addr = "127.0.0.1:8080"
 
 [jobs]
 poll_interval_secs = 2
 default_max_attempts = 3
 backoff_base_secs = 30
-stale_after_secs = 600         # crash-recovery timeout for running jobs
+stale_after_secs = 600         # crash-recovery timeout
 ```
 
 Notable env vars: `DB_PATH`, `KALADOC_STORAGE_DIR`, `KALADOC_API_ADDR`,
 `KALADOC_LOG_LEVEL`, `JOB_POLL_INTERVAL_SECS`, `JOB_STALE_AFTER_SECS`
-(alias `JOB_RECOVERY_TIMEOUT_SECS`), and the required secrets
-`APP_SECRET_KEY` (≥ 32 chars), `APP_DB_USER`, `APP_DB_PASSWORD`.
-The full mapping is documented on `AppConfig::apply_env` in
-`src/config/mod.rs`. Remote S3 storage and multimedia tool discovery are
-env-only / PATH-based — see the sections below.
+(alias `JOB_RECOVERY_TIMEOUT_SECS`). Inspect the merged config with
+`kaladoc config show` / `kaladoc config get <dotted.key>`.
 
-## Command line
+---
 
-The `kaladoc` binary provides the full local surface (all commands support
-`--output json|yaml`, `--config <path>`, and `--quiet`):
+## Usage
+
+All commands support `--output json|yaml`, `--config <path>`, and `--quiet`.
+
+### Command line
 
 ```text
 kaladoc version                     # version/build info
@@ -226,34 +237,37 @@ kaladoc auth login|logout|status|whoami|session ...
 kaladoc user create|list|delete
 kaladoc jobs worker|list|enqueue|cancel|retry|recover
 kaladoc engine list|health          # registered processing engines
-kaladoc doc list|get|create|rename|move|delete|restore|purge|folders ...
-kaladoc pdf <op>                    # local-file PDF ops (merge, split,
-                                    # rotate, sign, encrypt, ocr, ...)
+kaladoc doc list|get|create|rename|move|delete|restore|purge|
+             upload|download|process|folders|metadata ...
+kaladoc pdf <op>                    # 155 PDF ops on local files
+kaladoc image <op>                  # image ops on local files
+kaladoc video <subcommand>          # ~94 media subcommands
+kaladoc media op                    # generic media operation
+kaladoc pipeline list|run|run-dag   # multi-step pipelines
+kaladoc schedule list|create|delete|tick
+kaladoc storage ...                 # storage inspection/management
+kaladoc convert ...                 # format conversion
 kaladoc serve [--addr host:port]    # start the HTTP API
+kaladoc mcp                         # start the MCP server (stdio)
 ```
 
-Processing engines (`pdf`, `image`, `multimedia`, `convert`, `pipeline`,
-`security`) are also reachable in-process through `EngineRegistry::builtin()`
-and as background jobs (`document.pdf_op`, `pipeline.run`, ...).
-
-External tool dependencies are detected, never assumed: the multimedia
-engine needs `ffmpeg` **and** `ffprobe` on `PATH`; PDF rendering/OCR uses
-`pdftoppm`/`tesseract`; digital signing shells out to `openssl`; conversion
-backends use `pandoc`/`libreoffice`/`pdftoppm` when present. Missing tools
-surface as honest `unavailable` health, not crashes.
-
-## HTTP API
-
-`kaladoc serve` starts the axum API on `api.addr`
-(`127.0.0.1:8080` by default; override with `--addr` or
-`KALADOC_API_ADDR`). The same secrets as the CLI are required.
+Examples:
 
 ```bash
-export APP_SECRET_KEY="..."   # >= 32 chars
-export APP_DB_USER="..."
-export APP_DB_PASSWORD="..."
-kaladoc init                  # once
-kaladoc serve
+kaladoc pdf merge in1.pdf in2.pdf -o merged.pdf
+kaladoc pdf split document.pdf --pages 1-3,7-9 -o parts/
+kaladoc pdf ocr scanned.pdf -o searchable.pdf   # needs tesseract
+kaladoc pdf sign doc.pdf --cert cert.pem --key key.pem -o signed.pdf
+kaladoc video transcode input.mkv -o output.mp4 --preset fast
+kaladoc video thumbnails input.mp4 -o thumbs/ --interval 5
+kaladoc image compress photo.png -o photo_small.png
+kaladoc doc upload report.pdf && kaladoc doc process <id> pdf.merge ...
+```
+
+### HTTP API
+
+```bash
+kaladoc serve            # binds api.addr (127.0.0.1:8080 default)
 ```
 
 ```bash
@@ -261,95 +275,81 @@ curl -s http://127.0.0.1:8080/health        # public: aggregated engine health
 curl -s http://127.0.0.1:8080/openapi.json  # public: OpenAPI 3.x spec
 ```
 
-All other endpoints (`/documents`, `/jobs`, `/engines`, `/pipelines/run`,
-...) require `Authorization: Bearer <session-token>` — obtain one via
-`kaladoc auth login`, which stores the token for reuse.
+All other endpoints require `Authorization: Bearer <session-token>` — get one
+via `kaladoc auth login` (the token is stored for reuse).
 
-## Remote storage (S3)
+Route groups:
 
-The storage crate ships an S3-compatible backend (AWS S3, MinIO, R2, ...)
-configured **exclusively through environment variables** — credentials are
-never read from `kaladoc.toml`:
+- `/documents` — CRUD, versions, tags, metadata, folders, history,
+  related documents, restore/purge, `/documents/{id}/process`,
+  `/documents/{id}/ops/{op}`
+- `/jobs` — enqueue/list/get/cancel/retry, batch jobs
+- `/engines` — registry listing and health
+- `/pipelines` — list/get/run
+- `/media/*` — video engine REST surface
+- `/storage`, `/health`, `/openapi.json`
+
+### MCP server
+
+```bash
+kaladoc mcp    # stdio transport for MCP-compatible AI clients
+```
+
+Exposes the ~28 tools listed above for document, job, pipeline, engine, and
+storage operations.
+
+### Remote storage (S3)
+
+The storage layer supports S3-compatible backends (AWS S3, MinIO, R2),
+configured **only via environment variables**:
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `KALADOC_S3_ENDPOINT` | S3 endpoint URL (empty = derive from region) | `https://s3.{region}.amazonaws.com` |
+| `KALADOC_S3_ENDPOINT` | Endpoint URL (empty = derive from region) | `https://s3.{region}.amazonaws.com` |
 | `KALADOC_S3_BUCKET` | Target bucket (required) | — |
 | `KALADOC_S3_REGION` | AWS region for SigV4 signing | `us-east-1` |
 | `KALADOC_S3_PREFIX` | Key prefix inside the bucket | `""` |
 | `KALADOC_S3_ACCESS_KEY` | Access key id (required) | — |
 | `KALADOC_S3_SECRET_KEY` | Secret access key (required) | — |
 | `KALADOC_S3_TIMEOUT_SECS` | Per-request timeout | `30` |
-| `KALADOC_S3_MAX_ATTEMPTS` | Retry attempts for transient failures | `4` |
+| `KALADOC_S3_MAX_ATTEMPTS` | Retry attempts | `4` |
 
-See `src/crates/storage/remote/` for the backend contract.
+---
 
-## Design Principles
+## Development
 
-KalaDoc is developed around the following engineering principles:
+```bash
+cargo check --all-targets   # fast compile check incl. tests
+cargo test                  # full test suite (~1,900 tests)
+cargo clippy                # lints
+cargo fmt --all             # format
+```
 
-**1. Modular architecture**
+The project is a single Rust crate; `src/crates/*` are modules.
+`ffmpeg`/`ffprobe` must be on `PATH` for video features — they are detected at
+runtime and reported honestly in `kaladoc doctor` / `engine health`.
 
-Each engine has a defined responsibility and communicates through explicit interfaces.
+## Project status
 
-**2. Reuse proven technology**
-
-Established libraries handle general-purpose infrastructure. KalaDoc focuses its custom implementation on document-specific functionality and application behavior.
-
-**3. Resource-aware processing**
-
-Document ingestion and processing should use bounded memory, controlled concurrency, and appropriate temporary storage.
-
-**4. Persistence and reliability**
-
-Important application state and background work should survive process restarts wherever durability is required.
-
-**5. Security by design**
-
-Storage access, document ownership, authentication, authorization, and resource limits are treated as fundamental system requirements.
-
-**6. Multiple interfaces, shared logic**
-
-CLI, HTTP API, and MCP interfaces should use the same application services rather than implementing separate business logic.
-
-**7. Testable engineering**
-
-Domain logic, persistence, storage integration, and processing engines should have independently testable boundaries.
-
-## Project Status
-
-KalaDoc is under active development.
-
-The foundational platform is in place: layered configuration, SQLite
-persistence, document storage with quotas, a durable job queue with crash
-recovery, recurring schedules, and a registry of processing engines —
-PDF (100+ operations), image, multimedia (ffmpeg), security validation,
-format conversion, and multi-step pipelines — exposed through the CLI,
-background jobs, and an HTTP API.
-
-Active development areas include:
-
-- Hardening engine coverage and additional document formats.
-- Wiring the remote S3 storage backend into the application services.
-- Broader pipeline authoring and scheduling UX.
-- Video processing via the ffmpeg-backed video engine — ~80 `kaladoc video` subcommands covering probe/inspect, transcode/remux/encode, geometry and compositing, audio mixing/FX, subtitles and chapters, frames/slideshows, analysis/loudness/quality, HLS/DASH packaging, plus runtime capability discovery — exposed as `video.*` background jobs and `/media/*` REST endpoints (see `.doc/video_engine.md`).
-
-Features should be considered available only when implemented and verified in the codebase.
+KalaDoc is under active development. The current baseline includes the full
+platform described above — document management, durable jobs, scheduling,
+seven processing engines, three interfaces (CLI / HTTP API / MCP) — and is the
+foundation for the upcoming UI and tooling additions.
 
 ## Documentation
 
-Project documentation is maintained in the `.doc/` directory.
+Deeper design and per-engine references live in `.doc/`:
 
-Start with:
-
-- [Architecture](.doc/Architecture.md) — System architecture and design decisions.
-- [PDF engine](.doc/pdf_engine.md) — PDF operation catalog, contracts, and external tool requirements.
+- [Architecture](.doc/Architecture.md) — system design and module boundaries
+- [PDF engine](.doc/pdf_engine.md) — PDF operation catalog and contracts
+- [Video engine](.doc/video_engine.md) — media engine details
+- [Job engine](.doc/job_engine.md) — queue, recovery, scheduling
+- [Stirling-PDF target features](.doc/stirling_pdf_target_features.md)
 
 ## Contributing
 
-Contributions, technical discussions, bug reports, and architectural feedback are welcome.
-
-Before introducing significant architectural changes, review the existing design documentation and preserve established module boundaries.
+Contributions, bug reports, and architectural feedback are welcome. See
+`AGENTS.md` for branch/commit conventions before making changes.
 
 ## License
 
