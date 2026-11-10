@@ -149,10 +149,12 @@ impl ConversionEngine {
             }
         }
 
-        Err(last_retryable.unwrap_or_else(|| ConvertError::BackendFailed {
-            backend: "engine".to_string(),
-            message: "no backend produced a result".to_string(),
-        }))
+        Err(
+            last_retryable.unwrap_or_else(|| ConvertError::BackendFailed {
+                backend: "engine".to_string(),
+                message: "no backend produced a result".to_string(),
+            }),
+        )
     }
 
     /// Post-conversion sanity checks on a backend's output.
@@ -387,10 +389,9 @@ mod tests {
                             reason: reason.clone(),
                         }
                     }
-                    Err(ConvertError::Io(e)) => ConvertError::Io(std::io::Error::new(
-                        e.kind(),
-                        e.to_string(),
-                    )),
+                    Err(ConvertError::Io(e)) => {
+                        ConvertError::Io(std::io::Error::new(e.kind(), e.to_string()))
+                    }
                     Ok(_) => unreachable!(),
                 }),
             }
@@ -457,11 +458,12 @@ mod tests {
     #[test]
     fn falls_back_to_next_backend_on_backend_failed() {
         let failing = Arc::new(
-            MockBackend::available("failing", vec![(Format::Markdown, Format::Pdf)])
-                .failing(ConvertError::BackendFailed {
+            MockBackend::available("failing", vec![(Format::Markdown, Format::Pdf)]).failing(
+                ConvertError::BackendFailed {
                     backend: "failing".to_string(),
                     message: "boom".to_string(),
-                }),
+                },
+            ),
         );
         let ok = Arc::new(MockBackend::available(
             "ok",
@@ -538,9 +540,11 @@ mod tests {
                 vec![(Format::Markdown, Format::Pdf)],
             ));
             let engine = ConversionEngine::with_backends(vec![failing, ok.clone()]);
-            assert!(engine
-                .convert(&req(Format::Markdown, Format::Pdf, b"# hi"))
-                .is_err());
+            assert!(
+                engine
+                    .convert(&req(Format::Markdown, Format::Pdf, b"# hi"))
+                    .is_err()
+            );
             assert_eq!(ok.call_count(), 0);
         }
     }
@@ -682,10 +686,8 @@ mod tests {
 
     #[test]
     fn health_aggregation() {
-        let healthy = ConversionEngine::with_backends(vec![Arc::new(MockBackend::available(
-            "a",
-            vec![],
-        ))]);
+        let healthy =
+            ConversionEngine::with_backends(vec![Arc::new(MockBackend::available("a", vec![]))]);
         let h = futures_lite_block_on(healthy.health());
         assert_eq!(h.status, EngineHealthStatus::Healthy);
 

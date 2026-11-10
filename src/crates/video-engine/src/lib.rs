@@ -55,9 +55,40 @@ mod engine;
 mod error;
 mod model;
 mod ops;
+mod runtime;
 #[cfg(test)]
 mod tests;
 
 pub use engine::VideoEngine;
 pub use error::{VideoError, VideoResult};
-pub use model::VideoInfo;
+pub use model::{
+    CaptureDevice, ChapterInfo, EncodeProfile, FitMode, FramesSpec, LoudnessReport, MediaAnalysis,
+    MediaFile, MediaOutput, QualityReport, StreamFilter, StreamInfo, StreamSelection,
+    SubtitleStyle, VideoInfo,
+};
+pub use ops::audio_time::{AudioSpeedParams, ChannelLayout, LoopParams};
+pub use ops::av_visual::VisualStyle;
+pub use ops::capture::{CaptureFormat, CaptureInputOpts, CaptureOutputOpts, CaptureSource};
+pub use ops::chapters::ChapterInfo as ChapterEdit;
+pub use ops::composite::{
+    Orientation, OverlayPosition, PictureInPictureParams, SideBySideParams, SplitScreenParams,
+};
+pub use ops::enhance::{
+    DeinterlaceMethod, DenoiseParams, FpsConvertParams, SharpenParams, UpscaleAlgorithm,
+    UpscaleParams,
+};
+pub use ops::filters::FilterPreset;
+pub use ops::hdr::{HdrInfo, HdrToneMapParams};
+pub use ops::interpolate::{InterpolateMode, InterpolateParams, MinterpolateOptions};
+pub use ops::live::{
+    STREAM_PROTOCOLS, StreamCapabilityReport, StreamCodec, StreamProtocolCap, StreamPushOpts,
+};
+pub use ops::metadata_export::{ExportFormat, MetadataDiff, MetadataReport};
+pub use ops::preview::{PreviewFormat, PreviewParams};
+pub use ops::proxy::{ProxyKind, ProxyParams};
+pub use ops::segment::{SegmentOutput, SplitResult};
+pub use ops::stabilize::{StabilizeAlgo, StabilizeParams};
+pub use ops::sync::{SyncParams, SyncReport};
+pub use ops::validate::{IssueSeverity, ValidationIssue, ValidationReport};
+pub use ops::waveform::{WaveformKind, WaveformParams};
+pub use runtime::MediaCapabilities;

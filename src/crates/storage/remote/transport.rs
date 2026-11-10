@@ -128,4 +128,3 @@ impl HttpTransport for UreqTransport {
         Ok(HttpResponse { status, body })
     }
 }
-

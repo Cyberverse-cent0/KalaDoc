@@ -17,12 +17,62 @@
 //!   [`VideoError::ExternalTool`] with the tail of stderr; malformed
 //!   media is [`VideoError::InvalidInput`], never a panic.
 
+pub(crate) mod analysis;
+pub(crate) mod audio;
+pub(crate) mod audio_fx;
+pub(crate) mod audio_mix;
+// Ops implemented ahead of engine wiring; dead_code allowed until
+// VideoEngine dispatches to them.
+#[allow(dead_code)]
+pub(crate) mod audio_time;
+pub mod av_visual;
+pub mod capture;
+pub(crate) mod chapters;
+#[allow(dead_code)]
+pub(crate) mod composite;
 pub(crate) mod concat;
+#[allow(dead_code)]
+pub(crate) mod concat_filter;
+pub(crate) mod contact_sheet;
+pub(crate) mod encode;
+#[allow(dead_code)]
+pub(crate) mod enhance;
+pub(crate) mod extract;
 pub(crate) mod extract_audio;
+pub mod filters;
+pub(crate) mod frames;
+pub(crate) mod geometry;
+pub(crate) mod geometry_adv;
+#[allow(dead_code)]
+pub(crate) mod hdr;
+pub(crate) mod interpolate;
+#[allow(dead_code)]
+pub(crate) mod live;
+pub(crate) mod loudness;
+#[allow(dead_code)]
+pub(crate) mod metadata_export;
+pub(crate) mod overlay;
+pub(crate) mod packaging;
+#[allow(dead_code)]
+pub(crate) mod preview;
 pub(crate) mod probe;
+pub(crate) mod proxy;
+pub(crate) mod quality;
+pub(crate) mod remux;
+pub(crate) mod segment;
+pub(crate) mod slideshow;
+#[allow(dead_code)]
+pub(crate) mod stabilize;
+pub(crate) mod stream_ops;
+pub(crate) mod subtitles;
+pub(crate) mod sync;
+pub(crate) mod tempo;
 pub(crate) mod thumbnail;
 pub(crate) mod transcode;
 pub(crate) mod trim;
+#[allow(dead_code)]
+pub(crate) mod validate;
+pub mod waveform;
 
 use std::fs;
 use std::io::{self, Read};
@@ -355,7 +405,9 @@ pub(crate) fn ext_for_format(format_name: &str) -> Option<&'static str> {
     // Prefer the most common/compatible token when a demuxer lists
     // several aliases (mov,mp4,m4a,... all describe the ISO-BMFF
     // family; "mp4" is the safest output extension).
-    for preferred in ["mp4", "matroska", "webm", "avi", "mpegts", "mpeg", "ogg", "flv", "asf"] {
+    for preferred in [
+        "mp4", "matroska", "webm", "avi", "mpegts", "mpeg", "ogg", "flv", "asf",
+    ] {
         if tokens.iter().any(|t| *t == preferred) {
             return Some(match preferred {
                 "matroska" => "mkv",
@@ -379,9 +431,7 @@ pub(crate) fn ext_for_format(format_name: &str) -> Option<&'static str> {
 /// Normalize a caller-supplied target extension: lowercase, trimmed,
 /// leading dot stripped.
 pub(crate) fn normalize_ext(ext: &str) -> String {
-    ext.trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase()
+    ext.trim().trim_start_matches('.').to_ascii_lowercase()
 }
 
 /// Validate `ext` against `allowed` (already-normalized lowercase
@@ -485,18 +535,13 @@ pub(crate) fn encoder_available(name: &str) -> bool {
         let Ok(program) = find_tool(FFMPEG) else {
             return Vec::new();
         };
-        let args = vec![
-            "-hide_banner".to_string(),
-            "-encoders".to_string(),
-        ];
+        let args = vec!["-hide_banner".to_string(), "-encoders".to_string()];
         match run_capture(&program, &args, PROBE_TIMEOUT) {
-            Ok(output) if output.status.success() => {
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter_map(|line| line.split_whitespace().nth(1))
-                    .map(str::to_string)
-                    .collect()
-            }
+            Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_whitespace().nth(1))
+                .map(str::to_string)
+                .collect(),
             _ => Vec::new(),
         }
     });
@@ -515,6 +560,7 @@ pub(crate) fn probe_json(input_path: &Path) -> VideoResult<serde_json::Value> {
         "json".to_string(),
         "-show_format".to_string(),
         "-show_streams".to_string(),
+        "-show_chapters".to_string(),
         input_path.to_string_lossy().into_owned(),
     ];
     let output = run_tool(FFPROBE, &program, &args, PROBE_TIMEOUT)?;

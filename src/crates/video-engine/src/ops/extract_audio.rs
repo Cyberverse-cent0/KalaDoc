@@ -9,7 +9,7 @@ use crate::crates::core::engine::EngineLimits;
 use crate::crates::video_engine::error::{VideoError, VideoResult};
 use crate::crates::video_engine::ops::probe::probe;
 use crate::crates::video_engine::ops::{
-    COMMAND_TIMEOUT, FFMPEG, TempDir, checked_ext, check_input, check_limits, encoder_available,
+    COMMAND_TIMEOUT, FFMPEG, TempDir, check_input, check_limits, checked_ext, encoder_available,
     find_tool, read_output, run_tool, tool_failure, write_input,
 };
 

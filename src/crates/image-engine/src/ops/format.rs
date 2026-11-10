@@ -37,13 +37,7 @@ impl ImageFormat {
 
     /// Every format the engine supports, for capability reporting.
     pub fn all() -> &'static [ImageFormat] {
-        &[
-            Self::Bmp,
-            Self::Gif,
-            Self::Jpeg,
-            Self::Png,
-            Self::WebP,
-        ]
+        &[Self::Bmp, Self::Gif, Self::Jpeg, Self::Png, Self::WebP]
     }
 
     /// Format identifiers as owned strings.
@@ -81,7 +75,9 @@ impl ImageFormat {
 /// `"jpg"` is an alias for [`ImageFormat::Jpeg`]. Anything outside the
 /// supported set — including real formats this engine does not compile
 /// (e.g. `"tiff"`) — is rejected with [`ImageError::InvalidInput`].
-pub(crate) fn parse_target(s: &str) -> crate::crates::image_engine::error::ImageResult<ImageFormat> {
+pub(crate) fn parse_target(
+    s: &str,
+) -> crate::crates::image_engine::error::ImageResult<ImageFormat> {
     use crate::crates::image_engine::error::ImageError;
     match s.trim().to_ascii_lowercase().as_str() {
         "png" => Ok(ImageFormat::Png),

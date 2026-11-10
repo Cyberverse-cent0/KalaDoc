@@ -83,10 +83,13 @@ fn resize(
     }
     let input = read_input(file)?;
     let bytes = engine
-        .resize(&input, ResizeOptions {
-            max_width: width,
-            max_height: height,
-        })
+        .resize(
+            &input,
+            ResizeOptions {
+                max_width: width,
+                max_height: height,
+            },
+        )
         .map_err(map_image_error)?;
 
     // Resized output keeps the input format; default to
@@ -140,7 +143,10 @@ fn report(
     if ctx.emit_structured(&report)? {
         return Ok(0);
     }
-    println!("{} {} -> {} ({} bytes)", report.operation, report.input, report.output, report.bytes_written);
+    println!(
+        "{} {} -> {} ({} bytes)",
+        report.operation, report.input, report.output, report.bytes_written
+    );
     Ok(0)
 }
 
@@ -194,9 +200,7 @@ fn normalize_extension(target: &str) -> String {
 fn map_image_error(e: ImageError) -> CliError {
     match e {
         ImageError::UnsupportedFormat(msg) => CliError::Unsupported(msg),
-        ImageError::InvalidInput(msg) | ImageError::LimitExceeded(msg) => {
-            CliError::Validation(msg)
-        }
+        ImageError::InvalidInput(msg) | ImageError::LimitExceeded(msg) => CliError::Validation(msg),
         ImageError::Decode(_) => CliError::Validation("invalid or unreadable image".to_string()),
         ImageError::Encode(_) => CliError::Internal("image encoding failed".to_string()),
     }

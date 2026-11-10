@@ -127,7 +127,9 @@ pub async fn set_custom_field(
     let mut metadata = get_document_metadata(pool, document_id)
         .await?
         .unwrap_or_else(|| default_metadata(document_id));
-    metadata.custom_fields.insert(key.to_string(), value.clone());
+    metadata
+        .custom_fields
+        .insert(key.to_string(), value.clone());
     upsert_document_metadata(pool, &metadata).await?;
     record_event(
         pool,
@@ -247,7 +249,12 @@ mod tests {
         let pool = test_pool().await;
         let doc_id = new_doc(&pool, "report.pdf").await;
 
-        assert!(get_document_metadata(&pool, &doc_id).await.unwrap().is_none());
+        assert!(
+            get_document_metadata(&pool, &doc_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         let meta = sample_metadata(&doc_id);
         upsert_document_metadata(&pool, &meta).await.unwrap();
@@ -267,25 +274,30 @@ mod tests {
         upsert_document_metadata(&pool, &sample_metadata(&doc_id))
             .await
             .unwrap();
-        let first = get_document_metadata(&pool, &doc_id).await.unwrap().unwrap();
+        let first = get_document_metadata(&pool, &doc_id)
+            .await
+            .unwrap()
+            .unwrap();
 
         let mut updated = sample_metadata(&doc_id);
         updated.title = Some("Renamed".to_string());
         updated.keywords = vec!["only".to_string()];
         upsert_document_metadata(&pool, &updated).await.unwrap();
 
-        let second = get_document_metadata(&pool, &doc_id).await.unwrap().unwrap();
+        let second = get_document_metadata(&pool, &doc_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(second.title.as_deref(), Some("Renamed"));
         assert_eq!(second.keywords, vec!["only".to_string()]);
         // created_at is preserved across upserts — verified indirectly by
         // the row still existing exactly once.
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM document_metadata_tbl WHERE document_id = ?",
-        )
-        .bind(doc_id.as_str())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM document_metadata_tbl WHERE document_id = ?")
+                .bind(doc_id.as_str())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(count, 1);
         let _ = first;
     }
@@ -313,16 +325,29 @@ mod tests {
         set_custom_field(&pool, &doc_id, "nested", &serde_json::json!({"a": [1, 2]}))
             .await
             .unwrap();
-        let fetched = get_document_metadata(&pool, &doc_id).await.unwrap().unwrap();
-        assert_eq!(fetched.custom_fields["nested"], serde_json::json!({"a": [1, 2]}));
+        let fetched = get_document_metadata(&pool, &doc_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fetched.custom_fields["nested"],
+            serde_json::json!({"a": [1, 2]})
+        );
 
-        assert!(remove_custom_field(&pool, &doc_id, "financial_year")
+        assert!(
+            remove_custom_field(&pool, &doc_id, "financial_year")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !remove_custom_field(&pool, &doc_id, "financial_year")
+                .await
+                .unwrap()
+        );
+        let fetched = get_document_metadata(&pool, &doc_id)
             .await
-            .unwrap());
-        assert!(!remove_custom_field(&pool, &doc_id, "financial_year")
-            .await
-            .unwrap());
-        let fetched = get_document_metadata(&pool, &doc_id).await.unwrap().unwrap();
+            .unwrap()
+            .unwrap();
         assert!(!fetched.custom_fields.contains_key("financial_year"));
         assert!(fetched.custom_fields.contains_key("nested"));
     }
@@ -347,7 +372,12 @@ mod tests {
 
         assert!(delete_document_metadata(&pool, &doc_id).await.unwrap());
         assert!(!delete_document_metadata(&pool, &doc_id).await.unwrap());
-        assert!(get_document_metadata(&pool, &doc_id).await.unwrap().is_none());
+        assert!(
+            get_document_metadata(&pool, &doc_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         // ON DELETE CASCADE removes metadata with the document.
         upsert_document_metadata(&pool, &sample_metadata(&doc_id))
@@ -358,13 +388,12 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM document_metadata_tbl WHERE document_id = ?",
-        )
-        .bind(doc_id.as_str())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM document_metadata_tbl WHERE document_id = ?")
+                .bind(doc_id.as_str())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(remaining, 0);
     }
 }

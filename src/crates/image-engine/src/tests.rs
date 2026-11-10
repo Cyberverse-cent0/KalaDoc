@@ -114,7 +114,10 @@ fn inspect_rejects_garbage() {
     // itself failed); a sniffed-but-unsupported codec would be
     // `UnsupportedFormat`. Either way it must be a hard error.
     assert!(
-        matches!(err, ImageError::Decode(_) | ImageError::UnsupportedFormat(_)),
+        matches!(
+            err,
+            ImageError::Decode(_) | ImageError::UnsupportedFormat(_)
+        ),
         "{err:?}"
     );
 }
@@ -144,9 +147,7 @@ fn resize_fits_within_box_preserving_aspect() {
 #[test]
 fn resize_unbounded_axis() {
     // Only width bound: 4×2 → 2×1? No — aspect preserved: width 2 → height 1.
-    let out = engine()
-        .resize_to(&png_bytes(), Some(2), None)
-        .unwrap();
+    let out = engine().resize_to(&png_bytes(), Some(2), None).unwrap();
     let info = engine().inspect(&out).unwrap();
     assert_eq!((info.width, info.height), (2, 1));
 }
@@ -172,7 +173,9 @@ fn resize_rejects_empty_box() {
         .unwrap_err();
     assert!(matches!(err, ImageError::InvalidInput(_)), "{err:?}");
 
-    let err = engine().resize_to(&png_bytes(), Some(0), Some(4)).unwrap_err();
+    let err = engine()
+        .resize_to(&png_bytes(), Some(0), Some(4))
+        .unwrap_err();
     assert!(matches!(err, ImageError::InvalidInput(_)), "{err:?}");
 }
 

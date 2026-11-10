@@ -408,11 +408,11 @@ impl StreamUpload for LocalUploadWriter<'_> {
             });
         }
 
-        self.fs.inject(write_faults(), "upload_write", &self.staged_path)?;
+        self.fs
+            .inject(write_faults(), "upload_write", &self.staged_path)?;
         // Quota: staged bytes occupy the root now, so each accepted
         // chunk must fit under `max_size_bytes` immediately.
-        self.fs
-            .check_quota(0, chunk_len, &self.final_path)?;
+        self.fs.check_quota(0, chunk_len, &self.final_path)?;
 
         let file = self.file.as_mut().ok_or_else(|| StorageError::Io {
             path: self.staged_path.clone(),
@@ -572,9 +572,7 @@ impl StreamingBackend for FaultInjectingFs {
 fn rename_replace(staged: &Path, final_path: &Path) -> StorageResult<()> {
     match fs::rename(staged, final_path) {
         Ok(()) => Ok(()),
-        Err(e)
-            if e.kind() == io::ErrorKind::AlreadyExists && final_path.exists() =>
-        {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists && final_path.exists() => {
             fs::remove_file(final_path).map_err(|source| StorageError::Io {
                 path: final_path.to_path_buf(),
                 source,
@@ -830,10 +828,7 @@ mod tests {
     #[test]
     fn quota_accounts_staged_bytes_through_lifecycle() {
         let root = temp_root();
-        let mut fs = FaultInjectingFs::new(
-            StorageConfig::new(&root).with_quota(1000),
-        )
-        .unwrap();
+        let mut fs = FaultInjectingFs::new(StorageConfig::new(&root).with_quota(1000)).unwrap();
 
         let mut up = fs.begin_upload("q.bin").unwrap();
         up.write_chunk(&[0u8; 400]).unwrap();
@@ -842,10 +837,7 @@ mod tests {
         // While the writer holds &mut fs we can't call fs methods, but
         // a *separate* backend instance on the same root scans the
         // staging file and sees the staged bytes on disk.
-        let probe = FaultInjectingFs::new(
-            StorageConfig::new(&root).with_quota(1000),
-        )
-        .unwrap();
+        let probe = FaultInjectingFs::new(StorageConfig::new(&root).with_quota(1000)).unwrap();
         assert_eq!(probe.used_bytes(), 800);
 
         // 800 staged + 300 more would exceed the 1000-byte quota.

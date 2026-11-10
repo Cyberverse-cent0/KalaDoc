@@ -70,6 +70,7 @@ async fn dispatch(cli: &Cli, ctx: Context) -> Result<i32, CliError> {
         Commands::Image(args) => command::image::run(&ctx, args),
         Commands::Pipeline(args) => command::pipeline::run(&ctx, args),
         Commands::Video(args) => command::video::run(&ctx, args),
+        Commands::Mcp(args) => command::mcp::run(&ctx, args).await,
     }
 }
 

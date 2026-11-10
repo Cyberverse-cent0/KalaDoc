@@ -66,9 +66,7 @@ pub(crate) fn pixel_dimensions(
 ) -> ImageResult<(ImageFormat, u32, u32)> {
     check_input_limits(bytes.len(), limits)?;
     let (reader, sniffed) = open(bytes)?;
-    let (width, height) = reader
-        .into_dimensions()
-        .map_err(ImageError::Decode)?;
+    let (width, height) = reader.into_dimensions().map_err(ImageError::Decode)?;
     if let Some(max) = limits.max_pixels {
         let pixels = u64::from(width) * u64::from(height);
         if pixels > max {
@@ -78,8 +76,7 @@ pub(crate) fn pixel_dimensions(
         }
     }
     Ok((
-        ImageFormat::from_image_format(sniffed)
-            .expect("sniffed format was validated as supported"),
+        ImageFormat::from_image_format(sniffed).expect("sniffed format was validated as supported"),
         width,
         height,
     ))

@@ -21,6 +21,9 @@
 //! | `POST /documents`    | yes  | Enqueue a `document.ingest` job                    |
 //! | `GET /jobs`          | yes  | List jobs, optional `?status=`/`?limit=` filter    |
 //! | `GET /jobs/{id}`     | yes  | Fetch one job by id                                |
+//! | `GET /media/capabilities` | yes | ffmpeg capability snapshot (`media` module)   |
+//! | `POST /media/probe`  | yes  | ffprobe inspection of uploaded media bytes        |
+//! | `POST /media/thumbnail` | yes | PNG frame at `?time=`/`?width=` (`media` module) |
 //!
 //! "Auth" means a valid `Authorization: Bearer <token>` session
 //! token (see [`auth::AuthenticatedSession`]); missing, malformed,
@@ -61,6 +64,7 @@ mod auth;
 mod dto;
 mod error;
 mod handlers;
+mod media;
 
 pub use auth::AuthenticatedSession;
 pub use dto::{CreateDocumentRequest, JobResponse, JobsQuery};
@@ -150,6 +154,9 @@ pub fn router(state: AppState) -> Router {
         .route("/documents", post(handlers::create_document))
         .route("/jobs", get(handlers::list_jobs))
         .route("/jobs/{id}", get(handlers::get_job))
+        .route("/media/capabilities", get(media::capabilities))
+        .route("/media/probe", post(media::probe))
+        .route("/media/thumbnail", post(media::thumbnail))
         .with_state(state)
 }
 
@@ -309,14 +316,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(list.as_array().unwrap().len(), 1);
 
-        let (status, one) = send(
-            &app,
-            "GET",
-            &format!("/jobs/{job_id}"),
-            Some(&token),
-            None,
-        )
-        .await;
+        let (status, one) = send(&app, "GET", &format!("/jobs/{job_id}"), Some(&token), None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(one["id"], job_id);
 

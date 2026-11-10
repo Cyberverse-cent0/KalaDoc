@@ -178,7 +178,9 @@ fn probe_rejects_non_media() {
         return;
     }
     let engine = VideoEngine::new();
-    let err = engine.probe(b"this is definitely not a media file").unwrap_err();
+    let err = engine
+        .probe(b"this is definitely not a media file")
+        .unwrap_err();
     assert!(
         matches!(err, VideoError::InvalidInput(_)),
         "expected InvalidInput, got {err:?}"
@@ -354,4 +356,178 @@ fn empty_input_is_invalid_not_panic() {
     // before any PATH probe in probe(), and MissingTool elsewhere is
     // still a structured error.
     let _ = engine.thumbnail(&[], None, &unlimited());
+}
+
+#[test]
+fn media_capabilities_reports_build() {
+    let engine = VideoEngine::new();
+
+    // The engine advertises a non-empty op set for EngineKind::Video.
+    let caps = engine.capabilities();
+    assert!(!caps.operations.is_empty());
+    assert!(caps.operations.contains(&EngineOperation::Transcode));
+
+    // media_capabilities() shells out to ffmpeg — skip when absent.
+    if !tool_available("ffmpeg") {
+        return;
+    }
+    let caps = engine
+        .media_capabilities()
+        .expect("media_capabilities failed");
+    assert!(
+        !caps.video_encoders.is_empty(),
+        "ffmpeg build reported no video encoders"
+    );
+    assert!(
+        caps.has_muxer("mp4") || caps.has_muxer("matroska"),
+        "expected common muxers in capability snapshot"
+    );
+
+    // The tool resolves to a real executable path on PATH.
+    let ffmpeg_path = crate::crates::video_engine::ops::find_tool("ffmpeg")
+        .expect("ffmpeg on PATH but find_tool failed");
+    assert!(ffmpeg_path.is_file());
+}
+
+#[test]
+fn pipeline_probe_thumbnail_trim_concat_roundtrip() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = TestDir::new("pipeline");
+    let clip = make_clip(&dir, "clip.mp4");
+    let engine = VideoEngine::new();
+    let limits = unlimited();
+
+    // probe → thumbnail → trim → concat, threading Vec<u8> through.
+    let info = engine.probe(&clip).unwrap();
+    assert!(info.has_video);
+    assert!(info.duration_secs.unwrap_or(0.0) > 0.0);
+
+    let png = engine.thumbnail(&clip, Some(0.2), &limits).unwrap();
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "not a PNG");
+
+    let trimmed = engine.trim(&clip, 0.0, Some(0.5), true, &limits).unwrap();
+    let trimmed_info = engine.probe(&trimmed).unwrap();
+    assert!(
+        trimmed_info.duration_secs.unwrap_or(f64::MAX) < 0.9,
+        "trimmed clip not shorter"
+    );
+
+    // Concat two copies of the trimmed output back into mp4.
+    let joined = engine
+        .concat(&[trimmed.clone(), trimmed], "mp4", &limits)
+        .unwrap();
+    let joined_info = engine.probe(&joined).unwrap();
+    assert!(joined_info.has_video);
+    let d = joined_info.duration_secs.unwrap_or(0.0);
+    // Two ~0.5s segments; allow container timestamp slack.
+    assert!(d > 0.6 && d < 1.8, "concat duration {d} unexpected");
+}
+
+#[test]
+fn input_byte_limit_is_enforced() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = TestDir::new("bytelimit");
+    let clip = make_clip(&dir, "clip.mp4");
+    let engine = VideoEngine::new();
+
+    // A byte cap far below the fixture size must stop transcode before
+    // ffmpeg runs (limit is checked on the probed input).
+    let limits = EngineLimits {
+        max_input_bytes: Some(64),
+        ..EngineLimits::default()
+    };
+    let err = engine.transcode(&clip, "mkv", &limits).unwrap_err();
+    assert!(
+        matches!(err, VideoError::LimitExceeded(_)),
+        "expected LimitExceeded, got {err:?}"
+    );
+
+    // The same cap passes once raised above the fixture size.
+    let ok = EngineLimits {
+        max_input_bytes: Some(clip.len() as u64),
+        ..EngineLimits::default()
+    };
+    assert!(engine.transcode(&clip, "mkv", &ok).is_ok());
+}
+
+#[test]
+fn malformed_and_empty_inputs_are_invalid() {
+    let engine = VideoEngine::new();
+    let limits = unlimited();
+    let garbage = b"\x00\x01\x02definitely not media".repeat(32);
+
+    // Empty input is rejected by check_input before any tool lookup —
+    // safe to assert without ffmpeg installed.
+    for result in [
+        engine.thumbnail(&[], None, &limits).map(|_| ()),
+        engine.trim(&[], 0.0, None, false, &limits).map(|_| ()),
+        engine.transcode(&[], "mkv", &limits).map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(VideoError::InvalidInput(_))),
+            "expected InvalidInput for empty input, got {result:?}"
+        );
+    }
+
+    // Unknown target extensions are rejected before probing or any
+    // ffmpeg invocation — no tools required.
+    assert!(matches!(
+        engine.transcode(&garbage, "xyz", &limits),
+        Err(VideoError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        engine.transcode(&garbage, ".xyz ", &limits),
+        Err(VideoError::InvalidInput(_))
+    ));
+
+    // Non-media bytes must surface InvalidInput (not a panic or a
+    // bogus success) once the tools exist to inspect them.
+    if ffmpeg_available() {
+        for result in [
+            engine.probe(&garbage).map(|_| ()),
+            engine.thumbnail(&garbage, None, &limits).map(|_| ()),
+            engine.trim(&garbage, 0.0, None, false, &limits).map(|_| ()),
+            engine.transcode(&garbage, "mkv", &limits).map(|_| ()),
+            engine
+                .concat(&[garbage.clone()], "mp4", &limits)
+                .map(|_| ()),
+        ] {
+            assert!(
+                matches!(result, Err(VideoError::InvalidInput(_))),
+                "expected InvalidInput for garbage input, got {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn format_smoke_transcode_mkv_and_remux_ts() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = TestDir::new("formats");
+    let clip = make_clip(&dir, "clip.mp4");
+    let engine = VideoEngine::new();
+    let limits = unlimited();
+
+    // mp4 → mkv transcode (stream-copy path for this target).
+    let mkv = engine.transcode(&clip, "mkv", &limits).unwrap();
+    let info = engine.probe(&mkv).unwrap();
+    let fmt = info.format_name.unwrap_or_default();
+    assert!(fmt.contains("matroska"), "format_name {fmt}");
+
+    // mp4 → MPEG-TS remux (stream copy; TS accepts H.264+AAC).
+    let ts = engine.remux(&clip, "ts", &limits).unwrap();
+    let ts_info = engine.probe(&ts).unwrap();
+    let ts_fmt = ts_info.format_name.unwrap_or_default();
+    assert!(ts_fmt.contains("mpegts"), "expected mpegts, got {ts_fmt}");
+
+    // mkv → mp4 remux keeps the container family honest (moov faststart).
+    let back = engine.remux(&mkv, "mp4", &limits).unwrap();
+    let back_info = engine.probe(&back).unwrap();
+    assert!(back_info.has_video);
 }

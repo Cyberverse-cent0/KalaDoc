@@ -432,9 +432,7 @@ impl DocumentService {
         key: &str,
         value: &Value,
     ) -> Result<DocumentMetadata, ServiceError> {
-        Ok(
-            metadata::set_custom_field(&self.pool, document_id, key, value).await?,
-        )
+        Ok(metadata::set_custom_field(&self.pool, document_id, key, value).await?)
     }
 
     /// Removes a single custom field. Returns `true` when a field was
@@ -494,10 +492,7 @@ impl DocumentService {
         &self,
         source_document_id: &DocumentId,
     ) -> Result<Vec<DocumentRelationship>, ServiceError> {
-        Ok(
-            relationships::list_outgoing_relationships(&self.pool, source_document_id)
-                .await?,
-        )
+        Ok(relationships::list_outgoing_relationships(&self.pool, source_document_id).await?)
     }
 
     /// Lists relationships where the document is the target (incoming
@@ -506,10 +501,7 @@ impl DocumentService {
         &self,
         target_document_id: &DocumentId,
     ) -> Result<Vec<DocumentRelationship>, ServiceError> {
-        Ok(
-            relationships::list_incoming_relationships(&self.pool, target_document_id)
-                .await?,
-        )
+        Ok(relationships::list_incoming_relationships(&self.pool, target_document_id).await?)
     }
 
     /// Returns all documents related to `document_id` in both
@@ -679,8 +671,16 @@ mod tests {
             .unwrap();
         assert_eq!(updated.custom_fields["financial_year"], Value::from(2026));
 
-        assert!(svc.remove_custom_field(&doc.id, "financial_year").await.unwrap());
-        assert!(!svc.remove_custom_field(&doc.id, "financial_year").await.unwrap());
+        assert!(
+            svc.remove_custom_field(&doc.id, "financial_year")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !svc.remove_custom_field(&doc.id, "financial_year")
+                .await
+                .unwrap()
+        );
         let fetched = svc.get_document_metadata(&doc.id).await.unwrap().unwrap();
         assert!(!fetched.custom_fields.contains_key("financial_year"));
 
@@ -748,17 +748,30 @@ mod tests {
         assert_eq!(outgoing.len(), 1);
         let incoming = svc.list_incoming_relationships(&b.id).await.unwrap();
         assert_eq!(incoming.len(), 1);
-        assert!(svc.list_incoming_relationships(&a.id).await.unwrap().is_empty());
+        assert!(
+            svc.list_incoming_relationships(&a.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         // `related_documents` sees the link from the target's side.
         let related = svc.related_documents(&b.id).await.unwrap();
         assert_eq!(related.len(), 1);
         assert_eq!(related[0].document.id, a.id);
-        assert_eq!(related[0].relationship_type, DocumentRelationshipType::Attachment);
+        assert_eq!(
+            related[0].relationship_type,
+            DocumentRelationshipType::Attachment
+        );
         assert!(!related[0].outgoing);
 
         assert!(svc.delete_relationship(&rel.id).await.unwrap());
         assert!(!svc.delete_relationship(&rel.id).await.unwrap());
-        assert!(svc.list_outgoing_relationships(&a.id).await.unwrap().is_empty());
+        assert!(
+            svc.list_outgoing_relationships(&a.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

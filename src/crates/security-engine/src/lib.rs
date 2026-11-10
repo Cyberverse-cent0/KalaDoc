@@ -38,16 +38,20 @@
 //! - **Header may be preceded by junk.** The `%PDF-` magic is searched
 //!   within the first 1024 bytes, per the PDF spec allowance for
 //!   leading garbage.
-//! - **Video is byte-sniffed too.** MP4/MOV (`ftyp` box), Matroska and
-//!   WebM (EBML header), AVI (`RIFF`/`AVI `), and MPEG-TS/PS are
-//!   recognized by magic bytes and reported as
-//!   [`SniffedFormat::Video`] carrying a [`VideoContainer`]. Video
-//!   uploads get their own, larger size budget
-//!   ([`ResourceLimits::max_video_upload_bytes`]); detection stays
-//!   byte-level and never trusts filename extensions — EBML's
-//!   Matroska/WebM ambiguity is resolved by DocType evidence when
-//!   visible, otherwise conservatively reported as Matroska (see
-//!   [`sniff_format`]).
+//! - **Video and audio are byte-sniffed too.** MP4/MOV (`ftyp` box),
+//!   Matroska and WebM (EBML header), AVI (`RIFF`/`AVI `), MPEG-TS/PS,
+//!   FLV, ASF/WMV, MPEG-ES, MXF, F4V, and Ogg are recognized by magic
+//!   bytes and reported as [`SniffedFormat::Video`] carrying a
+//!   [`VideoContainer`]. Audio containers — MP3 (ID3 tag or frame
+//!   sync), WAV, FLAC, Ogg audio (Vorbis/Opus, disambiguated from Ogg
+//!   video via first-page codec magic), AAC ADTS, AIFF, AU, AMR, CAF,
+//!   and AC-3 — are reported as [`SniffedFormat::Audio`] carrying an
+//!   [`AudioContainer`]. Video uploads get their own, larger size
+//!   budget ([`ResourceLimits::max_video_upload_bytes`]); audio uses
+//!   the standard document budget. Detection stays byte-level and
+//!   never trusts filename extensions — EBML's Matroska/WebM ambiguity
+//!   and Ogg's audio/video split are resolved by in-band codec evidence
+//!   when visible, otherwise conservatively (see [`sniff_format`]).
 
 mod engine;
 mod error;
@@ -60,7 +64,7 @@ pub use engine::SecurityEngine;
 pub use error::{SecurityError, SecurityResult};
 pub use filename::sanitize_filename;
 pub use limits::ResourceLimits;
-pub use sniff::{SniffedFormat, VideoContainer, sniff_format};
+pub use sniff::{AudioContainer, SniffedFormat, VideoContainer, sniff_format};
 pub use validate::{ValidationReport, validate_pdf, validate_upload};
 
 #[cfg(test)]
