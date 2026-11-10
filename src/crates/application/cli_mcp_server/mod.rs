@@ -5,3 +5,4 @@
 //! `.doc/cli_mcp_docs/KalaDoc_CLI_MCP_Specification (1).md`.
 
 pub mod cli;
+pub mod mcp;

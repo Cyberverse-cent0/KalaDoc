@@ -21,30 +21,58 @@ pub(crate) mod analysis;
 pub(crate) mod audio;
 pub(crate) mod audio_fx;
 pub(crate) mod audio_mix;
+// Ops implemented ahead of engine wiring; dead_code allowed until
+// VideoEngine dispatches to them.
+#[allow(dead_code)]
+pub(crate) mod audio_time;
 pub mod av_visual;
 pub mod capture;
+pub(crate) mod chapters;
+#[allow(dead_code)]
+pub(crate) mod composite;
 pub(crate) mod concat;
+#[allow(dead_code)]
+pub(crate) mod concat_filter;
 pub(crate) mod contact_sheet;
 pub(crate) mod encode;
+#[allow(dead_code)]
+pub(crate) mod enhance;
 pub(crate) mod extract;
 pub(crate) mod extract_audio;
 pub mod filters;
 pub(crate) mod frames;
 pub(crate) mod geometry;
 pub(crate) mod geometry_adv;
+#[allow(dead_code)]
+pub(crate) mod hdr;
+pub(crate) mod interpolate;
+#[allow(dead_code)]
+pub(crate) mod live;
 pub(crate) mod loudness;
+#[allow(dead_code)]
+pub(crate) mod metadata_export;
 pub(crate) mod overlay;
 pub(crate) mod packaging;
+#[allow(dead_code)]
+pub(crate) mod preview;
 pub(crate) mod probe;
+pub(crate) mod proxy;
 pub(crate) mod quality;
 pub(crate) mod remux;
+pub(crate) mod segment;
 pub(crate) mod slideshow;
+#[allow(dead_code)]
+pub(crate) mod stabilize;
 pub(crate) mod stream_ops;
 pub(crate) mod subtitles;
+pub(crate) mod sync;
 pub(crate) mod tempo;
 pub(crate) mod thumbnail;
 pub(crate) mod transcode;
 pub(crate) mod trim;
+#[allow(dead_code)]
+pub(crate) mod validate;
+pub mod waveform;
 
 use std::fs;
 use std::io::{self, Read};

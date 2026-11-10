@@ -75,9 +75,42 @@ job `kind` on the engine at worker startup:
 | `thumbnail.generate` | `{document_id, artifact_id?}` | Extracts an embedded PDF thumbnail image into storage. |
 | `pdf.inspect` | `{ "path": "<relative under storage root>", "max_bytes"?: u64 }` | Size-checks before reading (default cap 100 MiB), validates bytes via `security_engine::validate_pdf`, inspects via `pdf_engine`, writes `<path>.inspect.json` next to the input. Paths are confined to the storage root — absolute paths and `..` are rejected. |
 | `video.probe` | `{ "path": "<relative under storage root>" }` | Runs `ffprobe` on the media file and writes `<path>.probe.json` next to the input with container/stream/duration metadata. Requires `ffprobe` on PATH. |
-| `video.thumbnail` | `{ "path": "<relative under storage root>", "timestamp_secs"?, "width"? }` | Extracts a JPEG/PNG frame via `ffmpeg` into storage as a thumbnail artifact. |
-| `video.transcode` | `{ "path": "<relative under storage root>", "output_format"?, "options"? }` | Re-encodes the media via `ffmpeg`; output lands under storage with a derived name. |
-| `video.trim` | `{ "path": "<relative under storage root>", "start_secs", "duration_secs"? }` | Cuts a segment via `ffmpeg`; stream-copy by default (keyframe-aligned), re-encode when frame accuracy is requested. |
+| `video.thumbnail` | `{ "path": "<relative under storage root>", "at_secs"?, "max_bytes"? }` | Extracts a PNG frame via `ffmpeg` into storage as a thumbnail artifact. |
+| `video.transcode` | `{ "path": "<relative under storage root>", "target_ext", "max_bytes"? }` | Re-encodes the media via `ffmpeg`; writes `<path>.<target_ext>`. |
+| `video.trim` | `{ "path": "<relative under storage root>", "start_secs", "end_secs"?, "reencode"?, "max_bytes"? }` | Cuts a segment via `ffmpeg`; stream-copy by default (keyframe-aligned), re-encode when frame accuracy is requested. |
+| `video.remux` | `{ "path": "<relative under storage root>", "target_ext", "max_bytes"? }` | Stream-copy remux to `target_ext`; writes `<path>.<target_ext>`. |
+| `video.extract_frames` | `{ "path": "...", "every_secs"?, "fps"?, "all"?, "keyframes_only"?, "format"?, "max_bytes"? }` | Extracts frames; writes files under `<path>.frames/`. |
+| `video.subtitles_extract` | `{ "path": "...", "track"?, "format"?, "max_bytes"? }` | Extracts a subtitle track; writes `<path>.subs.<fmt>`. |
+| `video.analyze` | `{ "path": "...", "max_bytes"? }` | Full media analysis report; writes `<path>.analysis.json`. |
+| `video.package_hls` | `{ "path": "...", "max_bytes"? }` | HLS package; writes files under `<path>.hls/`. |
+| `video.metadata_set` | `{ "path": "...", "tags": {"k": "v"}, "max_bytes"? }` | Sets container tags; writes `<path>.tagged<ext>`. |
+| `video.metadata_strip` | `{ "path": "...", "max_bytes"? }` | Strips all metadata; writes `<path>.stripped<ext>`. |
+| `video.extract_streams` | `{ "path": "...", "subtitles"?, "attachments"?, "cover_art"?, "chapters"?, "data"?, "subtitle_format"?, "max_bytes"? }` | Extracts embedded streams; writes files under `<path>.streams/`. |
+| `video.audio_volume` | `{ "path": "...", "gain_db", "max_bytes"? }` | Applies gain in dB; writes `<path>.vol<ext>`. |
+| `video.contact_sheet` | `{ "path": "...", "cols"?, "rows"?, "thumb_width"?, "interval_secs"?, "max_bytes"? }` | Builds a contact-sheet PNG; writes `<path>.sheet.png`. |
+| `video.speed` | `{ "path": "...", "factor", "max_bytes"? }` | Changes playback speed; writes `<path>.speed<ext>`. |
+| `video.reverse` | `{ "path": "...", "max_bytes"? }` | Reverses the clip; writes `<path>.reverse<ext>`. |
+| `video.loop` | `{ "path": "...", "count", "max_bytes"? }` | Loops the clip; writes `<path>.loop<ext>`. |
+| `video.freeze` | `{ "path": "...", "at_secs", "duration_secs", "max_bytes"? }` | Freezes a frame; writes `<path>.freeze<ext>`. |
+| `video.resize` | `{ "path": "...", "width", "height", "fit"?, "max_bytes"? }` | Resizes per fit mode; writes `<path>.resize<ext>`. |
+| `video.crop` | `{ "path": "...", "x", "y", "w", "h", "max_bytes"? }` | Crops to a rect; writes `<path>.crop<ext>`. |
+| `video.rotate` | `{ "path": "...", "degrees", "max_bytes"? }` | Rotates; writes `<path>.rotate<ext>`. |
+| `video.flip` | `{ "path": "...", "horizontal"?, "max_bytes"? }` | Mirrors; writes `<path>.flip<ext>`. |
+| `video.gif` | `{ "path": "...", "fps"?, "width"?, "max_bytes"? }` | Video → animated GIF; writes `<path>.gif`. |
+| `video.slideshow` | `{ "paths": ["..."], "fps"?, "duration_per_image"?, "target_ext", "max_bytes"? }` | Images → video; writes `slideshow.<target_ext>` next to the first input. |
+| `video.normalize` | `{ "path": "...", "target_lufs"?, "max_bytes"? }` | EBU R128 loudness normalize; writes `<path>.norm<ext>`. |
+| `video.loudness` | `{ "path": "...", "max_bytes"? }` | Measures loudness; writes `<path>.loudness.json`. |
+| `video.scene_frames` | `{ "path": "...", "threshold"?, "max_bytes"? }` | Scene-change keyframes; writes files under `<path>.scenes/`. |
+| `video.merge_av` | `{ "video_path": "...", "audio_path": "...", "target_ext"?, "max_bytes"? }` | Merges an audio track into a video; writes `<video_path>.merged<ext>`. |
+
+All `video.*` kinds share the `video_engine` contract: `path` (and
+`video_path`/`audio_path`/`paths` entries) are **relative paths
+confined to the storage root** — absolute paths and `..` are
+rejected — `max_bytes` defaults to 4 GiB, and every op requires
+`ffmpeg`/`ffprobe` on `PATH`. Multi-input kinds read several confined
+paths. See `.doc/video_engine.md` for the full ops catalog and CLI
+surface; kinds not listed here (e.g. `concat`, `extract_audio`,
+subtitles, filters, packaging variants) are CLI-only for now.
 | `storage.gc_staging` | `{ "retention_secs"?: u64 }` | Deletes `<storage_root>/staging/` entries older than the retention window (default 86400 s). Abandoned staging objects from interrupted uploads are cleaned up here — the issue's crash-recovery requirement. |
 
 The `document.*` handlers share these properties (see the module docs

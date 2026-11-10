@@ -11,6 +11,7 @@ pub mod engine;
 pub mod image;
 pub mod init;
 pub mod jobs;
+pub mod mcp;
 pub mod pipeline;
 pub mod user;
 pub mod version;

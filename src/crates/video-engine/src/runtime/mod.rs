@@ -12,6 +12,4 @@ pub(crate) mod version;
 
 pub use capabilities::{MediaCapabilities, capabilities};
 
-pub(crate) use discovery::{ToolPaths, discover};
-pub(crate) use hardware::detect_hwaccel;
 pub(crate) use version::{ffmpeg_version, ffprobe_version};

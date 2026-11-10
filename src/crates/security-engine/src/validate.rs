@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::error::{SecurityError, SecurityResult};
 use super::filename::sanitize_filename;
 use super::limits::ResourceLimits;
-use super::sniff::{sniff_format, SniffedFormat};
+use super::sniff::{SniffedFormat, sniff_format};
 
 /// Outcome of a successful upload validation.
 ///
