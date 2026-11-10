@@ -299,10 +299,12 @@ fn scan_outline(doc: &Document, out: &mut Vec<JsInfo>) {
     let Ok(outlines) = catalog_obj.as_dict().and_then(|d| d.get(b"Outlines")) else {
         return;
     };
+    // `/First` must be read as a reference *before* any dereference:
+    // `resolve` would return the item dictionary itself, which is not a
+    // reference and would end the walk before it starts.
     let Some(first) = as_dict(doc, outlines)
         .and_then(|d| d.get(b"First").ok())
-        .and_then(|o| resolve(doc, o))
-        .and_then(|r| r.as_reference().ok())
+        .and_then(|o| o.as_reference().ok())
     else {
         return;
     };

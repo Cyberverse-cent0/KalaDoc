@@ -11,6 +11,24 @@
 //! **environment-only** — they are never read from the config file, so
 //! credentials stay out of version control.
 //!
+//! Some subsystems are configured outside [`AppConfig`] by design:
+//!
+//! - **Remote (S3) storage** — [`crate::crates::storage::remote::RemoteStorageConfig`]
+//!   is populated exclusively from `KALADOC_S3_*` environment variables
+//!   (`KALADOC_S3_ENDPOINT`, `KALADOC_S3_BUCKET`, `KALADOC_S3_REGION`,
+//!   `KALADOC_S3_PREFIX`, `KALADOC_S3_ACCESS_KEY`, `KALADOC_S3_SECRET_KEY`,
+//!   `KALADOC_S3_TIMEOUT_SECS`, `KALADOC_S3_MAX_ATTEMPTS`). Credentials
+//!   never come from the config file.
+//! - **Multimedia engine** — `ffmpeg`/`ffprobe` are discovered on `PATH`
+//!   at first use (`MediaEngine::runtime`); there are no binary-path or
+//!   limit keys in `AppConfig` yet. Per-op resource bounds live in
+//!   `MediaLimits` (engine construction), not global config.
+//! - **Scheduler** — `SchedulerConfig` (tick interval, tick priority,
+//!   tick `max_attempts`) currently uses its built-in defaults; the job
+//!   worker does not read it from `AppConfig` yet.
+//! - **Pipeline engine** — `PipelineLimits` (step/input/total byte
+//!   budgets) are carried per `PipelineDefinition`, not globally.
+//!
 //! # Example `kaladoc.toml`
 //! ```toml
 //! [database]
@@ -32,6 +50,11 @@
 //!
 //! [runtime]
 //! log_level = "info"
+//!
+//! [api]
+//! addr = "127.0.0.1:8080"   # `kaladoc serve` bind address
+//! [jobs]
+//! poll_interval_secs = 2
 //! ```
 
 use serde::Deserialize;
@@ -166,14 +189,36 @@ impl Default for JobsSection {
 pub struct ApiSection {
     /// HTTP API bind address (`host:port`).
     pub addr: String,
+    /// Static API keys accepted as `Authorization: Bearer <key>`
+    /// alongside session tokens (see `crates::api::auth`). Each entry
+    /// pairs a `name` — surfaced as the `apikey:<name>` actor — with
+    /// the bearer `key` secret. TOML: `[[api.api_keys]]` tables; env:
+    /// `KALADOC_API_KEYS` = comma-separated `name:key` pairs.
+    pub api_keys: Vec<ApiKey>,
+    /// Route groups disabled on the HTTP API (see
+    /// `crates::api::flags` for group names: `documents`, `folders`,
+    /// `jobs`, `pipelines`, `engines`, `storage`). Disabled groups
+    /// answer `404`. TOML: `disabled_groups = [...]` under `[api]`;
+    /// env: `KALADOC_API_DISABLE` = comma-separated names.
+    pub disabled_groups: Vec<String>,
 }
 
 impl Default for ApiSection {
     fn default() -> Self {
         Self {
             addr: "127.0.0.1:8080".to_string(),
+            api_keys: Vec::new(),
+            disabled_groups: Vec::new(),
         }
     }
+}
+
+/// One static API key: `name` identifies the caller (`apikey:<name>`
+/// in audit/job payloads); `key` is the bearer secret.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiKey {
+    pub name: String,
+    pub key: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -335,6 +380,28 @@ impl AppConfig {
                 "must be a valid socket address (e.g. \"127.0.0.1:8080\")",
             ));
         }
+        // Static API keys come from env or `[[api.api_keys]]`; reject
+        // entries that could never authenticate or would shadow each
+        // other.
+        {
+            let mut seen_names = std::collections::HashSet::new();
+            let mut seen_keys = std::collections::HashSet::new();
+            for (i, k) in self.api.api_keys.iter().enumerate() {
+                let field = format!("api.api_keys[{i}]");
+                if k.name.trim().is_empty() {
+                    return Err(bad(&field, "name must not be empty"));
+                }
+                if k.key.is_empty() {
+                    return Err(bad(&field, "key must not be empty"));
+                }
+                if !seen_names.insert(k.name.as_str()) {
+                    return Err(bad(&field, "duplicate api key name"));
+                }
+                if !seen_keys.insert(k.key.as_str()) {
+                    return Err(bad(&field, "duplicate api key"));
+                }
+            }
+        }
         // Lenient loads leave secrets empty; only validate when set.
         if !self.secret_key.is_empty() {
             validate_secret_key(&self.secret_key)?;
@@ -364,6 +431,8 @@ impl AppConfig {
     /// | `JOB_STALE_AFTER_SECS`          | `jobs`             | `stale_after_secs`        |
     /// | `JOB_RECOVERY_TIMEOUT_SECS`      | `jobs`             | `stale_after_secs` (alias; applied after `JOB_STALE_AFTER_SECS`, so it wins when both are set) |
     /// | `KALADOC_API_ADDR`               | `api`              | `addr`                     |
+    /// | `KALADOC_API_KEYS`               | `api`              | `api_keys` (`name:key,…`)  |
+    /// | `KALADOC_API_DISABLE`            | `api`              | `disabled_groups` (CSV)    |
     /// | `APP_SECRET_KEY`                | secret             | `secret_key` (required)   |
     /// | `APP_DB_USER`                   | secret             | `db_user` (required)      |
     /// | `APP_DB_PASSWORD`               | secret             | `db_password` (required)  |
@@ -424,6 +493,12 @@ impl AppConfig {
         }
         if let Some(v) = parse_env::<String>("KALADOC_API_ADDR")? {
             self.api.addr = v;
+        }
+        if let Some(v) = parse_env::<String>("KALADOC_API_KEYS")? {
+            self.api.api_keys = parse_api_keys(&v)?;
+        }
+        if let Some(v) = parse_env::<String>("KALADOC_API_DISABLE")? {
+            self.api.disabled_groups = parse_csv(&v);
         }
 
         self.secret_key = env_secret("APP_SECRET_KEY", require_secrets)?;
@@ -582,6 +657,47 @@ fn parse_env_bool(key: &str) -> Result<Option<bool>, ConfigError> {
     }
 }
 
+/// Parses `KALADOC_API_KEYS`: a comma-separated list of `name:key`
+/// pairs. Names/keys may not contain `,` or `:` respectively is NOT
+/// enforced — the first `:` splits name from key, so keys may contain
+/// colons but names may not. Empty segments are skipped.
+fn parse_api_keys(raw: &str) -> Result<Vec<ApiKey>, ConfigError> {
+    let mut keys = Vec::new();
+    for (i, segment) in raw.split(',').enumerate() {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        let Some((name, key)) = segment.split_once(':') else {
+            return Err(ConfigError::InvalidEnv {
+                key: "KALADOC_API_KEYS".to_string(),
+                value: format!("entry {i} ({segment:?}) is not a name:key pair"),
+            });
+        };
+        let (name, key) = (name.trim(), key.trim());
+        if name.is_empty() || key.is_empty() {
+            return Err(ConfigError::InvalidEnv {
+                key: "KALADOC_API_KEYS".to_string(),
+                value: format!("entry {i} has an empty name or key"),
+            });
+        }
+        keys.push(ApiKey {
+            name: name.to_string(),
+            key: key.to_string(),
+        });
+    }
+    Ok(keys)
+}
+
+/// Splits a comma-separated env var into trimmed, non-empty entries.
+fn parse_csv(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Reads a secret env var. When `required` is false a missing/empty
 /// value yields an empty string (diagnostics only — never persisted).
 fn env_secret(key: &str, required: bool) -> Result<String, ConfigError> {
@@ -614,4 +730,415 @@ pub enum ConfigError {
         path: PathBuf,
         source: toml::de::Error,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ------------------------------------------------------------------
+    // Defaults
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn appconfig_defaults_are_sane() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.database.path, PathBuf::from("db.sqlite"));
+        assert_eq!(cfg.database.max_connections, 8);
+        assert_eq!(cfg.database.acquire_timeout_secs, 5);
+        assert_eq!(cfg.database.session.ttl_secs, 86_400);
+        assert_eq!(cfg.database.session.absolute_ttl_secs, 0);
+        assert!(cfg.database.session.renew_on_use);
+        assert_eq!(cfg.database.session.touch_interval_secs, 60);
+        assert_eq!(cfg.database.session.cleanup_interval_secs, 3_600);
+
+        assert_eq!(cfg.storage.root_dir, PathBuf::from("./storage"));
+        assert_eq!(cfg.storage.max_size_bytes, None);
+        assert_eq!(cfg.storage.filesystem, None);
+
+        assert_eq!(cfg.runtime.log_level, "info");
+
+        assert_eq!(cfg.jobs.poll_interval_secs, 2);
+        assert_eq!(cfg.jobs.default_max_attempts, 3);
+        assert_eq!(cfg.jobs.backoff_base_secs, 30);
+        assert_eq!(cfg.jobs.stale_after_secs, 600);
+
+        assert_eq!(cfg.api.addr, "127.0.0.1:8080");
+        assert!(cfg.api.api_keys.is_empty());
+        assert!(cfg.api.disabled_groups.is_empty());
+
+        // Secrets are env-only → empty under Default.
+        assert_eq!(cfg.secret_key, "");
+        assert_eq!(cfg.db_user, "");
+        assert_eq!(cfg.db_password, "");
+        assert_eq!(cfg.config_path, None);
+    }
+
+    #[test]
+    fn default_config_passes_validation() {
+        AppConfig::default().validate().unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // TOML file parsing (serde)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn fileconfig_toml_parses_sections_and_api_keys() {
+        let text = r#"
+[database]
+path = "/tmp/kala-test.db"
+max_connections = 4
+
+[database.session]
+ttl_secs = 3600
+renew_on_use = false
+
+[storage]
+root_dir = "/tmp/kala-storage"
+max_size_bytes = 1024
+filesystem = "ext4"
+
+[runtime]
+log_level = "debug"
+
+[jobs]
+poll_interval_secs = 5
+default_max_attempts = 7
+backoff_base_secs = 10
+stale_after_secs = 120
+
+[api]
+addr = "0.0.0.0:9999"
+disabled_groups = ["jobs", "pipelines"]
+
+[[api.api_keys]]
+name = "ci"
+key = "secret-token-1"
+
+[[api.api_keys]]
+name = "deploy"
+key = "secret-token-2"
+"#;
+        let file: FileConfig = toml::from_str(text).unwrap();
+
+        assert_eq!(file.database.path, PathBuf::from("/tmp/kala-test.db"));
+        assert_eq!(file.database.max_connections, 4);
+        assert_eq!(file.database.session.ttl_secs, 3600);
+        assert!(!file.database.session.renew_on_use);
+        // Unset session fields fall back to serde defaults.
+        assert_eq!(file.database.session.cleanup_interval_secs, 3_600);
+
+        assert_eq!(file.storage.max_size_bytes, Some(1024));
+        assert_eq!(file.storage.filesystem.as_deref(), Some("ext4"));
+        assert_eq!(file.runtime.log_level, "debug");
+
+        assert_eq!(file.jobs.poll_interval_secs, 5);
+        assert_eq!(file.jobs.default_max_attempts, 7);
+        assert_eq!(file.jobs.stale_after_secs, 120);
+
+        assert_eq!(file.api.addr, "0.0.0.0:9999");
+        assert_eq!(file.api.disabled_groups, vec!["jobs", "pipelines"]);
+        assert_eq!(file.api.api_keys.len(), 2);
+        assert_eq!(file.api.api_keys[0].name, "ci");
+        assert_eq!(file.api.api_keys[0].key, "secret-token-1");
+        assert_eq!(file.api.api_keys[1].name, "deploy");
+    }
+
+    #[test]
+    fn fileconfig_empty_toml_uses_defaults() {
+        let file: FileConfig = toml::from_str("").unwrap();
+        assert_eq!(file.database.max_connections, 8);
+        assert_eq!(file.api.addr, "127.0.0.1:8080");
+        assert!(file.api.api_keys.is_empty());
+    }
+
+    #[test]
+    fn fileconfig_rejects_malformed_toml() {
+        assert!(toml::from_str::<FileConfig>("[[[not toml").is_err());
+        // Wrong type for a known field.
+        assert!(toml::from_str::<FileConfig>("database.max_connections = \"lots\"").is_err());
+    }
+
+    #[test]
+    fn secrets_in_toml_are_ignored() {
+        // FileConfig has no secret fields — a stray key must not error
+        // (serde ignores unknown fields) nor populate secrets.
+        let file: FileConfig =
+            toml::from_str("secret_key = \"hunter2\"\napi.addr = \"127.0.0.1:1\"").unwrap();
+        assert_eq!(file.api.addr, "127.0.0.1:1");
+    }
+
+    // ------------------------------------------------------------------
+    // Env-var parsing helpers (pure fns; unique var names avoid races)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parse_env_reads_typed_values() {
+        let key = "KALADOC_CFG_TEST_PARSE_NUM_a1b2";
+        unsafe { std::env::set_var(key, "42") };
+        assert_eq!(parse_env::<u64>(key).unwrap(), Some(42));
+        unsafe { std::env::remove_var(key) };
+        assert_eq!(parse_env::<u64>(key).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_env_empty_and_unset_yield_none() {
+        let key = "KALADOC_CFG_TEST_PARSE_EMPTY_c3d4";
+        unsafe { std::env::set_var(key, "   ") };
+        assert_eq!(parse_env::<u64>(key).unwrap(), None);
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn parse_env_invalid_value_is_error() {
+        let key = "KALADOC_CFG_TEST_PARSE_BAD_e5f6";
+        unsafe { std::env::set_var(key, "not-a-number") };
+        let err = parse_env::<u64>(key).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidEnv { .. }));
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn parse_env_bool_accepts_common_spellings() {
+        let key = "KALADOC_CFG_TEST_PARSE_BOOL_g7h8";
+        for (raw, want) in [
+            ("true", true),
+            ("TRUE", true),
+            ("1", true),
+            ("yes", true),
+            ("on", true),
+            ("false", false),
+            ("0", false),
+            ("no", false),
+            ("off", false),
+        ] {
+            unsafe { std::env::set_var(key, raw) };
+            assert_eq!(parse_env_bool(key).unwrap(), Some(want), "input {raw:?}");
+        }
+        unsafe { std::env::set_var(key, "maybe") };
+        assert!(matches!(
+            parse_env_bool(key).unwrap_err(),
+            ConfigError::InvalidEnv { .. }
+        ));
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn parse_api_keys_valid_formats() {
+        let keys = parse_api_keys("ci:tok-1, deploy:tok-2 ,, backup:key:with:colons").unwrap();
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys[0].name, "ci");
+        assert_eq!(keys[0].key, "tok-1");
+        assert_eq!(keys[1].name, "deploy");
+        // First ':' splits; the key may itself contain colons.
+        assert_eq!(keys[2].name, "backup");
+        assert_eq!(keys[2].key, "key:with:colons");
+
+        // Empty input / only separators → empty list.
+        assert!(parse_api_keys("").unwrap().is_empty());
+        assert!(parse_api_keys(" , ,").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_api_keys_rejects_malformed_entries() {
+        // No colon at all.
+        assert!(matches!(
+            parse_api_keys("just-a-name"),
+            Err(ConfigError::InvalidEnv { .. })
+        ));
+        // Empty name.
+        assert!(parse_api_keys(":key").is_err());
+        // Empty key.
+        assert!(parse_api_keys("name:").is_err());
+        // Whitespace-only segments inside a list still error when
+        // they carry content but no colon.
+        assert!(parse_api_keys("ok:k, badentry").is_err());
+    }
+
+    #[test]
+    fn parse_csv_trims_and_drops_empties() {
+        assert_eq!(
+            parse_csv(" jobs , pipelines ,, storage "),
+            vec!["jobs", "pipelines", "storage"]
+        );
+        assert!(parse_csv("").is_empty());
+        assert!(parse_csv(" , , ").is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Validation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn validate_rejects_zero_intervals() {
+        let mut cfg = AppConfig::default();
+        cfg.database.max_connections = 0;
+        assert!(matches!(
+            cfg.validate(),
+            Err(ConfigError::InvalidValue { .. })
+        ));
+
+        let mut cfg = AppConfig::default();
+        cfg.jobs.poll_interval_secs = 0;
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = AppConfig::default();
+        cfg.jobs.stale_after_secs = 0;
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = AppConfig::default();
+        cfg.database.session.cleanup_interval_secs = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_bad_addr_and_storage() {
+        let mut cfg = AppConfig::default();
+        cfg.api.addr = "not-an-address".into();
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = AppConfig::default();
+        cfg.storage.max_size_bytes = Some(0);
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = AppConfig::default();
+        cfg.storage.filesystem = Some("/etc/passwd".into());
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_bad_log_level() {
+        let mut cfg = AppConfig::default();
+        cfg.runtime.log_level = "definitely not a filter {{{".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_or_empty_api_keys() {
+        let mut cfg = AppConfig::default();
+        cfg.api.api_keys = vec![
+            ApiKey {
+                name: "a".into(),
+                key: "k1".into(),
+            },
+            ApiKey {
+                name: "a".into(),
+                key: "k2".into(),
+            }, // dup name
+        ];
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = AppConfig::default();
+        cfg.api.api_keys = vec![
+            ApiKey {
+                name: "a".into(),
+                key: "same".into(),
+            },
+            ApiKey {
+                name: "b".into(),
+                key: "same".into(),
+            }, // dup key
+        ];
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = AppConfig::default();
+        cfg.api.api_keys = vec![ApiKey {
+            name: " ".into(),
+            key: "k".into(),
+        }];
+        assert!(cfg.validate().is_err());
+
+        let mut cfg = AppConfig::default();
+        cfg.api.api_keys = vec![ApiKey {
+            name: "n".into(),
+            key: String::new(),
+        }];
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_secret_key_rules() {
+        // Too short.
+        assert!(validate_secret_key(&"x".repeat(31)).is_err());
+        // Minimum length, printable ASCII, no whitespace → ok.
+        validate_secret_key(&"a".repeat(32)).unwrap();
+        // Whitespace rejected even at valid length.
+        assert!(validate_secret_key(&format!("{} ", "a".repeat(40))).is_err());
+        // Non-ASCII rejected.
+        assert!(validate_secret_key(&"é".repeat(40)).is_err());
+        // Too long.
+        assert!(validate_secret_key(&"a".repeat(1025)).is_err());
+        validate_secret_key(&"a".repeat(1024)).unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Config file path resolution
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn config_file_path_explicit_missing_is_error() {
+        let missing = PathBuf::from("/nonexistent/kala-doc-test.toml");
+        let err = config_file_path(Some(&missing)).unwrap_err();
+        assert!(matches!(err, ConfigError::ReadFile { .. }));
+    }
+
+    #[test]
+    fn config_file_path_explicit_existing_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cfg.toml");
+        std::fs::write(&path, "[jobs]\npoll_interval_secs = 9\n").unwrap();
+        let resolved = config_file_path(Some(&path)).unwrap().unwrap();
+        assert_eq!(resolved, path);
+    }
+
+    // ------------------------------------------------------------------
+    // Section → subsystem config conversions
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn to_db_config_maps_sections() {
+        let cfg = AppConfig::default();
+        let db = cfg.to_db_config();
+        assert_eq!(db.db_path, PathBuf::from("db.sqlite"));
+        assert_eq!(db.max_connections, 8);
+        assert_eq!(db.acquire_timeout, Duration::from_secs(5));
+        assert_eq!(db.session.ttl, Duration::from_secs(86_400));
+        assert_eq!(db.session.absolute_ttl, Duration::ZERO);
+        assert!(db.session.renew_on_use);
+        assert_eq!(db.session.touch_interval, Duration::from_secs(60));
+        assert_eq!(db.session.cleanup_interval, Duration::from_secs(3_600));
+    }
+
+    #[test]
+    fn to_job_config_maps_sections() {
+        let cfg = AppConfig::default();
+        let job = cfg.to_job_config();
+        assert_eq!(job.poll_interval, Duration::from_secs(2));
+        assert_eq!(job.default_max_attempts, 3);
+        assert_eq!(job.backoff_base, Duration::from_secs(30));
+        assert_eq!(job.stale_after, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn to_storage_config_maps_sections() {
+        let mut cfg = AppConfig::default();
+        cfg.storage.max_size_bytes = Some(4096);
+        cfg.storage.filesystem = Some("ext4".into());
+        let storage = cfg.to_storage_config();
+        assert_eq!(storage.root_dir, PathBuf::from("./storage"));
+        assert_eq!(storage.max_size_bytes, Some(4096));
+        assert_eq!(storage.filesystem.as_deref(), Some("ext4"));
+    }
+
+    #[test]
+    fn config_error_display_messages() {
+        let err = ConfigError::MissingEnv("APP_SECRET_KEY".into());
+        assert!(err.to_string().contains("APP_SECRET_KEY"));
+        let err = ConfigError::InvalidEnv {
+            key: "K".into(),
+            value: "v".into(),
+        };
+        assert!(err.to_string().contains("K"));
+    }
 }

@@ -8,11 +8,14 @@
 //! [`ProcessingEngine`](crate::crates::core::engine::ProcessingEngine)
 //! with `kind = Conversion` and the `convert` operation.
 
+mod archive;
 mod backend;
 mod backends;
+mod eml;
 mod engine;
 mod error;
 mod model;
+mod url;
 
 pub use backend::{BackendAvailability, ConversionBackend};
 pub use engine::ConversionEngine;

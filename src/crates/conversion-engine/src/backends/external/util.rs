@@ -117,6 +117,12 @@ pub fn format_ext(format: Format) -> &'static str {
         Format::Pptx => "pptx",
         Format::Ppt => "ppt",
         Format::Epub => "epub",
+        Format::Eml => "eml",
+        Format::Cbz => "cbz",
+        Format::Cbr => "cbr",
+        // Url input is intercepted by the engine before backend
+        // dispatch; this arm exists only for exhaustiveness.
+        Format::Url => "url",
     }
 }
 

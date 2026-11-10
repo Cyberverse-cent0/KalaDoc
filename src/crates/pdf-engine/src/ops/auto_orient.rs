@@ -279,8 +279,16 @@ fn choose_rotation(w: f64, h: f64, current: i64, want_landscape: Option<bool>) -
     if w == h {
         return current_norm as u16;
     }
+    // Candidates are the canonical right angles plus the page's current
+    // rotation when it is not one of them: a tolerated non-right-angle
+    // `/Rotate` that already displays the wanted orientation must be kept
+    // (distance 0 wins) rather than rewritten to a canonical value.
+    let mut candidates = [0u16, 90, 180, 270].to_vec();
+    if !candidates.contains(&(current_norm as u16)) {
+        candidates.push(current_norm as u16);
+    }
     let mut best: Option<(u32, u16)> = None;
-    for candidate in [0u16, 90, 180, 270] {
+    for candidate in candidates {
         let disp = display_orientation(w, h, i64::from(candidate));
         let matches = match want_landscape {
             Some(true) => disp == DisplayOrientation::Landscape,

@@ -45,7 +45,7 @@
 
 use std::collections::HashSet;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use base64::Engine as _;
@@ -155,7 +155,7 @@ pub fn extract_signer_certificates(
     let mut certs: Vec<SignerCert> = Vec::new();
     let mut seen: HashSet<Vec<u8>> = HashSet::new();
 
-    let mut push = |der: Vec<u8>, certs: &mut Vec<SignerCert>, seen: &mut HashSet<Vec<u8>>| {
+    let push = |der: Vec<u8>, certs: &mut Vec<SignerCert>, seen: &mut HashSet<Vec<u8>>| {
         if der.is_empty() || der.len() > MAX_SINGLE_CERT || certs.len() >= MAX_CERTS {
             return;
         }

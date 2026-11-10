@@ -20,8 +20,8 @@
 //! - **WebP** — the pure-Rust `image-webp` encoder only implements
 //!   lossless "VP8L" and exposes no quality parameter, so `quality`
 //!   is accepted but ignored (documented no-op).
-//! - **GIF / BMP** — the compiled encoders have no quality knob;
-//!   `quality` is ignored.
+//! - **GIF / BMP / TIFF** — the compiled encoders have no quality
+//!   knob; `quality` is ignored.
 //!
 //! A `quality` outside `1..=100` is rejected with
 //! [`ImageError::InvalidInput`] regardless of the target format.
@@ -106,9 +106,9 @@ pub fn compress(
                 .map_err(ImageError::Encode)?;
             Ok(buf)
         }
-        // WebP (lossless-only encoder), GIF, and BMP expose no quality
-        // parameter in the compiled `image` crate — `quality` is a
-        // documented no-op for these formats.
+        // WebP (lossless-only encoder), GIF, BMP, and TIFF expose no
+        // quality parameter in the compiled `image` crate — `quality`
+        // is a documented no-op for these formats.
         _ => encode(&decoded.image, format),
     }
 }

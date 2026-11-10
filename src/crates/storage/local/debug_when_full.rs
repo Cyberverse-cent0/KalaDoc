@@ -248,6 +248,11 @@ impl FaultInjectingFs {
         &self.config.root_dir
     }
 
+    /// Backend configuration (dedup flag, quota, fault injection).
+    pub(crate) fn config(&self) -> &StorageConfig {
+        &self.config
+    }
+
     /// Route a fault-injection check through this backend's injector.
     pub(crate) fn inject(
         &mut self,

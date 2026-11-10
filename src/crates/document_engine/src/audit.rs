@@ -21,6 +21,9 @@ pub enum DocumentAuditEventType {
     Restored,
     Deleted,
     MetadataUpdated,
+    /// Per-document settings (JSON blob or flags such as `is_locked`)
+    /// were changed.
+    SettingsUpdated,
     RelationshipCreated,
     RelationshipDeleted,
     /// A document processing job (metadata extract, index, thumbnail,

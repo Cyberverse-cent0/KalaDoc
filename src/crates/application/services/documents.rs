@@ -31,6 +31,7 @@ use crate::crates::document_engine::store::metadata;
 use crate::crates::document_engine::store::permissions;
 use crate::crates::document_engine::store::relationships;
 use crate::crates::document_engine::store::schema;
+use crate::crates::document_engine::store::settings;
 use crate::crates::document_engine::store::tags;
 use crate::crates::document_engine::store::versions;
 use crate::crates::document_engine::version::DocumentVersion;
@@ -42,6 +43,7 @@ use super::error::ServiceError;
 pub use crate::crates::document_engine::relationship::{
     DocumentRelationship, DocumentRelationshipType,
 };
+pub use crate::crates::document_engine::settings::DocumentSettings;
 pub use crate::crates::document_engine::store::artifacts::NewArtifact;
 pub use crate::crates::document_engine::store::documents::{DocumentPatch, NewDocument};
 pub use crate::crates::document_engine::store::relationships::RelatedDocument;
@@ -192,6 +194,20 @@ impl DocumentService {
     /// Returns `false` when the document does not exist.
     pub async fn purge_document(&self, id: &DocumentId) -> Result<bool, ServiceError> {
         Ok(documents::purge_document(&self.pool, id).await?)
+    }
+
+    /// Archives a document (`status → archived`). Archived documents
+    /// remain listed; [`DocumentService::unarchive_document`] reverses
+    /// it. Trashed/deleted documents cannot be archived.
+    pub async fn archive_document(&self, id: &DocumentId) -> Result<Document, ServiceError> {
+        Ok(documents::archive_document(&self.pool, id).await?)
+    }
+
+    /// Unarchives a document (`status → active`). Returns
+    /// [`ServiceError::Store`]`(StoreError::Validation)` when the
+    /// document is not currently archived.
+    pub async fn unarchive_document(&self, id: &DocumentId) -> Result<Document, ServiceError> {
+        Ok(documents::unarchive_document(&self.pool, id).await?)
     }
 
     // ------------------------------------------------------------------
@@ -453,6 +469,62 @@ impl DocumentService {
         document_id: &DocumentId,
     ) -> Result<bool, ServiceError> {
         Ok(metadata::delete_document_metadata(&self.pool, document_id).await?)
+    }
+
+    // ------------------------------------------------------------------
+    // Settings
+    // ------------------------------------------------------------------
+
+    /// Inserts or fully replaces the settings row for a document —
+    /// the JSON `settings` blob and the `is_locked` flag. The blob is
+    /// validated (keys and serialized size); records a
+    /// `settings_updated` audit event.
+    pub async fn upsert_document_settings(
+        &self,
+        settings: &DocumentSettings,
+    ) -> Result<(), ServiceError> {
+        Ok(settings::upsert_document_settings(&self.pool, settings).await?)
+    }
+
+    /// Fetches the settings row for a document; `None` when the
+    /// document has no settings stored yet.
+    pub async fn get_document_settings(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Option<DocumentSettings>, ServiceError> {
+        Ok(settings::get_document_settings(&self.pool, document_id).await?)
+    }
+
+    /// Merges `patch` into the document's settings object — keys in
+    /// `patch` overwrite, all other keys (and `is_locked`) are
+    /// preserved. Creates the row with defaults when none exists.
+    /// Returns the updated [`DocumentSettings`].
+    pub async fn update_document_settings(
+        &self,
+        document_id: &DocumentId,
+        patch: &serde_json::Map<String, Value>,
+    ) -> Result<DocumentSettings, ServiceError> {
+        Ok(settings::update_document_settings(&self.pool, document_id, patch).await?)
+    }
+
+    /// Sets (or clears) the document's `is_locked` flag, creating the
+    /// settings row with defaults when none exists. Returns the
+    /// updated [`DocumentSettings`].
+    pub async fn set_document_locked(
+        &self,
+        document_id: &DocumentId,
+        locked: bool,
+    ) -> Result<DocumentSettings, ServiceError> {
+        Ok(settings::set_document_locked(&self.pool, document_id, locked).await?)
+    }
+
+    /// Deletes the settings row for a document; the document itself
+    /// is not touched. Returns `false` when no row existed.
+    pub async fn delete_document_settings(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<bool, ServiceError> {
+        Ok(settings::delete_document_settings(&self.pool, document_id).await?)
     }
 
     // ------------------------------------------------------------------
@@ -773,5 +845,121 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn settings_roundtrip_through_facade() {
+        let svc = DocumentService::init(DocumentService::test_pool().await)
+            .await
+            .unwrap();
+        let doc = svc.create_document(&new_doc("settings.pdf")).await.unwrap();
+
+        assert!(svc.get_document_settings(&doc.id).await.unwrap().is_none());
+
+        // Merge-style update creates the row lazily.
+        let mut patch = serde_json::Map::new();
+        patch.insert("default_view".to_string(), Value::from("continuous"));
+        let updated = svc.update_document_settings(&doc.id, &patch).await.unwrap();
+        assert_eq!(updated.settings["default_view"], Value::from("continuous"));
+        assert!(!updated.is_locked);
+
+        // Lock flag is independent of the settings blob.
+        let locked = svc.set_document_locked(&doc.id, true).await.unwrap();
+        assert!(locked.is_locked);
+        assert_eq!(locked.settings.len(), 1);
+
+        // Full upsert replaces both blob and flag.
+        let mut blob = serde_json::Map::new();
+        blob.insert("theme".to_string(), Value::from("dark"));
+        svc.upsert_document_settings(&DocumentSettings {
+            document_id: doc.id.clone(),
+            settings: blob,
+            is_locked: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .await
+        .unwrap();
+        let fetched = svc.get_document_settings(&doc.id).await.unwrap().unwrap();
+        assert_eq!(fetched.settings.len(), 1);
+        assert_eq!(fetched.settings["theme"], Value::from("dark"));
+        assert!(!fetched.is_locked);
+        // created_at from the pre-existing row is preserved.
+        assert!(!fetched.created_at.is_empty());
+
+        // Audit events recorded for each mutation.
+        let history = svc.get_document_history(&doc.id).await.unwrap();
+        let settings_events = history
+            .iter()
+            .filter(|e| {
+                e.event_type
+                    == crate::crates::document_engine::audit::DocumentAuditEventType::SettingsUpdated
+            })
+            .count();
+        assert_eq!(settings_events, 4);
+
+        assert!(svc.delete_document_settings(&doc.id).await.unwrap());
+        assert!(!svc.delete_document_settings(&doc.id).await.unwrap());
+        assert!(svc.get_document_settings(&doc.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn settings_validation_through_facade() {
+        let svc = DocumentService::init(DocumentService::test_pool().await)
+            .await
+            .unwrap();
+        let doc = svc.create_document(&new_doc("v.pdf")).await.unwrap();
+
+        let mut bad = serde_json::Map::new();
+        bad.insert("".to_string(), Value::from(1));
+        assert!(matches!(
+            svc.update_document_settings(&doc.id, &bad).await,
+            Err(ServiceError::Store(
+                crate::crates::document_engine::store::StoreError::Validation { .. }
+            ))
+        ));
+
+        // Unknown document → NotFound.
+        let missing = DocumentId::new("doc-missing");
+        assert!(matches!(
+            svc.set_document_locked(&missing, true).await,
+            Err(ServiceError::Store(
+                crate::crates::document_engine::store::StoreError::NotFound { .. }
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn archive_unarchive_through_facade() {
+        let svc = DocumentService::init(DocumentService::test_pool().await)
+            .await
+            .unwrap();
+        let doc = svc.create_document(&new_doc("archive.pdf")).await.unwrap();
+
+        let archived = svc.archive_document(&doc.id).await.unwrap();
+        assert!(
+            archived.status == crate::crates::document_engine::document::DocumentStatus::Archived
+        );
+        // Archived documents are still listed (not trashed).
+        assert_eq!(
+            svc.list_documents(Some("user-1"), None, false, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // Double-archive is rejected.
+        assert!(svc.archive_document(&doc.id).await.is_err());
+
+        let restored = svc.unarchive_document(&doc.id).await.unwrap();
+        assert!(
+            restored.status == crate::crates::document_engine::document::DocumentStatus::Active
+        );
+        // Unarchiving a non-archived document is rejected.
+        assert!(svc.unarchive_document(&doc.id).await.is_err());
+
+        // Trashed documents cannot be archived.
+        svc.delete_document(&doc.id).await.unwrap();
+        assert!(svc.archive_document(&doc.id).await.is_err());
     }
 }

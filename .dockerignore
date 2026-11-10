@@ -1,0 +1,14 @@
+# Keep the Docker build context small and reproducible.
+target/
+.git/
+.gitignore
+.github/
+.doc/
+tests/
+storage/
+deploy/
+Dockerfile
+docker-compose.yml
+.dockerignore
+*.md
+!README.md

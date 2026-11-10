@@ -437,6 +437,81 @@ pub async fn restore_document(pool: &SqlitePool, id: &DocumentId) -> StoreResult
         .ok_or_else(|| StoreError::not_found("document", id))
 }
 
+/// Archives a document: `status → archived`, lifecycle moved to
+/// `archived`. The document stays listed (unlike trash) but is flagged
+/// as archived; [`unarchive_document`] reverses it. Returns
+/// `StoreError::Validation` when the document is trashed or deleted —
+/// restore/purge it first.
+pub async fn archive_document(pool: &SqlitePool, id: &DocumentId) -> StoreResult<Document> {
+    let existing = fetch_document(pool, id)
+        .await?
+        .ok_or_else(|| StoreError::not_found("document", id))?;
+    match existing.status {
+        DocumentStatus::Active => {}
+        DocumentStatus::Archived => {
+            return Err(StoreError::validation(
+                "status",
+                "document is already archived",
+            ));
+        }
+        _ => {
+            return Err(StoreError::validation(
+                "status",
+                "only active documents can be archived",
+            ));
+        }
+    }
+
+    let now = now_rfc3339();
+    sqlx::query(
+        "UPDATE documents_tbl
+         SET status = 'archived', lifecycle_status = 'archived', updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(&now)
+    .bind(id.as_str())
+    .execute(pool)
+    .await?;
+
+    record_event(pool, id, None, DocumentAuditEventType::Archived, None).await?;
+
+    fetch_document(pool, id)
+        .await?
+        .ok_or_else(|| StoreError::not_found("document", id))
+}
+
+/// Unarchives a document: `status → active`, lifecycle moved to
+/// `restored`. Returns `StoreError::Validation` when the document is
+/// not currently archived.
+pub async fn unarchive_document(pool: &SqlitePool, id: &DocumentId) -> StoreResult<Document> {
+    let existing = fetch_document(pool, id)
+        .await?
+        .ok_or_else(|| StoreError::not_found("document", id))?;
+    if existing.status != DocumentStatus::Archived {
+        return Err(StoreError::validation(
+            "status",
+            "only archived documents can be unarchived",
+        ));
+    }
+
+    let now = now_rfc3339();
+    sqlx::query(
+        "UPDATE documents_tbl
+         SET status = 'active', lifecycle_status = 'restored', updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(&now)
+    .bind(id.as_str())
+    .execute(pool)
+    .await?;
+
+    record_event(pool, id, None, DocumentAuditEventType::Restored, None).await?;
+
+    fetch_document(pool, id)
+        .await?
+        .ok_or_else(|| StoreError::not_found("document", id))
+}
+
 /// Permanently deletes a document: the row is removed and
 /// `ON DELETE CASCADE` takes its artifacts, versions, revisions, tags,
 /// permissions, and audit history with it. Only trashed documents can
@@ -460,4 +535,523 @@ pub async fn purge_document(pool: &SqlitePool, id: &DocumentId) -> StoreResult<b
         .execute(pool)
         .await?;
     Ok(done.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crates::document_engine::document::DocumentOrigin;
+    use crate::crates::document_engine::store::artifacts::{
+        NewArtifact, list_artifacts, upload_artifact,
+    };
+    use crate::crates::document_engine::store::folders::create_folder;
+    use crate::crates::document_engine::store::schema::init_document_store;
+    use crate::crates::document_engine::store::tags::{add_tag, list_tags};
+    use crate::crates::document_engine::store::versions::{create_version, list_versions};
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite pool");
+        init_document_store(&pool).await.expect("init store");
+        pool
+    }
+
+    fn new_doc_input(name: &str, owner: &str) -> NewDocument {
+        NewDocument {
+            name: name.to_string(),
+            document_type: DocumentType::Pdf,
+            owner_id: owner.to_string(),
+            source: DocumentSource::new(DocumentOrigin::Upload),
+        }
+    }
+
+    async fn create_doc(pool: &SqlitePool, name: &str, owner: &str) -> Document {
+        create_document(pool, &new_doc_input(name, owner))
+            .await
+            .expect("create document")
+    }
+
+    #[tokio::test]
+    async fn create_and_get_roundtrip() {
+        let pool = test_pool().await;
+        let created = create_doc(&pool, "report.pdf", "user-1").await;
+
+        assert_eq!(created.name.as_str(), "report.pdf");
+        assert_eq!(created.document_type, DocumentType::Pdf);
+        assert_eq!(created.status, DocumentStatus::Active);
+        assert_eq!(created.owner_id, "user-1");
+        assert!(created.folder_id.is_none());
+        assert_eq!(created.source.origin, DocumentOrigin::Upload);
+        assert!(!created.id.as_str().is_empty());
+
+        let fetched = get_document(&pool, &created.id)
+            .await
+            .unwrap()
+            .expect("document row");
+        assert_eq!(fetched, created);
+    }
+
+    #[tokio::test]
+    async fn register_document_persists_caller_supplied_aggregate() {
+        let pool = test_pool().await;
+        let now = now_rfc3339();
+        let doc = Document::new(
+            DocumentId::new("doc-fixed-id"),
+            DocumentName::new("imported.docx").unwrap(),
+            DocumentType::Text,
+            "user-2",
+            DocumentSource {
+                origin: DocumentOrigin::Import,
+                uri: Some("s3://bucket/key".to_string()),
+                external_reference: Some("ext-42".to_string()),
+                imported_at: Some(now.clone()),
+            },
+            now,
+        );
+        register_document(&pool, &doc).await.unwrap();
+
+        let fetched = get_document(&pool, &doc.id)
+            .await
+            .unwrap()
+            .expect("registered document");
+        assert_eq!(fetched.id.as_str(), "doc-fixed-id");
+        assert_eq!(fetched.document_type, DocumentType::Text);
+        assert_eq!(fetched.owner_id, "user-2");
+        assert_eq!(fetched.source.uri.as_deref(), Some("s3://bucket/key"));
+        assert_eq!(fetched.source.external_reference.as_deref(), Some("ext-42"));
+    }
+
+    #[tokio::test]
+    async fn get_document_missing_returns_none() {
+        let pool = test_pool().await;
+        assert!(
+            get_document(&pool, &DocumentId::new("doc-nope"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn create_document_rejects_invalid_name() {
+        let pool = test_pool().await;
+        let result = create_document(
+            &pool,
+            &NewDocument {
+                name: "   ".to_string(),
+                document_type: DocumentType::Pdf,
+                owner_id: "user-1".to_string(),
+                source: DocumentSource::new(DocumentOrigin::Upload),
+            },
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_documents_filters_by_owner() {
+        let pool = test_pool().await;
+        create_doc(&pool, "a.pdf", "user-1").await;
+        create_doc(&pool, "b.pdf", "user-1").await;
+        create_doc(&pool, "c.pdf", "user-2").await;
+
+        let all = list_documents(&pool, None, None, false, 100).await.unwrap();
+        assert_eq!(all.len(), 3);
+
+        let mine = list_documents(&pool, Some("user-1"), None, false, 100)
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 2);
+        assert!(mine.iter().all(|d| d.owner_id == "user-1"));
+
+        let theirs = list_documents(&pool, Some("user-2"), None, false, 100)
+            .await
+            .unwrap();
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs[0].name.as_str(), "c.pdf");
+
+        // Owner scoping: another owner's document is not visible under
+        // a foreign owner's listing.
+        let none = list_documents(&pool, Some("user-3"), None, false, 100)
+            .await
+            .unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_documents_excludes_deleted_unless_requested() {
+        let pool = test_pool().await;
+        let keep = create_doc(&pool, "keep.pdf", "user-1").await;
+        let trash = create_doc(&pool, "trash.pdf", "user-1").await;
+        delete_document(&pool, &trash.id).await.unwrap();
+
+        let active_only = list_documents(&pool, None, None, false, 100).await.unwrap();
+        assert_eq!(active_only.len(), 1);
+        assert_eq!(active_only[0].id, keep.id);
+
+        let with_deleted = list_documents(&pool, None, None, true, 100).await.unwrap();
+        assert_eq!(with_deleted.len(), 2);
+        assert!(with_deleted.iter().any(|d| d.id == trash.id));
+    }
+
+    #[tokio::test]
+    async fn list_documents_filters_by_folder_and_respects_limit() {
+        let pool = test_pool().await;
+        let folder = create_folder(&pool, "Reports", None, "user-1")
+            .await
+            .unwrap();
+        let in_folder = create_doc(&pool, "in.pdf", "user-1").await;
+        create_doc(&pool, "out.pdf", "user-1").await;
+        move_document(&pool, &in_folder.id, Some(&folder.id))
+            .await
+            .unwrap();
+
+        let folder_docs = list_documents(&pool, None, Some(&folder.id), false, 100)
+            .await
+            .unwrap();
+        assert_eq!(folder_docs.len(), 1);
+        assert_eq!(folder_docs[0].id, in_folder.id);
+
+        // LIMIT is honored.
+        let limited = list_documents(&pool, None, None, false, 1).await.unwrap();
+        assert_eq!(limited.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_documents_matches_substring_case_insensitively() {
+        let pool = test_pool().await;
+        create_doc(&pool, "Quarterly Report.pdf", "user-1").await;
+        create_doc(&pool, "report-draft.txt", "user-1").await;
+        create_doc(&pool, "unrelated.bin", "user-1").await;
+        let trashed = create_doc(&pool, "report-trashed.pdf", "user-1").await;
+        delete_document(&pool, &trashed.id).await.unwrap();
+
+        let hits = search_documents(&pool, "REPORT", 100).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(
+            hits.iter()
+                .all(|d| d.name.as_str().to_lowercase().contains("report"))
+        );
+
+        let none = search_documents(&pool, "zzz-no-match", 100).await.unwrap();
+        assert!(none.is_empty());
+
+        // Results are ordered by name and limited.
+        let limited = search_documents(&pool, "report", 1).await.unwrap();
+        assert_eq!(limited.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_documents_treats_like_wildcards_literally() {
+        let pool = test_pool().await;
+        create_doc(&pool, "100%_done.pdf", "user-1").await;
+        create_doc(&pool, "100x_done.pdf", "user-1").await;
+
+        // '%' and '_' in the query must not act as wildcards.
+        let hits = search_documents(&pool, "100%_", 100).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name.as_str(), "100%_done.pdf");
+    }
+
+    #[tokio::test]
+    async fn rename_document_updates_name_only() {
+        let pool = test_pool().await;
+        let doc = create_doc(&pool, "old.pdf", "user-1").await;
+
+        let renamed = rename_document(&pool, &doc.id, "new-name.pdf")
+            .await
+            .unwrap();
+        assert_eq!(renamed.name.as_str(), "new-name.pdf");
+        assert_eq!(renamed.document_type, doc.document_type);
+        assert_eq!(renamed.status, doc.status);
+
+        let fetched = get_document(&pool, &doc.id).await.unwrap().unwrap();
+        assert_eq!(fetched.name.as_str(), "new-name.pdf");
+
+        assert!(matches!(
+            rename_document(&pool, &DocumentId::new("doc-missing"), "x").await,
+            Err(StoreError::NotFound { .. })
+        ));
+        assert!(rename_document(&pool, &doc.id, "").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn update_document_patch_changes_fields() {
+        let pool = test_pool().await;
+        let doc = create_doc(&pool, "patch.pdf", "user-1").await;
+
+        let updated = update_document(
+            &pool,
+            &doc.id,
+            &DocumentPatch {
+                name: Some("patched.pdf".to_string()),
+                document_type: Some(DocumentType::Spreadsheet),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.name.as_str(), "patched.pdf");
+        assert_eq!(updated.document_type, DocumentType::Spreadsheet);
+
+        // None fields are left unchanged.
+        let name_only = update_document(
+            &pool,
+            &doc.id,
+            &DocumentPatch {
+                name: Some("patched2.pdf".to_string()),
+                document_type: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(name_only.document_type, DocumentType::Spreadsheet);
+
+        assert!(matches!(
+            update_document(
+                &pool,
+                &DocumentId::new("doc-missing"),
+                &DocumentPatch::default(),
+            )
+            .await,
+            Err(StoreError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn move_document_into_folder_and_back_to_root() {
+        let pool = test_pool().await;
+        let folder = create_folder(&pool, "Inbox", None, "user-1").await.unwrap();
+        let doc = create_doc(&pool, "move.pdf", "user-1").await;
+        assert!(doc.folder_id.is_none());
+
+        let moved = move_document(&pool, &doc.id, Some(&folder.id))
+            .await
+            .unwrap();
+        assert_eq!(
+            moved.folder_id.as_ref().map(|f| f.as_str()),
+            Some(folder.id.as_str())
+        );
+
+        let back = move_document(&pool, &doc.id, None).await.unwrap();
+        assert!(back.folder_id.is_none());
+
+        // Missing folder is rejected.
+        assert!(matches!(
+            move_document(&pool, &doc.id, Some(&FolderId::new("fld-nope"))).await,
+            Err(StoreError::NotFound { .. })
+        ));
+        // Missing document is rejected.
+        assert!(matches!(
+            move_document(&pool, &DocumentId::new("doc-missing"), None).await,
+            Err(StoreError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn copy_document_duplicates_row_artifacts_and_tags_not_versions() {
+        let pool = test_pool().await;
+        let folder = create_folder(&pool, "Shared", None, "user-1")
+            .await
+            .unwrap();
+        let source = create_doc(&pool, "source.pdf", "user-1").await;
+        move_document(&pool, &source.id, Some(&folder.id))
+            .await
+            .unwrap();
+
+        let artifact = upload_artifact(
+            &pool,
+            &NewArtifact {
+                id: Some("art-src".to_string()),
+                document_id: source.id.clone(),
+                storage_uri: "storage://bucket/src.pdf".to_string(),
+                file_name: "src.pdf".to_string(),
+                mime_type: Some("application/pdf".to_string()),
+                size_bytes: 1234,
+                checksum: None,
+            },
+        )
+        .await
+        .unwrap();
+        add_tag(&pool, &source.id, "finance", Some("user-1"))
+            .await
+            .unwrap();
+        create_version(&pool, &source.id, Some(&artifact.id), "user-1", Some("v1"))
+            .await
+            .unwrap();
+
+        let copy = copy_document(&pool, &source.id, None).await.unwrap();
+
+        // New identity, default "(copy)" name, same folder/owner/type.
+        assert_ne!(copy.id, source.id);
+        assert_eq!(copy.name.as_str(), "source.pdf (copy)");
+        assert_eq!(
+            copy.folder_id.as_ref().map(|f| f.as_str()),
+            Some(folder.id.as_str())
+        );
+        assert_eq!(copy.owner_id, source.owner_id);
+        assert_eq!(copy.document_type, source.document_type);
+        assert_eq!(copy.status, DocumentStatus::Active);
+
+        // Artifact rows are duplicated with fresh ids but share storage_uri.
+        let copy_arts = list_artifacts(&pool, &copy.id).await.unwrap();
+        assert_eq!(copy_arts.len(), 1);
+        assert_ne!(copy_arts[0].id, artifact.id);
+        assert_eq!(copy_arts[0].storage_uri, artifact.storage_uri);
+        assert_eq!(copy_arts[0].file_name, artifact.file_name);
+        assert_eq!(copy_arts[0].size_bytes, artifact.size_bytes);
+        assert_eq!(list_artifacts(&pool, &source.id).await.unwrap().len(), 1);
+
+        // Tag assignments are copied.
+        let copy_tags = list_tags(&pool, &copy.id).await.unwrap();
+        assert_eq!(copy_tags.len(), 1);
+        assert_eq!(copy_tags[0].name, "finance");
+
+        // Versions are NOT copied (documented semantics).
+        assert!(list_versions(&pool, &copy.id).await.unwrap().is_empty());
+        assert_eq!(list_versions(&pool, &source.id).await.unwrap().len(), 1);
+
+        // Copy is a real persisted row.
+        assert!(get_document(&pool, &copy.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn copy_document_accepts_custom_name() {
+        let pool = test_pool().await;
+        let source = create_doc(&pool, "orig.pdf", "user-1").await;
+
+        let copy = copy_document(&pool, &source.id, Some("renamed-copy.pdf"))
+            .await
+            .unwrap();
+        assert_eq!(copy.name.as_str(), "renamed-copy.pdf");
+
+        assert!(matches!(
+            copy_document(&pool, &DocumentId::new("doc-missing"), None).await,
+            Err(StoreError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_restore_purge_lifecycle() {
+        let pool = test_pool().await;
+        let doc = create_doc(&pool, "cycle.pdf", "user-1").await;
+
+        // Cannot purge a non-trashed document.
+        assert!(matches!(
+            purge_document(&pool, &doc.id).await,
+            Err(StoreError::Validation { .. })
+        ));
+
+        // Soft delete: status → trashed, still fetchable, hidden from
+        // default listings.
+        let trashed = delete_document(&pool, &doc.id).await.unwrap();
+        assert_eq!(trashed.status, DocumentStatus::Trashed);
+        assert!(get_document(&pool, &doc.id).await.unwrap().is_some());
+        assert!(
+            list_documents(&pool, None, None, false, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            list_documents(&pool, None, None, true, 100)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Restore returns it to active and visible.
+        let restored = restore_document(&pool, &doc.id).await.unwrap();
+        assert_eq!(restored.status, DocumentStatus::Active);
+        assert_eq!(
+            list_documents(&pool, None, None, false, 100)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Restoring an active document is a validation error.
+        assert!(matches!(
+            restore_document(&pool, &doc.id).await,
+            Err(StoreError::Validation { .. })
+        ));
+
+        // Delete → purge removes the row entirely.
+        delete_document(&pool, &doc.id).await.unwrap();
+        assert!(purge_document(&pool, &doc.id).await.unwrap());
+        assert!(get_document(&pool, &doc.id).await.unwrap().is_none());
+
+        // Purging again / missing id reports false; deleting a purged
+        // id is NotFound.
+        assert!(!purge_document(&pool, &doc.id).await.unwrap());
+        assert!(
+            !purge_document(&pool, &DocumentId::new("doc-missing"))
+                .await
+                .unwrap()
+        );
+        assert!(matches!(
+            delete_document(&pool, &doc.id).await,
+            Err(StoreError::NotFound { .. })
+        ));
+        assert!(matches!(
+            restore_document(&pool, &doc.id).await,
+            Err(StoreError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn archive_and_unarchive_transitions() {
+        let pool = test_pool().await;
+        let doc = create_doc(&pool, "arch.pdf", "user-1").await;
+
+        let archived = archive_document(&pool, &doc.id).await.unwrap();
+        assert_eq!(archived.status, DocumentStatus::Archived);
+        // Archived documents remain listed.
+        assert_eq!(
+            list_documents(&pool, None, None, false, 100)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Double archive is rejected.
+        assert!(matches!(
+            archive_document(&pool, &doc.id).await,
+            Err(StoreError::Validation { .. })
+        ));
+
+        let unarchived = unarchive_document(&pool, &doc.id).await.unwrap();
+        assert_eq!(unarchived.status, DocumentStatus::Active);
+
+        // Unarchiving an active document is rejected.
+        assert!(matches!(
+            unarchive_document(&pool, &doc.id).await,
+            Err(StoreError::Validation { .. })
+        ));
+
+        // Trashed documents cannot be archived — restore first.
+        delete_document(&pool, &doc.id).await.unwrap();
+        assert!(matches!(
+            archive_document(&pool, &doc.id).await,
+            Err(StoreError::Validation { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn copy_of_archived_document_status() {
+        let pool = test_pool().await;
+        let source = create_doc(&pool, "arch-src.pdf", "user-1").await;
+        archive_document(&pool, &source.id).await.unwrap();
+
+        let copy = copy_document(&pool, &source.id, None).await.unwrap();
+        // copy_document forces status = Active regardless of source
+        // status — this documents the current semantics.
+        assert_eq!(copy.status, DocumentStatus::Active);
+    }
 }

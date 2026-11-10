@@ -99,3 +99,104 @@ pub(crate) fn save_pdf(doc: &mut Document) -> PdfResult<Vec<u8>> {
     doc.save_to(&mut buf).map_err(PdfError::Encode)?;
     Ok(buf)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crates::pdf_engine::ops::encrypt::{PdfPermissions, encrypt};
+    use crate::crates::pdf_engine::ops::test_utils::pdf_with_pages;
+
+    fn limits() -> EngineLimits {
+        EngineLimits::default()
+    }
+
+    #[test]
+    fn loads_valid_minimal_pdf() {
+        let pdf = pdf_with_pages(&["alpha", "beta", "gamma"]);
+        let doc = load_pdf(&pdf, &limits()).unwrap();
+        assert_eq!(doc.get_pages().len(), 3);
+    }
+
+    #[test]
+    fn rejects_non_pdf_bytes() {
+        for bad in [&b""[..], b"not a pdf", b"%PDF-1.7 truncated"] {
+            assert!(load_pdf(bad, &limits()).is_err(), "input {bad:?}");
+        }
+    }
+
+    #[test]
+    fn enforces_max_input_bytes() {
+        let pdf = pdf_with_pages(&["x"]);
+        let limits = EngineLimits {
+            max_input_bytes: Some(pdf.len() as u64 - 1),
+            ..EngineLimits::default()
+        };
+        let err = load_pdf(&pdf, &limits).unwrap_err();
+        assert!(matches!(err, PdfError::LimitExceeded(_)), "got {err:?}");
+
+        // Exactly at the bound is allowed.
+        let limits = EngineLimits {
+            max_input_bytes: Some(pdf.len() as u64),
+            ..EngineLimits::default()
+        };
+        assert!(load_pdf(&pdf, &limits).is_ok());
+    }
+
+    #[test]
+    fn enforces_max_pages() {
+        let pdf = pdf_with_pages(&["one", "two"]);
+        let limits = EngineLimits {
+            max_pages: Some(1),
+            ..EngineLimits::default()
+        };
+        let err = load_pdf(&pdf, &limits).unwrap_err();
+        assert!(matches!(err, PdfError::LimitExceeded(_)), "got {err:?}");
+
+        // Exactly at the bound is allowed.
+        let limits = EngineLimits {
+            max_pages: Some(2),
+            ..EngineLimits::default()
+        };
+        assert!(load_pdf(&pdf, &limits).is_ok());
+    }
+
+    #[test]
+    fn check_page_limit_boundaries() {
+        let lim = EngineLimits {
+            max_pages: Some(2),
+            ..EngineLimits::default()
+        };
+        assert!(check_page_limit(2, &lim).is_ok());
+        let err = check_page_limit(3, &lim).unwrap_err();
+        assert!(matches!(err, PdfError::LimitExceeded(_)), "got {err:?}");
+
+        // No limit configured: any count passes.
+        assert!(check_page_limit(10_000, &limits()).is_ok());
+    }
+
+    #[test]
+    fn encrypted_document_is_flagged_and_rejected() {
+        let plain = pdf_with_pages(&["secret"]);
+        let encrypted = encrypt(&plain, "pw", None, PdfPermissions::default(), &limits()).unwrap();
+
+        // load_pdf itself tolerates encrypted input (inspect/validate need it).
+        let doc = load_pdf(&encrypted, &limits()).unwrap();
+        assert!(doc_is_encrypted(&doc));
+        let err = reject_encrypted(&doc).unwrap_err();
+        assert!(matches!(err, PdfError::Encrypted), "got {err:?}");
+
+        // An Encrypt entry referenced (not inline) is still detected.
+        let doc2 = load_pdf(&plain, &limits()).unwrap();
+        assert!(!doc_is_encrypted(&doc2));
+        assert!(reject_encrypted(&doc2).is_ok());
+    }
+
+    #[test]
+    fn save_pdf_round_trips() {
+        let pdf = pdf_with_pages(&["round", "trip"]);
+        let mut doc = load_pdf(&pdf, &limits()).unwrap();
+        let saved = save_pdf(&mut doc).unwrap();
+        let reloaded = load_pdf(&saved, &limits()).unwrap();
+        assert_eq!(reloaded.get_pages().len(), 2);
+    }
+}

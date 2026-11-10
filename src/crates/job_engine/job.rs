@@ -133,3 +133,115 @@ pub struct NewJob {
     /// `None` uses the engine/config default.
     pub max_attempts: Option<u32>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn job_status_as_str_parse_roundtrip() {
+        for status in [
+            JobStatus::Pending,
+            JobStatus::Running,
+            JobStatus::Succeeded,
+            JobStatus::Failed,
+            JobStatus::Cancelled,
+            JobStatus::Skipped,
+        ] {
+            assert_eq!(JobStatus::parse(status.as_str()), Some(status));
+        }
+    }
+
+    #[test]
+    fn job_status_parse_rejects_unknown_and_is_case_sensitive() {
+        assert_eq!(JobStatus::parse("bogus"), None);
+        assert_eq!(JobStatus::parse(""), None);
+        assert_eq!(JobStatus::parse("Pending"), None);
+        assert_eq!(JobStatus::parse(" pending"), None);
+        assert_eq!(JobStatus::parse("pending "), None);
+    }
+
+    #[test]
+    fn job_status_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(JobStatus::Succeeded).unwrap(),
+            json!("succeeded")
+        );
+        assert_eq!(
+            serde_json::to_value(JobStatus::Skipped).unwrap(),
+            json!("skipped")
+        );
+        assert_eq!(
+            serde_json::from_value::<JobStatus>(json!("running")).unwrap(),
+            JobStatus::Running
+        );
+        assert!(serde_json::from_value::<JobStatus>(json!("bogus")).is_err());
+    }
+
+    #[test]
+    fn batch_progress_pct_and_completion() {
+        let base = BatchProgress {
+            batch_id: 1,
+            items_total: 4,
+            items_done: 1,
+            items_pending: 3,
+            items_succeeded: 1,
+            items_failed: 0,
+            items_skipped: 0,
+            items_cancelled: 0,
+        };
+        assert_eq!(base.pct(), 25);
+        assert!(!base.is_complete());
+
+        let done = BatchProgress {
+            items_done: 4,
+            items_pending: 0,
+            items_failed: 2,
+            items_cancelled: 1,
+            ..base
+        };
+        assert_eq!(done.pct(), 100);
+        assert!(done.is_complete());
+
+        // Empty batch never divides by zero.
+        let empty = BatchProgress {
+            items_total: 0,
+            items_done: 0,
+            items_pending: 0,
+            items_succeeded: 0,
+            items_failed: 0,
+            items_skipped: 0,
+            items_cancelled: 0,
+            ..base
+        };
+        assert_eq!(empty.pct(), 0);
+        assert!(empty.is_complete());
+    }
+
+    #[test]
+    fn new_job_is_constructible_and_cloneable() {
+        let new = NewJob {
+            kind: "document.ingest".into(),
+            payload: json!({"path": "/tmp/a.pdf"}),
+            priority: 5,
+            run_at: Some(1_700_000_000),
+            max_attempts: Some(7),
+        };
+        let cloned = new.clone();
+        assert_eq!(cloned.kind, "document.ingest");
+        assert_eq!(cloned.priority, 5);
+        assert_eq!(cloned.max_attempts, Some(7));
+        assert_eq!(cloned.payload["path"], "/tmp/a.pdf");
+
+        let defaulted = NewJob {
+            kind: "k".into(),
+            payload: json!(null),
+            priority: 0,
+            run_at: None,
+            max_attempts: None,
+        };
+        assert_eq!(defaulted.run_at, None);
+        assert_eq!(defaulted.max_attempts, None);
+    }
+}

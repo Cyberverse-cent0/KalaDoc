@@ -246,10 +246,7 @@ const VIDEO_ENCODERS: &[&str] = &["libx264", "libopenh264", "h264", "mpeg4"];
 
 /// First available H.264 encoder in this build.
 fn pick_video_encoder<'a>(caps: &'a RuntimeCapabilities) -> Option<&'a str> {
-    VIDEO_ENCODERS
-        .iter()
-        .copied()
-        .find(|e| caps.has_encoder(e))
+    VIDEO_ENCODERS.iter().copied().find(|e| caps.has_encoder(e))
 }
 
 fn concat_reencode(

@@ -7,7 +7,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::crates::multimedia_engine::error::{MediaError, MediaResult};
 use crate::crates::multimedia_engine::model::MediaLimits;
@@ -25,7 +25,7 @@ pub struct ChapterList {
 }
 
 /// One chapter marker.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChapterInfo {
     /// Chapter index (`id` from ffprobe, falling back to position).
     pub index: u32,

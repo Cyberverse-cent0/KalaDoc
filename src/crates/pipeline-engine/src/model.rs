@@ -106,6 +106,61 @@ use serde::{Deserialize, Serialize};
 /// | `pdf` | `ocr` | `pages` | per-page OCR text report (needs `pdftoppm`+`tesseract`) |
 /// | `pdf` | `ocr_languages` | — | tesseract language report, bytes unchanged |
 /// | `pdf` | `document_digest` | `algorithm` (opt: `sha256`/`sha512`) | digest report, bytes unchanged |
+/// | `pdf` | `detect_orientation` | — | per-page orientation report, bytes unchanged |
+/// | `pdf` | `normalize_orientation` | `mode` (opt: `portrait`/`landscape`/`as_is`) | bytes ← `/Rotate` normalized |
+/// | `pdf` | `set_page_size` | `pages` (req), `width` (req), `height` (req), `unit` (opt: `pt`/`mm`/`in`/`px`), `scale_content` (opt) | bytes ← page boxes resized |
+/// | `pdf` | `get_page_sizes` | — | per-page size report, bytes unchanged |
+/// | `pdf` | `set_document_dates` | `creation_date`, `mod_date` (opt) | bytes ← `/CreationDate`/`/ModDate` set |
+/// | `pdf` | `get_document_dates` | — | document dates report, bytes unchanged |
+/// | `pdf` | `edit_field_props` | `patches` (req `[{name, rect?, max_len?, required?, read_only?, value?}]`) | bytes ← fields edited + report |
+/// | `pdf` | `inspect_javascript` | — | JavaScript-action report, bytes unchanged |
+/// | `pdf` | `inspect_structure` | — | structure-tree report, bytes unchanged |
+/// | `pdf` | `extract_signer_certs` | — | signer-certificate report, bytes unchanged |
+/// | `pdf` | `inspect_fonts` | — | font inventory report, bytes unchanged |
+/// | `pdf` | `audit_fonts` | — | font risk report, bytes unchanged |
+/// | `pdf` | `audit_content` | — | content risk report, bytes unchanged |
+/// | `pdf` | `permissions_report` | — | encryption/permissions report, bytes unchanged |
+/// | `pdf` | `object_report` | — | object/stream census report, bytes unchanged |
+/// | `pdf` | `get_page_boxes` | `pages` (req range spec) | per-page box report, bytes unchanged |
+/// | `pdf` | `get_trim_boxes` | `pages` (opt range spec) | trim/bleed box report, bytes unchanged |
+/// | `pdf` | `list_links` | — | link-annotation report, bytes unchanged |
+/// | `pdf` | `list_attachments` | — | embedded-file report, bytes unchanged |
+/// | `pdf` | `deskew` | `pages` (opt), `max_angle` (opt degrees, default 5) | bytes ← deskewed + report (lossy, needs `pdftoppm`) |
+/// | `pdf` | `clean_scan` | `pages` (opt), `mode` (opt: `grayscale`/`threshold`/`despeckle`) | bytes ← cleaned scan + report (lossy, needs `pdftoppm`) |
+/// | `pdf` | `bates` | `prefix`, `start`, `digits`, `pages`, `position`, `font_size`, `color`, `opacity` | bytes ← Bates numbering stamped |
+/// | `pdf` | `dedup_images` | — | bytes ← deduplicated images + report |
+/// | `pdf` | `recompress_streams` | `level` (opt 1-9, default 9) | bytes ← flate streams recompressed + report |
+/// | `pdf` | `remove_hidden_text` | `pages` (opt) | bytes ← hidden text removed + report |
+/// | `pdf` | `set_page_box` | `pages` (req), `which` (req box name), `rect`/`box` or `x0`/`y0`/`x1`/`y1` | bytes ← page box set |
+/// | `pdf` | `remove_page_box` | `pages` (req), `which` (req box name) | bytes ← page box removed |
+/// | `pdf` | `apply_trim_preset` | `pages` (req), `preset` (req: `a4`/`a5`/`letter`/`legal`/`a3`), `bleed` (opt pt) | bytes ← trim/bleed boxes set |
+/// | `pdf` | `add_links` | `links` (req `[{page,rect,target}]`) | bytes ← link annotations added |
+/// | `pdf` | `remove_links` | `pages` (opt) | bytes ← link annotations removed |
+/// | `pdf` | `add_attachment` | `name` (req), `data` (req base64), `description` (opt) | bytes ← attachment embedded |
+/// | `pdf` | `extract_attachment` | `name` (req) | bytes ← attachment payload (not a PDF) |
+/// | `pdf` | `remove_attachment` | `name` (req) | bytes ← attachment removed |
+/// | `pdf` | `build_outline_from_text` | `min_font_size`, `max_font_size`, `max_depth` | bytes ← outline built from headings + report |
+/// | `image` | `inspect` | — | raster image info report, bytes unchanged |
+/// | `image` | `validate` | — | header-only validation report, bytes unchanged |
+/// | `image` | `metadata` | — | image metadata report, bytes unchanged |
+/// | `image` | `resize` | `max_width`, `max_height` (opt, ≥1 required) | bytes ← aspect-fit resize |
+/// | `image` | `convert` | `format` or `target` (req: png/jpeg/gif/webp/bmp/tiff) | bytes ← re-encoded image |
+/// | `image` | `rotate` | `degrees` (req: 90/180/270) | bytes ← quarter-turn rotation |
+/// | `image` | `crop` | `x`, `y`, `width`, `height` (req px) | bytes ← pixel crop |
+/// | `image` | `flip` | `direction` (req: `horizontal`/`vertical`/`both`) | bytes ← mirror flip |
+/// | `image` | `adjust` | `brightness`, `contrast`, `hue_degrees` (all opt) | bytes ← color adjustments |
+/// | `image` | `color` | `channels`, `saturation`, `high_contrast`, `grayscale`, `invert` | bytes ← color ops |
+/// | `image` | `levels` | `input_black`, `input_white`, `gamma` | bytes ← levels/gamma curve |
+/// | `image` | `photocopy` | `threshold`, `softness`, `noise`, `dither` | bytes ← scanner simulation |
+/// | `image` | `replace_color` | `source`, `target` (req `[r,g,b]`), `tolerance` (req), `feather` | bytes ← color keying |
+/// | `image` | `cmyk` | — | bytes ← CMYK TIFF |
+/// | `image` | `thumbnail` | `max_width`, `max_height` (req, never upscales) | bytes ← thumbnail |
+/// | `image` | `compress` | `format`, `quality` (opt) | bytes ← re-encoded image |
+/// | `image` | `watermark` | `mark` (req base64 image), `position`, `opacity`, `scale`, `margin`, `tile_spacing` | bytes ← image overlay |
+/// | `convert` | `convert` | `input_format` (req), `output_format` (req), `options` (opt) | bytes ← converted document |
+/// | `media` | `probe` | — | ffprobe container/stream summary report, bytes unchanged |
+/// | `media` | `streams` | — | per-stream detail report, bytes unchanged |
+/// | `media` | `chapters` | — | chapter report, bytes unchanged |
 ///
 /// `merge`, `interleave`, `overlay`, `compare` and `create_portfolio`
 /// are multi-input operations: a pipeline is a single stream, so the
@@ -123,7 +178,26 @@ use serde::{Deserialize, Serialize};
 /// so there is nothing to chain), `timestamp_document` /
 /// `timestamp_query` / `build_timestamp_request` (require an external
 /// RFC 3161 TSA), and `remove_named_objects` (report-only variant of
-/// `remove_embedded_files`/`remove_javascript_names`).
+/// `remove_embedded_files`/`remove_javascript_names`). Other engine
+/// ops remain unexposed for now: `parse_certificate` (its input is a
+/// raw DER blob, not the byte stream), the layer / named-destination /
+/// transition / print-mark / redact-region / package-file /
+/// extract-table / signature-timestamp ops, and `searchable_pdf`'s
+/// siblings. `signer_certificates` is reachable as
+/// [`operation::PDF_EXTRACT_SIGNER_CERTS`].
+///
+/// `image.ocr`/`image.ocr_languages` are **not** exposed: the
+/// `image-engine` crate keeps `ops::ocr` private (it is not
+/// re-exported), so the pipeline cannot reach it without changing
+/// that crate. The scan-effects ops (`deskew`, `clean_background`,
+/// `denoise`, `scanner_preset`) are likewise unexported.
+///
+/// `media.*` exposes only the byte→report ffprobe inspections
+/// (`probe`, `streams`, `chapters`). Every other multimedia op is
+/// file/process-shaped — ffmpeg needs seekable paths and produces
+/// output *files* (`MediaOutput`), not a single byte stream — so it
+/// cannot slot into the single-stream artifact model without a
+/// temp-file/output-selection layer that does not exist here.
 pub mod operation {
     /// `security.validate` — deep PDF gate (`validate_pdf`).
     pub const VALIDATE: &str = "validate";
@@ -317,6 +391,129 @@ pub mod operation {
     pub const PDF_OCR_LANGUAGES: &str = "ocr_languages";
     /// `pdf.document_digest` — hash digest report.
     pub const PDF_DOCUMENT_DIGEST: &str = "document_digest";
+    /// `pdf.detect_orientation` — per-page orientation report.
+    pub const PDF_DETECT_ORIENTATION: &str = "detect_orientation";
+    /// `pdf.normalize_orientation` — byte transform normalizing `/Rotate`.
+    pub const PDF_NORMALIZE_ORIENTATION: &str = "normalize_orientation";
+    /// `pdf.set_page_size` — byte transform resizing page boxes.
+    pub const PDF_SET_PAGE_SIZE: &str = "set_page_size";
+    /// `pdf.get_page_sizes` — per-page size report.
+    pub const PDF_GET_PAGE_SIZES: &str = "get_page_sizes";
+    /// `pdf.set_document_dates` — byte transform setting `/Info` dates.
+    pub const PDF_SET_DOCUMENT_DATES: &str = "set_document_dates";
+    /// `pdf.get_document_dates` — document dates report.
+    pub const PDF_GET_DOCUMENT_DATES: &str = "get_document_dates";
+    /// `pdf.edit_field_props` — byte transform editing field properties.
+    pub const PDF_EDIT_FIELD_PROPS: &str = "edit_field_props";
+    /// `pdf.inspect_javascript` — JavaScript-action report.
+    pub const PDF_INSPECT_JAVASCRIPT: &str = "inspect_javascript";
+    /// `pdf.inspect_structure` — structure-tree report.
+    pub const PDF_INSPECT_STRUCTURE: &str = "inspect_structure";
+    /// `pdf.extract_signer_certs` — signer-certificate report.
+    pub const PDF_EXTRACT_SIGNER_CERTS: &str = "extract_signer_certs";
+    /// `pdf.inspect_fonts` — font inventory report.
+    pub const PDF_INSPECT_FONTS: &str = "inspect_fonts";
+    /// `pdf.audit_fonts` — font risk report.
+    pub const PDF_AUDIT_FONTS: &str = "audit_fonts";
+    /// `pdf.audit_content` — content risk report.
+    pub const PDF_AUDIT_CONTENT: &str = "audit_content";
+    /// `pdf.permissions_report` — encryption/permissions report.
+    pub const PDF_PERMISSIONS_REPORT: &str = "permissions_report";
+    /// `pdf.object_report` — object/stream census report.
+    pub const PDF_OBJECT_REPORT: &str = "object_report";
+    /// `pdf.get_page_boxes` — per-page media/crop/bleed/trim/art boxes.
+    pub const PDF_GET_PAGE_BOXES: &str = "get_page_boxes";
+    /// `pdf.get_trim_boxes` — per-page trim/bleed box report.
+    pub const PDF_GET_TRIM_BOXES: &str = "get_trim_boxes";
+    /// `pdf.list_links` — link-annotation report.
+    pub const PDF_LIST_LINKS: &str = "list_links";
+    /// `pdf.list_attachments` — embedded-file report.
+    pub const PDF_LIST_ATTACHMENTS: &str = "list_attachments";
+    /// `pdf.deskew` — byte transform deskewing scanned pages.
+    pub const PDF_DESKEW: &str = "deskew";
+    /// `pdf.clean_scan` — byte transform cleaning scanned pages.
+    pub const PDF_CLEAN_SCAN: &str = "clean_scan";
+    /// `pdf.bates` — byte transform stamping Bates numbers.
+    pub const PDF_BATES: &str = "bates";
+    /// `pdf.dedup_images` — byte transform deduplicating images.
+    pub const PDF_DEDUP_IMAGES: &str = "dedup_images";
+    /// `pdf.recompress_streams` — byte transform recompressing streams.
+    pub const PDF_RECOMPRESS_STREAMS: &str = "recompress_streams";
+    /// `pdf.remove_hidden_text` — byte transform removing hidden text.
+    pub const PDF_REMOVE_HIDDEN_TEXT: &str = "remove_hidden_text";
+    /// `pdf.set_page_box` — byte transform setting a page box.
+    pub const PDF_SET_PAGE_BOX: &str = "set_page_box";
+    /// `pdf.remove_page_box` — byte transform removing a page box.
+    pub const PDF_REMOVE_PAGE_BOX: &str = "remove_page_box";
+    /// `pdf.apply_trim_preset` — byte transform applying trim/bleed preset.
+    pub const PDF_APPLY_TRIM_PRESET: &str = "apply_trim_preset";
+    /// `pdf.add_links` — byte transform adding link annotations.
+    pub const PDF_ADD_LINKS: &str = "add_links";
+    /// `pdf.remove_links` — byte transform removing link annotations.
+    pub const PDF_REMOVE_LINKS: &str = "remove_links";
+    /// `pdf.add_attachment` — byte transform embedding a file.
+    pub const PDF_ADD_ATTACHMENT: &str = "add_attachment";
+    /// `pdf.extract_attachment` — byte transform emitting an attachment.
+    pub const PDF_EXTRACT_ATTACHMENT: &str = "extract_attachment";
+    /// `pdf.remove_attachment` — byte transform removing an attachment.
+    pub const PDF_REMOVE_ATTACHMENT: &str = "remove_attachment";
+    /// `pdf.build_outline_from_text` — byte transform building an outline.
+    pub const PDF_BUILD_OUTLINE_FROM_TEXT: &str = "build_outline_from_text";
+    // ---- image engine (`image.*`) ----
+    /// `image.inspect` — `ImageInfo` report.
+    pub const IMAGE_INSPECT: &str = "inspect";
+    /// `image.validate` — header-only `ValidationReport`.
+    pub const IMAGE_VALIDATE: &str = "validate";
+    /// `image.metadata` — `ImageMetadata` report.
+    pub const IMAGE_METADATA: &str = "metadata";
+    /// `image.resize` — byte transform fitting within a pixel box.
+    pub const IMAGE_RESIZE: &str = "resize";
+    /// `image.convert` — byte transform re-encoding to another format.
+    pub const IMAGE_CONVERT: &str = "convert";
+    /// `image.rotate` — byte transform for 90/180/270 rotations.
+    pub const IMAGE_ROTATE: &str = "rotate";
+    /// `image.crop` — byte transform cropping a pixel rectangle.
+    pub const IMAGE_CROP: &str = "crop";
+    /// `image.flip` — byte transform mirroring the image.
+    pub const IMAGE_FLIP: &str = "flip";
+    /// `image.adjust` — byte transform for brightness/contrast/hue.
+    pub const IMAGE_ADJUST: &str = "adjust";
+    /// `image.color` — byte transform for saturation/grayscale/etc.
+    pub const IMAGE_COLOR: &str = "color";
+    /// `image.levels` — byte transform applying a levels/gamma curve.
+    pub const IMAGE_LEVELS: &str = "levels";
+    /// `image.photocopy` — byte transform simulating a scanner pass.
+    pub const IMAGE_PHOTOCOPY: &str = "photocopy";
+    /// `image.replace_color` — byte transform keying out a color.
+    pub const IMAGE_REPLACE_COLOR: &str = "replace_color";
+    /// `image.cmyk` — byte transform to CMYK TIFF.
+    pub const IMAGE_CMYK: &str = "cmyk";
+    /// `image.thumbnail` — byte transform producing a thumbnail.
+    pub const IMAGE_THUMBNAIL: &str = "thumbnail";
+    /// `image.compress` — byte transform re-encoding with quality.
+    pub const IMAGE_COMPRESS: &str = "compress";
+    /// `image.watermark` — byte transform overlaying a mark image.
+    pub const IMAGE_WATERMARK: &str = "watermark";
+    // ---- conversion engine (`convert.*`) ----
+    /// `convert.convert` — byte transform between document formats.
+    ///
+    /// `params.input_format` and `params.output_format` are required
+    /// format names (see `conversion_engine::Format::parse` — accepts
+    /// aliases like `txt`/`text`, `md`/`markdown`, `jpg`/`jpeg`);
+    /// `params.options` optionally carries a `ConvertOptions` object
+    /// (`dpi`, `quality`, `page_size`, `params`). The pair must be
+    /// supported by an available backend — the pure-Rust backend
+    /// covers `txt`/`markdown`/`png`/`jpeg` ↔ `pdf`; everything else
+    /// needs an external tool (pandoc, libreoffice, poppler) and
+    /// fails with a step error when absent.
+    pub const CONVERT_CONVERT: &str = "convert";
+    // ---- multimedia engine (`media.*`) ----
+    /// `media.probe` — ffprobe `MediaInfo` report.
+    pub const MEDIA_PROBE: &str = "probe";
+    /// `media.streams` — ffprobe per-stream `StreamReport`.
+    pub const MEDIA_STREAMS: &str = "streams";
+    /// `media.chapters` — ffprobe chapter `ChapterList` report.
+    pub const MEDIA_CHAPTERS: &str = "chapters";
 }
 
 /// Engine names recognized by the dispatcher.
@@ -325,6 +522,12 @@ pub mod engine_name {
     pub const PDF: &str = "pdf";
     /// The security engine (`SecurityEngine`).
     pub const SECURITY: &str = "security";
+    /// The raster image engine (`ImageEngine`).
+    pub const IMAGE: &str = "image";
+    /// The document conversion engine (`ConversionEngine`).
+    pub const CONVERT: &str = "convert";
+    /// The multimedia engine (`MediaEngine` — ffprobe report steps only).
+    pub const MEDIA: &str = "media";
 }
 
 /// One step in a [`PipelineDefinition`]: target engine, operation, and
@@ -340,7 +543,8 @@ pub struct PipelineStep {
     /// Human-readable step name used in errors and reports. Must be
     /// unique within a definition for readable output (not enforced).
     pub name: String,
-    /// Target engine: `"pdf"` or `"security"` (see [`engine_name`]).
+    /// Target engine: `"pdf"`, `"security"`, `"image"`, `"convert"`,
+    /// or `"media"` (see [`engine_name`]).
     pub engine: String,
     /// Operation name (see [`operation`]).
     pub operation: String,

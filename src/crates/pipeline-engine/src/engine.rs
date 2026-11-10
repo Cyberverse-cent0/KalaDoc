@@ -9,18 +9,23 @@
 //! [`EngineRegistry`](crate::crates::engine_registry::EngineRegistry)
 //! stores `Arc<dyn ProcessingEngine>` for discovery, not invocation.
 //! Engines here are in-process libraries, so a pipeline composes them
-//! by holding concrete [`PdfEngine`] and [`SecurityEngine`] instances
-//! and calling their typed methods directly. Adding engine support
+//! by holding concrete engine instances ([`PdfEngine`],
+//! [`SecurityEngine`], [`ImageEngine`], [`ConversionEngine`], and the
+//! multimedia probe functions) and calling their typed methods
+//! directly. Adding engine support
 //! means adding a dispatch arm in [`PipelineEngine::dispatch`] — the
 //! compiler, not a registry lookup, enforces correctness.
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::crates::conversion_engine::{self as convert_ops, ConversionEngine, ConvertRequest};
 use crate::crates::core::engine::{
     EngineCapabilities, EngineFuture, EngineHealth, EngineHealthStatus, EngineKind, EngineLimits,
     EngineOperation, ProcessingEngine,
 };
+use crate::crates::image_engine::{self as image_ops, ImageEngine};
+use crate::crates::multimedia_engine::{self as media_ops, model::MediaLimits};
 use crate::crates::pdf_engine::{self as pdf_ops, PdfEngine};
 use crate::crates::security_engine::{ResourceLimits, SecurityEngine, SniffedFormat};
 
@@ -40,10 +45,15 @@ use super::model::{
 /// All operations are synchronous CPU-bound work over in-memory
 /// buffers; async callers should wrap [`run_pipeline`](Self::run_pipeline)
 /// in `spawn_blocking`, matching the wrapped engines' contract.
-#[derive(Debug)]
 pub struct PipelineEngine {
     pdf: PdfEngine,
     security: SecurityEngine,
+    image: ImageEngine,
+    convert: ConversionEngine,
+    /// Limits for `media.*` ffprobe report steps (the multimedia
+    /// engine's ops are free functions taking `&MediaLimits`, not
+    /// methods on a held engine instance).
+    media_limits: MediaLimits,
     limits: PipelineLimits,
     security_limits: ResourceLimits,
 }
@@ -78,9 +88,32 @@ impl PipelineEngine {
             max_pixels: None,
             max_outputs: limits.max_outputs,
         };
+        let image_limits = EngineLimits {
+            max_input_bytes: Some(limits.max_input_bytes),
+            // `PipelineLimits` has no pixel budget; the decompression-
+            // bomb guard stays off rather than inventing a second,
+            // silently-different limit.
+            max_pixels: None,
+            max_pages: None,
+            max_outputs: None,
+        };
+        // ffprobe report steps: bound input by the pipeline's per-step
+        // cap and total probed bytes by the cumulative budget; a
+        // probe is a read-only inspection so one output "file" (the
+        // JSON report) is ample, and 5 minutes is a generous ceiling
+        // for ffprobe on an in-limit input.
+        let media_limits = MediaLimits {
+            max_input_bytes: Some(limits.max_input_bytes),
+            max_output_bytes: Some(limits.max_total_bytes),
+            timeout: std::time::Duration::from_secs(300),
+            max_output_files: Some(1),
+        };
         Self {
             pdf: PdfEngine::with_limits(pdf_limits),
             security: SecurityEngine::new(),
+            image: ImageEngine::with_limits(image_limits),
+            convert: ConversionEngine::new(),
+            media_limits,
             limits,
             security_limits,
         }
@@ -423,6 +456,134 @@ impl PipelineEngine {
                     serde_json::to_value(&report).map_err(json_err)?,
                 ))
             }
+            (engine_name::PDF, operation::PDF_DETECT_ORIENTATION) => {
+                let report = pdf_ops::detect_orientation(input, self.pdf.limits())?;
+                Ok(report_step(
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            (engine_name::PDF, operation::PDF_GET_PAGE_SIZES) => {
+                // PageSizeInfo has no Serialize impl; project fields.
+                let infos = pdf_ops::get_page_sizes(input, self.pdf.limits())?;
+                let list: Vec<Value> = infos
+                    .iter()
+                    .map(|i| {
+                        serde_json::json!({
+                            "page": i.page_number,
+                            "width_pt": i.width_pt,
+                            "height_pt": i.height_pt,
+                            "media_box": i.media_box,
+                            "has_crop_box": i.has_crop_box,
+                        })
+                    })
+                    .collect();
+                Ok(report_step(Value::Array(list)))
+            }
+            (engine_name::PDF, operation::PDF_GET_DOCUMENT_DATES) => {
+                let dates = pdf_ops::get_document_dates(input, self.pdf.limits())?;
+                Ok(report_step(serde_json::json!({
+                    "creation_date": dates.creation_date,
+                    "mod_date": dates.mod_date,
+                })))
+            }
+            (engine_name::PDF, operation::PDF_INSPECT_JAVASCRIPT) => {
+                let js = pdf_ops::inspect_javascript(input, self.pdf.limits())?;
+                Ok(report_step(serde_json::to_value(&js).map_err(json_err)?))
+            }
+            (engine_name::PDF, operation::PDF_INSPECT_STRUCTURE) => {
+                let report = pdf_ops::inspect_structure(input, self.pdf.limits())?;
+                Ok(report_step(
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            (engine_name::PDF, operation::PDF_EXTRACT_SIGNER_CERTS) => {
+                // SignerCert carries raw DER bytes; report the
+                // base64 form plus size to keep reports compact.
+                let certs = pdf_ops::extract_signer_certificates(input, self.pdf.limits())?;
+                let list: Vec<Value> = certs
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "index": c.index,
+                            "der_b64": c.der_b64,
+                            "size": c.size,
+                        })
+                    })
+                    .collect();
+                Ok(report_step(Value::Array(list)))
+            }
+            (engine_name::PDF, operation::PDF_INSPECT_FONTS) => {
+                let fonts = self.pdf.inspect_fonts(input)?;
+                Ok(report_step(serde_json::to_value(&fonts).map_err(json_err)?))
+            }
+            (engine_name::PDF, operation::PDF_AUDIT_FONTS) => {
+                let report = self.pdf.audit_fonts(input)?;
+                Ok(report_step(
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            (engine_name::PDF, operation::PDF_AUDIT_CONTENT) => {
+                let report = self.pdf.audit_content(input)?;
+                Ok(report_step(
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            (engine_name::PDF, operation::PDF_PERMISSIONS_REPORT) => {
+                let report = self.pdf.permissions_report(input)?;
+                Ok(report_step(
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            (engine_name::PDF, operation::PDF_OBJECT_REPORT) => {
+                let report = self.pdf.object_report(input)?;
+                Ok(report_step(
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            (engine_name::PDF, operation::PDF_GET_PAGE_BOXES) => {
+                // PageBoxInfo has no Serialize impl; project fields.
+                let pages = required_str(&step.params, "pages")?;
+                let infos = self.pdf.get_page_boxes(input, pages)?;
+                let list: Vec<Value> = infos
+                    .iter()
+                    .map(|i| {
+                        serde_json::json!({
+                            "page": i.page,
+                            "boxes": i.boxes,
+                        })
+                    })
+                    .collect();
+                Ok(report_step(Value::Array(list)))
+            }
+            (engine_name::PDF, operation::PDF_GET_TRIM_BOXES) => {
+                // trim_boxes::PageBoxInfo has no Serialize impl; project
+                // fields. `pages` selects the ranged variant.
+                let infos = match optional_str(&step.params, "pages") {
+                    Some(pages) => self.pdf.get_trim_boxes_for_pages(input, pages)?,
+                    None => self.pdf.get_trim_boxes(input)?,
+                };
+                let list: Vec<Value> = infos
+                    .iter()
+                    .map(|i| {
+                        serde_json::json!({
+                            "page": i.page,
+                            "media": i.media,
+                            "crop": i.crop,
+                            "trim": i.trim,
+                            "bleed": i.bleed,
+                        })
+                    })
+                    .collect();
+                Ok(report_step(Value::Array(list)))
+            }
+            (engine_name::PDF, operation::PDF_LIST_LINKS) => {
+                let links = self.pdf.list_links(input)?;
+                Ok(report_step(serde_json::to_value(&links).map_err(json_err)?))
+            }
+            (engine_name::PDF, operation::PDF_LIST_ATTACHMENTS) => {
+                let files = self.pdf.list_attachments(input)?;
+                Ok(report_step(serde_json::to_value(&files).map_err(json_err)?))
+            }
             // ---- pdf engine: multi-input byte transforms ----
             (engine_name::PDF, operation::PDF_MERGE) => {
                 let others = other_inputs(&step.params)?;
@@ -698,6 +859,20 @@ impl PipelineEngine {
                     serde_json::to_value(&report).map_err(json_err)?,
                 ))
             }
+            (engine_name::PDF, operation::PDF_NORMALIZE_ORIENTATION) => {
+                let mode = match optional_str(&step.params, "mode") {
+                    Some(s) => parse_orient_mode(s)?,
+                    None => pdf_ops::OrientMode::Portrait,
+                };
+                let out = pdf_ops::normalize_orientation(input, mode, self.pdf.limits())?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::PDF, operation::PDF_SET_PAGE_SIZE) => {
+                let pages = required_str(&step.params, "pages")?;
+                let spec = page_size_spec(&step.params)?;
+                let out = pdf_ops::set_page_size(input, pages, &spec, self.pdf.limits())?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
             // ---- pdf engine: document-level transforms ----
             (engine_name::PDF, operation::PDF_COMPRESS) => {
                 let out = self.pdf.compress(input)?;
@@ -861,6 +1036,23 @@ impl PipelineEngine {
                     serde_json::to_value(&report).map_err(json_err)?,
                 ))
             }
+            (engine_name::PDF, operation::PDF_SET_DOCUMENT_DATES) => {
+                let creation = optional_str(&step.params, "creation_date")
+                    .or_else(|| optional_str(&step.params, "creation"));
+                let mod_date = optional_str(&step.params, "mod_date");
+                let out =
+                    pdf_ops::set_document_dates(input, creation, mod_date, self.pdf.limits())?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::PDF, operation::PDF_EDIT_FIELD_PROPS) => {
+                let patches: Vec<pdf_ops::FieldPatch> =
+                    spec_from_params_key(&step.params, "patches")?;
+                let (out, report) = pdf_ops::edit_field_props(input, &patches, self.pdf.limits())?;
+                Ok(transform_report_step(
+                    PipelineArtifact::Bytes(out),
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
             (engine_name::PDF, operation::PDF_SET_OUTLINE) => {
                 let items_v = step.params.get("items").ok_or_else(|| {
                     StepError::Params("missing required parameter `items`".to_string())
@@ -957,6 +1149,304 @@ impl PipelineEngine {
                 let out = self.pdf.render(input, pages, dpi, format)?;
                 Ok(bytes_step(PipelineArtifact::Bytes(out)))
             }
+            // ---- pdf engine: round-3 transforms ----
+            (engine_name::PDF, operation::PDF_DESKEW) => {
+                let pages = optional_str(&step.params, "pages");
+                let max_angle = optional_f64(&step.params, "max_angle").unwrap_or(5.0);
+                let (out, report) = self.pdf.deskew(input, pages, max_angle)?;
+                Ok(transform_report_step(
+                    PipelineArtifact::Bytes(out),
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            (engine_name::PDF, operation::PDF_CLEAN_SCAN) => {
+                let mode = match optional_str(&step.params, "mode") {
+                    Some(s) => parse_clean_mode(s)?,
+                    None => pdf_ops::CleanMode::Grayscale,
+                };
+                let (out, report) =
+                    self.pdf
+                        .clean_scan(input, optional_str(&step.params, "pages"), mode)?;
+                Ok(transform_report_step(
+                    PipelineArtifact::Bytes(out),
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            (engine_name::PDF, operation::PDF_BATES) => {
+                let spec = bates_spec(&step.params)?;
+                let out = self.pdf.add_bates(input, &spec)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::PDF, operation::PDF_DEDUP_IMAGES) => {
+                let (out, report) = self.pdf.dedup_images(input)?;
+                Ok(transform_report_step(
+                    PipelineArtifact::Bytes(out),
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            (engine_name::PDF, operation::PDF_RECOMPRESS_STREAMS) => {
+                let level = optional_u32(&step.params, "level")?.unwrap_or(9);
+                let (out, report) = self.pdf.recompress_streams(input, level)?;
+                // RecompressReport has no Serialize impl; project fields.
+                Ok(transform_report_step(
+                    PipelineArtifact::Bytes(out),
+                    serde_json::json!({
+                        "streams_seen": report.streams_seen,
+                        "streams_recompressed": report.streams_recompressed,
+                        "bytes_before": report.bytes_before,
+                        "bytes_after": report.bytes_after,
+                        "warnings": report.warnings,
+                    }),
+                ))
+            }
+            (engine_name::PDF, operation::PDF_REMOVE_HIDDEN_TEXT) => {
+                let (out, report) = self
+                    .pdf
+                    .remove_hidden_text(input, optional_str(&step.params, "pages"))?;
+                Ok(transform_report_step(
+                    PipelineArtifact::Bytes(out),
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            (engine_name::PDF, operation::PDF_SET_PAGE_BOX) => {
+                let pages = required_str(&step.params, "pages")?;
+                let which = required_str(&step.params, "which").and_then(parse_page_box)?;
+                let rect = rect_param(&step.params, "page box")?;
+                let out = self.pdf.set_page_box(input, pages, which, rect)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::PDF, operation::PDF_REMOVE_PAGE_BOX) => {
+                let pages = required_str(&step.params, "pages")?;
+                let which = required_str(&step.params, "which").and_then(parse_page_box)?;
+                let out = self.pdf.remove_page_box(input, pages, which)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::PDF, operation::PDF_APPLY_TRIM_PRESET) => {
+                let pages = required_str(&step.params, "pages")?;
+                let preset = required_str(&step.params, "preset").and_then(parse_trim_preset)?;
+                let bleed =
+                    optional_f64(&step.params, "bleed").unwrap_or(pdf_ops::DEFAULT_BLEED_PT);
+                let out = self.pdf.apply_trim_preset(input, pages, preset, bleed)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::PDF, operation::PDF_ADD_LINKS) => {
+                let links: Vec<pdf_ops::LinkSpec> = spec_from_params_key(&step.params, "links")?;
+                let out = self.pdf.add_links(input, &links)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::PDF, operation::PDF_REMOVE_LINKS) => {
+                let out = self
+                    .pdf
+                    .remove_links(input, optional_str(&step.params, "pages"))?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::PDF, operation::PDF_ADD_ATTACHMENT) => {
+                // AttachmentSpec.data is raw bytes; accept base64 like
+                // every other binary param.
+                let spec = pdf_ops::AttachmentSpec {
+                    name: required_str(&step.params, "name")?.to_string(),
+                    data: required_b64(&step.params, "data")?,
+                    description: optional_str(&step.params, "description").map(str::to_string),
+                };
+                let out = self.pdf.add_attachment(input, &spec)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::PDF, operation::PDF_EXTRACT_ATTACHMENT) => {
+                let name = required_str(&step.params, "name")?;
+                let out = self.pdf.extract_attachment(input, name)?;
+                // The artifact becomes the attachment payload — not a
+                // PDF; later PDF steps will fail on it, same as
+                // `convert`/`render` outputs.
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::PDF, operation::PDF_REMOVE_ATTACHMENT) => {
+                let name = required_str(&step.params, "name")?;
+                let out = self.pdf.remove_attachment(input, name)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::PDF, operation::PDF_BUILD_OUTLINE_FROM_TEXT) => {
+                let spec: pdf_ops::HeadingSpec = spec_from_params(&step.params)?;
+                let (out, report) = self.pdf.build_outline_from_text(input, &spec)?;
+                Ok(transform_report_step(
+                    PipelineArtifact::Bytes(out),
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            // ---- image engine: report steps (bytes pass through) ----
+            (engine_name::IMAGE, operation::IMAGE_INSPECT) => {
+                let info = self.image.inspect(input)?;
+                Ok(report_step(serde_json::to_value(&info).map_err(json_err)?))
+            }
+            (engine_name::IMAGE, operation::IMAGE_VALIDATE) => {
+                let report = self.image.validate(input)?;
+                Ok(report_step(
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            (engine_name::IMAGE, operation::IMAGE_METADATA) => {
+                let meta = self.image.metadata(input)?;
+                Ok(report_step(serde_json::to_value(&meta).map_err(json_err)?))
+            }
+            // ---- image engine: byte transforms ----
+            (engine_name::IMAGE, operation::IMAGE_RESIZE) => {
+                let options: image_ops::ResizeOptions = spec_from_params(&step.params)?;
+                let out = self.image.resize(input, options)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_CONVERT) => {
+                // Accept `format` (matches `image.convert`'s docs) or
+                // `target` (matches `pdf.convert`'s param name).
+                let target = optional_str(&step.params, "format")
+                    .or_else(|| optional_str(&step.params, "target"))
+                    .ok_or_else(|| {
+                        StepError::Params(
+                            "missing required string parameter `format` (or `target`)".to_string(),
+                        )
+                    })?;
+                let out = self.image.convert(input, target)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_ROTATE) => {
+                let degrees = required_u64(&step.params, "degrees")?;
+                let degrees = u16::try_from(degrees).map_err(|_| {
+                    StepError::Params(format!("degrees {degrees} does not fit in u16"))
+                })?;
+                let out = self.image.rotate(input, degrees)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_CROP) => {
+                let x = required_u32(&step.params, "x")?;
+                let y = required_u32(&step.params, "y")?;
+                let width = required_u32(&step.params, "width")?;
+                let height = required_u32(&step.params, "height")?;
+                let out = self.image.crop(input, x, y, width, height)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_FLIP) => {
+                let direction_raw = required_str(&step.params, "direction")?;
+                let direction: image_ops::FlipDirection =
+                    serde_json::from_value(Value::String(direction_raw.to_string())).map_err(|_| {
+                        StepError::Params(format!(
+                            "unknown flip direction `{direction_raw}` (expected horizontal|vertical|both)"
+                        ))
+                    })?;
+                let out = self.image.flip(input, direction)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_ADJUST) => {
+                let options: image_ops::AdjustOptions = spec_from_params(&step.params)?;
+                let out = self.image.adjust(input, &options)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_COLOR) => {
+                let options: image_ops::ColorOptions = spec_from_params(&step.params)?;
+                let out = self.image.color(input, &options)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_LEVELS) => {
+                let options: image_ops::LevelsOptions = spec_from_params(&step.params)?;
+                let out = self.image.levels(input, &options)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_PHOTOCOPY) => {
+                let options: image_ops::PhotocopyOptions = spec_from_params(&step.params)?;
+                let out = self.image.photocopy(input, &options)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_REPLACE_COLOR) => {
+                let options: image_ops::ColorReplaceOptions = spec_from_params(&step.params)?;
+                let out = self.image.replace_color(input, &options)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_CMYK) => {
+                let out = self.image.cmyk(input)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_THUMBNAIL) => {
+                let max_width = required_u32(&step.params, "max_width")?;
+                let max_height = required_u32(&step.params, "max_height")?;
+                let out = self.image.thumbnail(input, max_width, max_height)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_COMPRESS) => {
+                let options: image_ops::CompressOptions = spec_from_params(&step.params)?;
+                let out = self.image.compress(input, options)?;
+                Ok(bytes_step(PipelineArtifact::Bytes(out)))
+            }
+            (engine_name::IMAGE, operation::IMAGE_WATERMARK) => {
+                let mark = required_b64(&step.params, "mark")?;
+                let options = image_watermark_options(&step.params)?;
+                let out = self.image.watermark(input, &mark, &options)?;
+                // The mark bytes are materialized into the run too.
+                Ok(StepOutcome {
+                    produced_bytes: out.len() as u64 + mark.len() as u64,
+                    ..bytes_step(PipelineArtifact::Bytes(out))
+                })
+            }
+            // ---- conversion engine: document-format transforms ----
+            //
+            // Single op `convert.convert`: the format pair travels in
+            // `params` (`input_format`/`output_format`) rather than
+            // the operation name, matching how `pdf.convert` takes
+            // its target as a param. This keeps `is_supported` a pure
+            // string check and leaves room for future convert ops.
+            (engine_name::CONVERT, operation::CONVERT_CONVERT) => {
+                let input_format_raw = required_str(&step.params, "input_format")?;
+                let output_format_raw = required_str(&step.params, "output_format")?;
+                let input_format =
+                    convert_ops::Format::parse(input_format_raw).ok_or_else(|| {
+                        StepError::Params(format!(
+                        "unknown input_format `{input_format_raw}` (see conversion Format names)"
+                    ))
+                    })?;
+                let output_format =
+                    convert_ops::Format::parse(output_format_raw).ok_or_else(|| {
+                        StepError::Params(format!(
+                        "unknown output_format `{output_format_raw}` (see conversion Format names)"
+                    ))
+                    })?;
+                let options: convert_ops::ConvertOptions = match step.params.get("options") {
+                    Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
+                        StepError::Params(format!("invalid `options` parameter: {e}"))
+                    })?,
+                    _ => convert_ops::ConvertOptions::default(),
+                };
+                let out = self.convert.convert(&ConvertRequest {
+                    input_format,
+                    output_format,
+                    input: input.to_vec(),
+                    options,
+                })?;
+                Ok(transform_report_step(
+                    PipelineArtifact::Bytes(out.bytes.clone()),
+                    serde_json::json!({
+                        "backend": out.backend,
+                        "output_format": out.output_format.as_str(),
+                        "warnings": out.warnings,
+                    }),
+                ))
+            }
+            // ---- multimedia engine: ffprobe report steps ----
+            //
+            // Only the byte→report inspections are exposed: every
+            // other multimedia op is file/process-shaped and cannot
+            // produce the single byte stream this pipeline carries.
+            (engine_name::MEDIA, operation::MEDIA_PROBE) => {
+                let info = media_ops::probe::inspect::inspect(input, &self.media_limits)?;
+                Ok(report_step(serde_json::to_value(&info).map_err(json_err)?))
+            }
+            (engine_name::MEDIA, operation::MEDIA_STREAMS) => {
+                let report = media_ops::probe::streams::probe_streams(input, &self.media_limits)?;
+                Ok(report_step(
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
+            (engine_name::MEDIA, operation::MEDIA_CHAPTERS) => {
+                let report = media_ops::probe::chapters::chapters(input, &self.media_limits)?;
+                Ok(report_step(
+                    serde_json::to_value(&report).map_err(json_err)?,
+                ))
+            }
             // Unreachable: check_definition rejects unsupported pairs
             // before dispatch. Kept as a defensive arm so a future
             // caller bypassing validation still gets an error, not a
@@ -966,6 +1456,18 @@ impl PipelineEngine {
                 step.engine, step.operation
             ))),
         }
+    }
+}
+
+impl std::fmt::Debug for PipelineEngine {
+    // `ConversionEngine` does not implement `Debug`, so the derive is
+    // replaced by a manual impl that reports the pipeline's own
+    // configuration rather than the held engine instances.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PipelineEngine")
+            .field("limits", &self.limits)
+            .field("security_limits", &self.security_limits)
+            .finish_non_exhaustive()
     }
 }
 
@@ -1029,16 +1531,105 @@ impl ProcessingEngine for PipelineEngine {
                 EngineOperation::Ocr,
                 EngineOperation::Encrypt,
                 EngineOperation::Decrypt,
+                EngineOperation::DetectOrientation,
+                EngineOperation::NormalizeOrientation,
+                EngineOperation::SetPageSize,
+                EngineOperation::GetPageSizes,
+                EngineOperation::SetDocumentDates,
+                EngineOperation::GetDocumentDates,
+                EngineOperation::EditFieldProps,
+                EngineOperation::InspectJavascript,
+                EngineOperation::InspectStructure,
+                EngineOperation::SignerCertificates,
+                // round-3 ops
+                EngineOperation::InspectFonts,
+                EngineOperation::FontAudit,
+                EngineOperation::ContentAudit,
+                EngineOperation::PermissionsReport,
+                EngineOperation::ObjectReport,
+                EngineOperation::GetPageBoxes,
+                EngineOperation::GetTrimBoxes,
+                EngineOperation::AddLinks,
+                EngineOperation::ListLinks,
+                EngineOperation::RemoveLinks,
+                EngineOperation::ListAttachments,
+                EngineOperation::ExtractAttachment,
+                EngineOperation::AddAttachment,
+                EngineOperation::RemoveAttachment,
+                EngineOperation::Deskew,
+                EngineOperation::CleanScan,
+                EngineOperation::AddBates,
+                EngineOperation::DedupImages,
+                EngineOperation::RecompressStreams,
+                EngineOperation::RemoveHiddenText,
+                EngineOperation::SetPageBox,
+                EngineOperation::RemovePageBox,
+                EngineOperation::ApplyTrimPreset,
+                EngineOperation::BuildOutlineFromText,
             ],
-            input_formats: vec!["pdf".to_string()],
+            // Union of formats any step family accepts/produces:
+            // `pdf.*` takes PDFs; `image.*` takes/emits raster
+            // formats; `convert.convert` spans the document formats;
+            // `media.*` probes audio/video containers (report-only,
+            // never an output format).
+            input_formats: vec![
+                "pdf".to_string(),
+                // image.* inputs
+                "png".to_string(),
+                "jpeg".to_string(),
+                "gif".to_string(),
+                "webp".to_string(),
+                "bmp".to_string(),
+                "tiff".to_string(),
+                // convert.convert inputs (document formats)
+                "txt".to_string(),
+                "markdown".to_string(),
+                "html".to_string(),
+                "docx".to_string(),
+                "odt".to_string(),
+                "xlsx".to_string(),
+                "xls".to_string(),
+                "pptx".to_string(),
+                "ppt".to_string(),
+                "epub".to_string(),
+                // media.* probe inputs
+                "mp4".to_string(),
+                "mkv".to_string(),
+                "mov".to_string(),
+                "avi".to_string(),
+                "webm".to_string(),
+                "mp3".to_string(),
+                "wav".to_string(),
+                "flac".to_string(),
+                "aac".to_string(),
+                "ogg".to_string(),
+                "opus".to_string(),
+            ],
             // Most steps keep the stream a PDF; `convert` emits
-            // text/markdown and `render` emits an image.
+            // text/markdown, `render` emits an image, `image.*`
+            // transforms emit rasters (CMYK always TIFF), and
+            // `convert.convert`/`media.*` change the stream's
+            // meaning entirely — the format list is the union a
+            // *well-formed* pipeline could end with, not a guarantee
+            // every pipeline produces all of them.
             output_formats: vec![
                 "pdf".to_string(),
                 "text".to_string(),
                 "markdown".to_string(),
                 "png".to_string(),
                 "jpeg".to_string(),
+                "gif".to_string(),
+                "webp".to_string(),
+                "bmp".to_string(),
+                "tiff".to_string(),
+                "html".to_string(),
+                "docx".to_string(),
+                "odt".to_string(),
+                "xlsx".to_string(),
+                "xls".to_string(),
+                "pptx".to_string(),
+                "ppt".to_string(),
+                "epub".to_string(),
             ],
             limits: EngineLimits {
                 max_input_bytes: Some(self.limits.max_input_bytes),
@@ -1067,7 +1658,14 @@ impl ProcessingEngine for PipelineEngine {
 
 /// Engines the dispatcher knows how to reach.
 fn is_known_engine(engine: &str) -> bool {
-    matches!(engine, engine_name::PDF | engine_name::SECURITY)
+    matches!(
+        engine,
+        engine_name::PDF
+            | engine_name::SECURITY
+            | engine_name::IMAGE
+            | engine_name::CONVERT
+            | engine_name::MEDIA
+    )
 }
 
 /// `pdf.*` operations [`PipelineEngine::dispatch`] handles. Must stay
@@ -1167,6 +1765,71 @@ const PDF_OPERATIONS: &[&str] = &[
     operation::PDF_OCR,
     operation::PDF_OCR_LANGUAGES,
     operation::PDF_DOCUMENT_DIGEST,
+    operation::PDF_DETECT_ORIENTATION,
+    operation::PDF_NORMALIZE_ORIENTATION,
+    operation::PDF_SET_PAGE_SIZE,
+    operation::PDF_GET_PAGE_SIZES,
+    operation::PDF_SET_DOCUMENT_DATES,
+    operation::PDF_GET_DOCUMENT_DATES,
+    operation::PDF_EDIT_FIELD_PROPS,
+    operation::PDF_INSPECT_JAVASCRIPT,
+    operation::PDF_INSPECT_STRUCTURE,
+    operation::PDF_EXTRACT_SIGNER_CERTS,
+    operation::PDF_INSPECT_FONTS,
+    operation::PDF_AUDIT_FONTS,
+    operation::PDF_AUDIT_CONTENT,
+    operation::PDF_PERMISSIONS_REPORT,
+    operation::PDF_OBJECT_REPORT,
+    operation::PDF_GET_PAGE_BOXES,
+    operation::PDF_GET_TRIM_BOXES,
+    operation::PDF_LIST_LINKS,
+    operation::PDF_LIST_ATTACHMENTS,
+    operation::PDF_DESKEW,
+    operation::PDF_CLEAN_SCAN,
+    operation::PDF_BATES,
+    operation::PDF_DEDUP_IMAGES,
+    operation::PDF_RECOMPRESS_STREAMS,
+    operation::PDF_REMOVE_HIDDEN_TEXT,
+    operation::PDF_SET_PAGE_BOX,
+    operation::PDF_REMOVE_PAGE_BOX,
+    operation::PDF_APPLY_TRIM_PRESET,
+    operation::PDF_ADD_LINKS,
+    operation::PDF_REMOVE_LINKS,
+    operation::PDF_ADD_ATTACHMENT,
+    operation::PDF_EXTRACT_ATTACHMENT,
+    operation::PDF_REMOVE_ATTACHMENT,
+    operation::PDF_BUILD_OUTLINE_FROM_TEXT,
+];
+
+/// `image.*` operations [`PipelineEngine::dispatch`] handles. Must
+/// stay in sync with the match arms — `check_definition` uses it for
+/// up-front validation.
+const IMAGE_OPERATIONS: &[&str] = &[
+    operation::IMAGE_INSPECT,
+    operation::IMAGE_VALIDATE,
+    operation::IMAGE_METADATA,
+    operation::IMAGE_RESIZE,
+    operation::IMAGE_CONVERT,
+    operation::IMAGE_ROTATE,
+    operation::IMAGE_CROP,
+    operation::IMAGE_FLIP,
+    operation::IMAGE_ADJUST,
+    operation::IMAGE_COLOR,
+    operation::IMAGE_LEVELS,
+    operation::IMAGE_PHOTOCOPY,
+    operation::IMAGE_REPLACE_COLOR,
+    operation::IMAGE_CMYK,
+    operation::IMAGE_THUMBNAIL,
+    operation::IMAGE_COMPRESS,
+    operation::IMAGE_WATERMARK,
+];
+
+/// `media.*` operations [`PipelineEngine::dispatch`] handles — the
+/// ffprobe byte→report inspections only.
+const MEDIA_OPERATIONS: &[&str] = &[
+    operation::MEDIA_PROBE,
+    operation::MEDIA_STREAMS,
+    operation::MEDIA_CHAPTERS,
 ];
 
 /// `(engine, operation)` pairs [`PipelineEngine::dispatch`] handles.
@@ -1179,6 +1842,9 @@ fn is_supported(engine: &str, operation_name: &str) -> bool {
             operation::VALIDATE | operation::VALIDATE_UPLOAD
         ),
         engine_name::PDF => PDF_OPERATIONS.contains(&operation_name),
+        engine_name::IMAGE => IMAGE_OPERATIONS.contains(&operation_name),
+        engine_name::CONVERT => operation_name == operation::CONVERT_CONVERT,
+        engine_name::MEDIA => MEDIA_OPERATIONS.contains(&operation_name),
         _ => false,
     }
 }
@@ -1287,6 +1953,17 @@ fn optional_u32(params: &Value, key: &str) -> Result<Option<u32>, StepError> {
 fn required_u32(params: &Value, key: &str) -> Result<u32, StepError> {
     optional_u32(params, key)?
         .ok_or_else(|| StepError::Params(format!("missing required integer parameter `{key}`")))
+}
+
+/// Optional boolean param; `None` when absent or JSON null.
+fn optional_bool(params: &Value, key: &str) -> Result<Option<bool>, StepError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| StepError::Params(format!("parameter `{key}` must be a boolean"))),
+    }
 }
 
 /// Optional array-of-strings param; `None` when absent or JSON null.
@@ -1744,6 +2421,50 @@ fn header_footer_spec(params: &Value) -> Result<pdf_ops::HeaderFooterSpec, StepE
     Ok(spec)
 }
 
+/// `set_page_size` params → [`pdf_ops::PageSizeSpec`]: `width`/`height`
+/// are required numbers interpreted in `unit` (default points);
+/// `scale_content` optionally wraps page content in a `cm` transform.
+fn page_size_spec(params: &Value) -> Result<pdf_ops::PageSizeSpec, StepError> {
+    let unit = match optional_str(params, "unit") {
+        Some(s) => parse_size_unit(s)?,
+        None => pdf_ops::SizeUnit::Pt,
+    };
+    Ok(pdf_ops::PageSizeSpec {
+        width: required_f64(params, "width")?,
+        height: required_f64(params, "height")?,
+        unit,
+        scale_content: optional_bool(params, "scale_content")?.unwrap_or(false),
+    })
+}
+
+/// `image.watermark` params → [`image_ops::WatermarkOptions`]. The
+/// op's options type has no serde defaults, so each field is merged
+/// over [`image_ops::WatermarkOptions::default`] individually; `mark`
+/// itself is read separately as base64.
+fn image_watermark_options(params: &Value) -> Result<image_ops::WatermarkOptions, StepError> {
+    let mut opts = image_ops::WatermarkOptions::default();
+    if let Some(s) = optional_str(params, "position") {
+        opts.position = serde_json::from_value(Value::String(s.to_string())).map_err(|_| {
+            StepError::Params(format!(
+                "unknown watermark position `{s}` (expected top_left|top_right|bottom_left|bottom_right|center|tile)"
+            ))
+        })?;
+    }
+    if let Some(v) = optional_f64(params, "opacity") {
+        opts.opacity = v as f32;
+    }
+    if let Some(v) = optional_f64(params, "scale") {
+        opts.scale = Some(v as f32);
+    }
+    if let Some(v) = optional_u32(params, "margin")? {
+        opts.margin = v;
+    }
+    if let Some(v) = optional_u32(params, "tile_spacing")? {
+        opts.tile_spacing = v;
+    }
+    Ok(opts)
+}
+
 /// `resize` params → [`pdf_ops::ResizeSpec`]: `scale` for uniform
 /// scaling, otherwise `width_pt` + `height_pt`.
 fn resize_spec(params: &Value) -> Result<pdf_ops::ResizeSpec, StepError> {
@@ -1806,6 +2527,29 @@ fn parse_timestamp_algorithm(s: &str) -> Result<pdf_ops::TimestampAlgorithm, Ste
         "sha512" | "SHA512" | "Sha512" => Ok(pdf_ops::TimestampAlgorithm::Sha512),
         other => Err(StepError::Params(format!(
             "unknown digest algorithm `{other}` (expected sha256|sha512)"
+        ))),
+    }
+}
+
+fn parse_orient_mode(s: &str) -> Result<pdf_ops::OrientMode, StepError> {
+    match s.to_ascii_lowercase().as_str() {
+        "portrait" => Ok(pdf_ops::OrientMode::Portrait),
+        "landscape" => Ok(pdf_ops::OrientMode::Landscape),
+        "as_is" | "asis" => Ok(pdf_ops::OrientMode::AsIs),
+        other => Err(StepError::Params(format!(
+            "unknown orientation mode `{other}` (expected portrait|landscape|as_is)"
+        ))),
+    }
+}
+
+fn parse_size_unit(s: &str) -> Result<pdf_ops::SizeUnit, StepError> {
+    match s.to_ascii_lowercase().as_str() {
+        "pt" | "point" | "points" => Ok(pdf_ops::SizeUnit::Pt),
+        "mm" | "millimeter" | "millimeters" => Ok(pdf_ops::SizeUnit::Mm),
+        "in" | "inch" | "inches" => Ok(pdf_ops::SizeUnit::In),
+        "px" | "pixel" | "pixels" => Ok(pdf_ops::SizeUnit::Px),
+        other => Err(StepError::Params(format!(
+            "unknown size unit `{other}` (expected pt|mm|in|px)"
         ))),
     }
 }
@@ -1899,6 +2643,78 @@ fn parse_dup_pos(params: &Value) -> Result<pdf_ops::DupPos, StepError> {
         "after" => Ok(pdf_ops::DupPos::After(required_u32(params, "page")?)),
         other => Err(StepError::Params(format!(
             "unknown duplicate position `{other}` (expected end|before|after|in_place)"
+        ))),
+    }
+}
+
+/// `bates` params → [`pdf_ops::BatesSpec`]. `BatesSpec` has no serde
+/// impl, so fields are read individually; absent keys keep the spec's
+/// defaults (`start` 1, `digits` 6, bottom-right, 10pt black).
+fn bates_spec(params: &Value) -> Result<pdf_ops::BatesSpec, StepError> {
+    let mut spec = pdf_ops::BatesSpec::default();
+    if let Some(s) = optional_str(params, "prefix") {
+        spec.prefix = s.to_string();
+    }
+    if let Some(v) = optional_u64(params, "start") {
+        spec.start = v;
+    }
+    if let Some(v) = optional_u32(params, "digits")? {
+        spec.digits = v;
+    }
+    if let Some(s) = optional_str(params, "pages") {
+        spec.pages = Some(s.to_string());
+    }
+    if let Some(s) = optional_str(params, "position") {
+        spec.position = parse_mark_position(s)?;
+    }
+    if let Some(v) = optional_f64(params, "font_size") {
+        spec.font_size = v as f32;
+    }
+    if let Some(c) = optional_u8_array(params, "color")? {
+        spec.color = c;
+    }
+    if let Some(v) = optional_f64(params, "opacity") {
+        spec.opacity = v as f32;
+    }
+    Ok(spec)
+}
+
+/// `clean_scan` `mode` param → [`pdf_ops::CleanMode`].
+fn parse_clean_mode(s: &str) -> Result<pdf_ops::CleanMode, StepError> {
+    match s.to_ascii_lowercase().as_str() {
+        "grayscale" | "gray" | "grey" => Ok(pdf_ops::CleanMode::Grayscale),
+        "threshold" | "binarize" | "binarize_otsu" => Ok(pdf_ops::CleanMode::Threshold),
+        "despeckle" | "median" => Ok(pdf_ops::CleanMode::Despeckle),
+        other => Err(StepError::Params(format!(
+            "unknown clean_scan mode `{other}` (expected grayscale|threshold|despeckle)"
+        ))),
+    }
+}
+
+/// `set_page_box`/`remove_page_box` `which` param → [`pdf_ops::PageBox`].
+fn parse_page_box(s: &str) -> Result<pdf_ops::PageBox, StepError> {
+    match s.to_ascii_lowercase().as_str() {
+        "mediabox" | "media_box" | "media" => Ok(pdf_ops::PageBox::MediaBox),
+        "cropbox" | "crop_box" | "crop" => Ok(pdf_ops::PageBox::CropBox),
+        "bleedbox" | "bleed_box" | "bleed" => Ok(pdf_ops::PageBox::BleedBox),
+        "trimbox" | "trim_box" | "trim" => Ok(pdf_ops::PageBox::TrimBox),
+        "artbox" | "art_box" | "art" => Ok(pdf_ops::PageBox::ArtBox),
+        other => Err(StepError::Params(format!(
+            "unknown page box `{other}` (expected media_box|crop_box|bleed_box|trim_box|art_box)"
+        ))),
+    }
+}
+
+/// `apply_trim_preset` `preset` param → [`pdf_ops::TrimPreset`].
+fn parse_trim_preset(s: &str) -> Result<pdf_ops::TrimPreset, StepError> {
+    match s.to_ascii_lowercase().as_str() {
+        "a4" => Ok(pdf_ops::TrimPreset::A4),
+        "a5" => Ok(pdf_ops::TrimPreset::A5),
+        "letter" => Ok(pdf_ops::TrimPreset::Letter),
+        "legal" => Ok(pdf_ops::TrimPreset::Legal),
+        "a3" => Ok(pdf_ops::TrimPreset::A3),
+        other => Err(StepError::Params(format!(
+            "unknown trim preset `{other}` (expected a4|a5|letter|legal|a3)"
         ))),
     }
 }

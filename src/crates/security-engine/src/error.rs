@@ -68,6 +68,16 @@ pub enum SecurityError {
         max: u32,
     },
 
+    /// A raster image exceeded the configured pixel-count limit —
+    /// the decompression-bomb guard.
+    #[error("image too large: {pixels} pixels exceeds limit of {max}")]
+    TooManyPixels {
+        /// Observed width × height pixel count.
+        pixels: u64,
+        /// Configured maximum.
+        max: u64,
+    },
+
     /// An operation would produce more outputs than allowed.
     #[error("too many outputs: {count} exceeds limit of {max}")]
     TooManyOutputs {

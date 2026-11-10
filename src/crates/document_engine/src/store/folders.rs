@@ -187,3 +187,264 @@ pub async fn delete_folder(pool: &SqlitePool, id: &FolderId) -> StoreResult<bool
         .await?;
     Ok(done.rows_affected() > 0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crates::document_engine::document::{DocumentOrigin, DocumentSource, DocumentType};
+    use crate::crates::document_engine::ids::DocumentId;
+    use crate::crates::document_engine::store::documents::{
+        NewDocument, create_document, get_document, move_document,
+    };
+    use crate::crates::document_engine::store::schema::init_document_store;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite pool");
+        init_document_store(&pool).await.expect("init store");
+        pool
+    }
+
+    async fn new_doc(pool: &SqlitePool, name: &str) -> DocumentId {
+        create_document(
+            pool,
+            &NewDocument {
+                name: name.to_string(),
+                document_type: DocumentType::Pdf,
+                owner_id: "user-1".to_string(),
+                source: DocumentSource::new(DocumentOrigin::Upload),
+            },
+        )
+        .await
+        .expect("create document")
+        .id
+    }
+
+    #[tokio::test]
+    async fn create_root_and_nested_folders() {
+        let pool = test_pool().await;
+
+        let root = create_folder(&pool, "  Projects  ", None, "user-1")
+            .await
+            .expect("create root");
+        // Name is trimmed before storage.
+        assert_eq!(root.name, "Projects");
+        assert_eq!(root.parent_id, None);
+        assert_eq!(root.owner_id, "user-1");
+        assert!(root.id.as_str().starts_with("fld-"));
+        assert_eq!(root.created_at, root.updated_at);
+
+        let child = create_folder(&pool, "2024-Q1", Some(&root.id), "user-1")
+            .await
+            .expect("create child");
+        assert_eq!(child.parent_id, Some(root.id.clone()));
+
+        let fetched = get_folder(&pool, &child.id)
+            .await
+            .expect("get")
+            .expect("child exists");
+        assert_eq!(fetched.name, "2024-Q1");
+        assert_eq!(fetched.parent_id, Some(root.id.clone()));
+
+        assert!(
+            get_folder(&pool, &FolderId::new("fld-missing"))
+                .await
+                .expect("get")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn create_folder_validates_name_and_parent() {
+        let pool = test_pool().await;
+
+        for bad in ["", "   "] {
+            let err = create_folder(&pool, bad, None, "user-1")
+                .await
+                .expect_err("empty name must fail");
+            assert!(matches!(err, StoreError::Validation { .. }));
+        }
+
+        let err = create_folder(
+            &pool,
+            "Orphan",
+            Some(&FolderId::new("fld-missing")),
+            "user-1",
+        )
+        .await
+        .expect_err("missing parent must fail");
+        assert!(matches!(err, StoreError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn list_folders_filters_by_owner_and_parent() {
+        let pool = test_pool().await;
+
+        let a = create_folder(&pool, "Alpha", None, "user-1")
+            .await
+            .expect("a");
+        let b = create_folder(&pool, "Beta", None, "user-2")
+            .await
+            .expect("b");
+        let a_child = create_folder(&pool, "A-Child", Some(&a.id), "user-1")
+            .await
+            .expect("a child");
+        let b_child = create_folder(&pool, "B-Child", Some(&b.id), "user-2")
+            .await
+            .expect("b child");
+
+        // parent_id = None lists only roots, ordered by name.
+        let roots = list_folders(&pool, None, None).await.expect("roots");
+        let root_names: Vec<&str> = roots.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(root_names, ["Alpha", "Beta"]);
+
+        // Owner filter applies on top of the parent filter.
+        let user1_roots = list_folders(&pool, Some("user-1"), None)
+            .await
+            .expect("user1 roots");
+        assert_eq!(user1_roots.len(), 1);
+        assert_eq!(user1_roots[0].id, a.id);
+
+        // Direct children of a specific folder.
+        let a_children = list_folders(&pool, None, Some(&a.id))
+            .await
+            .expect("a children");
+        assert_eq!(a_children.len(), 1);
+        assert_eq!(a_children[0].id, a_child.id);
+
+        let b_children = list_folders(&pool, None, Some(&b.id))
+            .await
+            .expect("b children");
+        assert_eq!(b_children[0].id, b_child.id);
+
+        // A leaf folder has no children.
+        assert!(
+            list_folders(&pool, None, Some(&a_child.id))
+                .await
+                .expect("leaf")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_folder_updates_name() {
+        let pool = test_pool().await;
+        let folder = create_folder(&pool, "Old", None, "user-1")
+            .await
+            .expect("create");
+
+        let renamed = rename_folder(&pool, &folder.id, "  New Name  ")
+            .await
+            .expect("rename");
+        assert_eq!(renamed.name, "New Name");
+        assert!(renamed.updated_at >= folder.updated_at);
+
+        let err = rename_folder(&pool, &folder.id, "   ")
+            .await
+            .expect_err("blank name must fail");
+        assert!(matches!(err, StoreError::Validation { .. }));
+
+        let err = rename_folder(&pool, &FolderId::new("fld-missing"), "X")
+            .await
+            .expect_err("missing folder must fail");
+        assert!(matches!(err, StoreError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn move_folder_reparents_and_rejects_cycles() {
+        let pool = test_pool().await;
+        let a = create_folder(&pool, "A", None, "user-1").await.expect("a");
+        let b = create_folder(&pool, "B", Some(&a.id), "user-1")
+            .await
+            .expect("b");
+        let c = create_folder(&pool, "C", Some(&b.id), "user-1")
+            .await
+            .expect("c");
+        let other = create_folder(&pool, "Other", None, "user-1")
+            .await
+            .expect("other");
+
+        // Move C to the root.
+        let moved = move_folder(&pool, &c.id, None).await.expect("move to root");
+        assert_eq!(moved.parent_id, None);
+
+        // Move C under `other`.
+        let moved = move_folder(&pool, &c.id, Some(&other.id))
+            .await
+            .expect("move under other");
+        assert_eq!(moved.parent_id, Some(other.id.clone()));
+
+        // A folder cannot be its own parent.
+        let err = move_folder(&pool, &a.id, Some(&a.id))
+            .await
+            .expect_err("self-parent must fail");
+        assert!(matches!(err, StoreError::Validation { .. }));
+
+        // Cannot move A into its own descendant B (chain A -> B -> ...).
+        let err = move_folder(&pool, &a.id, Some(&b.id))
+            .await
+            .expect_err("descendant parent must fail");
+        assert!(matches!(err, StoreError::Validation { .. }));
+
+        // Rebuild the chain A -> B -> C, then a deeper cycle attempt:
+        // moving A under C must fail because C sits inside A's subtree.
+        move_folder(&pool, &c.id, Some(&b.id))
+            .await
+            .expect("re-nest C under B");
+        let err = move_folder(&pool, &a.id, Some(&c.id))
+            .await
+            .expect_err("moving A under grandchild C must fail");
+        assert!(matches!(err, StoreError::Validation { .. }));
+
+        // Missing parent and missing folder.
+        let err = move_folder(&pool, &a.id, Some(&FolderId::new("fld-missing")))
+            .await
+            .expect_err("missing parent must fail");
+        assert!(matches!(err, StoreError::NotFound { .. }));
+        let err = move_folder(&pool, &FolderId::new("fld-missing"), None)
+            .await
+            .expect_err("missing folder must fail");
+        assert!(matches!(err, StoreError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_folder_cascades_subtree_and_unsets_documents() {
+        let pool = test_pool().await;
+        let root = create_folder(&pool, "Root", None, "user-1")
+            .await
+            .expect("root");
+        let child = create_folder(&pool, "Child", Some(&root.id), "user-1")
+            .await
+            .expect("child");
+        let grandchild = create_folder(&pool, "Grandchild", Some(&child.id), "user-1")
+            .await
+            .expect("grandchild");
+
+        // A document inside the subtree is kept but moved to the root.
+        let doc_id = new_doc(&pool, "in-folder.pdf").await;
+        move_document(&pool, &doc_id, Some(&grandchild.id))
+            .await
+            .expect("move doc");
+
+        assert!(delete_folder(&pool, &root.id).await.expect("delete root"));
+
+        for id in [&root.id, &child.id, &grandchild.id] {
+            assert!(
+                get_folder(&pool, id).await.expect("get").is_none(),
+                "folder {id} should be cascade-deleted"
+            );
+        }
+        let doc = get_document(&pool, &doc_id)
+            .await
+            .expect("get doc")
+            .expect("doc kept");
+        assert_eq!(doc.folder_id, None);
+
+        // Deleting an already-removed folder reports false.
+        assert!(!delete_folder(&pool, &root.id).await.expect("delete again"));
+    }
+}

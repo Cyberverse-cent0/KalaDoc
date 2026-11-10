@@ -90,6 +90,38 @@ pub fn reorder(input: &[u8], order: &str, limits: &EngineLimits) -> PdfResult<Ve
     save_pdf(&mut doc)
 }
 
+/// Swap two pages in `input`, leaving every other page in place.
+///
+/// `a` and `b` are 1-based page numbers; both must be in range. `a == b`
+/// is accepted and returns an equivalent document. Implemented as a
+/// full permutation through [`reorder`], so it inherits the same
+/// flat-page-tree limitation.
+pub fn swap_pages(input: &[u8], a: u32, b: u32, limits: &EngineLimits) -> PdfResult<Vec<u8>> {
+    let mut doc = load_pdf(input, limits)?;
+    let page_count = doc.get_pages().len() as u32;
+    if a == 0 || a > page_count {
+        return Err(PdfError::InvalidPageRange(format!(
+            "page {a} is out of range; document has {page_count} page(s)"
+        )));
+    }
+    if b == 0 || b > page_count {
+        return Err(PdfError::InvalidPageRange(format!(
+            "page {b} is out of range; document has {page_count} page(s)"
+        )));
+    }
+    if a == b {
+        return save_pdf(&mut doc);
+    }
+    let mut order: Vec<u32> = (1..=page_count).collect();
+    order.swap((a - 1) as usize, (b - 1) as usize);
+    let spec = order
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    reorder(input, &spec, limits)
+}
+
 /// Parse `order` into the requested sequence of 1-based page numbers.
 ///
 /// Strict grammar: digits and commas only — no ranges, no `all`, no

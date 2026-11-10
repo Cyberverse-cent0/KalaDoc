@@ -1,5 +1,8 @@
 //! Error types for the pipeline engine.
 
+use crate::crates::conversion_engine::ConvertError;
+use crate::crates::image_engine::ImageError;
+use crate::crates::multimedia_engine::MediaError;
 use crate::crates::pdf_engine::PdfError;
 use crate::crates::security_engine::SecurityError;
 
@@ -92,6 +95,18 @@ pub enum StepError {
     /// The security engine rejected the input.
     #[error("{0}")]
     Security(#[from] SecurityError),
+
+    /// The image engine rejected or failed the operation.
+    #[error("{0}")]
+    Image(#[from] ImageError),
+
+    /// The conversion engine rejected or failed the conversion.
+    #[error("{0}")]
+    Convert(#[from] ConvertError),
+
+    /// The multimedia engine rejected or failed the probe.
+    #[error("{0}")]
+    Media(#[from] MediaError),
 
     /// A step parameter was missing, had the wrong type, or failed
     /// operation-specific validation (e.g. bad page range is reported

@@ -313,7 +313,6 @@ pub fn extract_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
     use std::time::Duration;
 
     fn limits() -> MediaLimits {

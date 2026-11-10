@@ -23,6 +23,20 @@ pub enum Format {
     Pptx,
     Ppt,
     Epub,
+    /// RFC 5322 email message (`.eml`). Input-only: converted to PDF
+    /// by rendering headers + extracted text body.
+    Eml,
+    /// URL *source* rather than a document format: `input` carries
+    /// the target URL as a UTF-8 string. Only `url` → `pdf` is
+    /// meaningful — the engine fetches the page and delegates to the
+    /// `html` → `pdf` path.
+    Url,
+    /// Comic Book ZIP archive (CBZ) — a ZIP container of page images.
+    Cbz,
+    /// Comic Book RAR archive (CBR). Recognized so callers get an
+    /// explicit "unsupported" error rather than "unknown format";
+    /// no in-crate RAR decoder exists.
+    Cbr,
 }
 
 impl Format {
@@ -42,6 +56,10 @@ impl Format {
             Self::Pptx => "pptx",
             Self::Ppt => "ppt",
             Self::Epub => "epub",
+            Self::Eml => "eml",
+            Self::Url => "url",
+            Self::Cbz => "cbz",
+            Self::Cbr => "cbr",
         }
     }
 
@@ -63,8 +81,87 @@ impl Format {
             "pptx" => Some(Self::Pptx),
             "ppt" => Some(Self::Ppt),
             "epub" => Some(Self::Epub),
+            "eml" | "email" | "rfc822" | "message/rfc822" => Some(Self::Eml),
+            "url" | "uri" => Some(Self::Url),
+            "cbz" | "comicbook" | "comicbook+zip" | "application/vnd.comicbook+zip" => {
+                Some(Self::Cbz)
+            }
+            "cbr" | "comicbook-rar" | "application/x-cbr" => Some(Self::Cbr),
             _ => None,
         }
+    }
+
+    /// Every [`Format`] variant. Backends and the engine iterate this
+    /// for exhaustive capability/health scans so a new variant cannot
+    /// be silently missed.
+    pub const ALL: [Self; 17] = [
+        Self::Pdf,
+        Self::Txt,
+        Self::Markdown,
+        Self::Html,
+        Self::Png,
+        Self::Jpeg,
+        Self::Docx,
+        Self::Odt,
+        Self::Xlsx,
+        Self::Xls,
+        Self::Pptx,
+        Self::Ppt,
+        Self::Epub,
+        Self::Eml,
+        Self::Url,
+        Self::Cbz,
+        Self::Cbr,
+    ];
+
+    /// Canonical file extension for this format (no dot), or `None`
+    /// for pseudo-formats that are not files ([`Format::Url`]).
+    pub fn extension(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Pdf => "pdf",
+            Self::Txt => "txt",
+            Self::Markdown => "md",
+            Self::Html => "html",
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Docx => "docx",
+            Self::Odt => "odt",
+            Self::Xlsx => "xlsx",
+            Self::Xls => "xls",
+            Self::Pptx => "pptx",
+            Self::Ppt => "ppt",
+            Self::Epub => "epub",
+            Self::Eml => "eml",
+            Self::Cbz => "cbz",
+            Self::Cbr => "cbr",
+            Self::Url => return None,
+        })
+    }
+
+    /// IANA media type for this format, or `None` for pseudo-formats
+    /// that are not files ([`Format::Url`]).
+    pub fn mime_type(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Pdf => "application/pdf",
+            Self::Txt => "text/plain",
+            Self::Markdown => "text/markdown",
+            Self::Html => "text/html",
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Docx => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            Self::Odt => "application/vnd.oasis.opendocument.text",
+            Self::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            Self::Xls => "application/vnd.ms-excel",
+            Self::Pptx => {
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            }
+            Self::Ppt => "application/vnd.ms-powerpoint",
+            Self::Epub => "application/epub+zip",
+            Self::Eml => "message/rfc822",
+            Self::Cbz => "application/vnd.comicbook+zip",
+            Self::Cbr => "application/x-cbr",
+            Self::Url => return None,
+        })
     }
 
     /// Whether this is a raster image format.

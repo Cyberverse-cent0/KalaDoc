@@ -29,7 +29,10 @@ use crate::crates::pdf_engine::error::{PdfError, PdfResult};
 
 use super::extract::extract_pages;
 use super::load::{check_page_limit, load_pdf, reject_encrypted, save_pdf};
+use super::remove_blank_pages::is_blank_page;
 use super::split::split;
+use super::split_bookmarks::split_at_outline;
+use super::text::extract_text;
 
 /// How a single input document is divided into output files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,11 +56,36 @@ pub enum SplitMode<'a> {
         /// Stride between pages assigned to the same output file.
         n: u32,
     },
-    /// Split at outline/bookmark boundaries at the given outline
-    /// depth. Currently unsupported — see module docs.
+    /// Split at outline/bookmark boundaries. `level` is 1-based:
+    /// `1` splits at top-level bookmarks, `2` at their children, and
+    /// so on (mapped onto [`split_at_outline`]'s 0-based levels).
     AtBookmarks {
         /// Outline depth (1 = top-level bookmarks).
         level: u32,
+    },
+    /// Greedy split by serialized size: pages accumulate into a chunk
+    /// until adding the next page would exceed `max_bytes`. A single
+    /// page larger than `max_bytes` fails with
+    /// [`PdfError::LimitExceeded`]. Sizes are measured on the actual
+    /// serialized chunk, so shared resources may make later chunks
+    /// smaller than the sum of their pages suggests.
+    ByFileSize {
+        /// Maximum serialized bytes per output file; must be > 0.
+        max_bytes: u64,
+    },
+    /// Split *at* provably blank pages: each blank page terminates the
+    /// current chunk and is kept as its last page. Leading blank pages
+    /// fold into the first chunk. Blank detection is the conservative
+    /// structural check from [`super::remove_blank_pages`] — pages that
+    /// merely *look* empty are not separators.
+    AtBlankPages,
+    /// Split *before* each page whose extracted text contains `query`
+    /// (literal, case-sensitive substring). Pages before the first
+    /// match fold into the first chunk. Text extraction is best-effort:
+    /// scanned pages or fonts without ToUnicode maps yield no match.
+    OnTextMatch {
+        /// Literal substring to match against each page's text.
+        query: &'a str,
     },
 }
 
@@ -78,10 +106,177 @@ pub fn split_mode(
         SplitMode::ByCount { pages_per_file } => split(input, pages_per_file, limits),
         SplitMode::ByRange { spec } => split_by_range(input, spec, limits),
         SplitMode::EveryNth { n } => split_every_nth(input, n, limits),
-        SplitMode::AtBookmarks { level } => Err(PdfError::UnsupportedOperation(format!(
-            "split at outline level {level} is not available in this build"
-        ))),
+        SplitMode::AtBookmarks { level } => {
+            // `level` is 1-based here; `split_at_outline` is 0-based.
+            split_at_outline(input, level.saturating_sub(1), limits)
+        }
+        SplitMode::ByFileSize { max_bytes } => split_by_size(input, max_bytes, limits),
+        SplitMode::AtBlankPages => split_at_blank_pages(input, limits),
+        SplitMode::OnTextMatch { query } => split_on_text_match(input, query, limits),
     }
+}
+
+/// Serialize `doc` restricted to the 1-based `pages` selection.
+fn chunk_pdf(doc: &lopdf::Document, pages: &[u32], limits: &EngineLimits) -> PdfResult<Vec<u8>> {
+    let page_count = doc.get_pages().len() as u32;
+    let keep: std::collections::BTreeSet<u32> = pages.iter().copied().collect();
+    let delete: Vec<u32> = (1..=page_count).filter(|p| !keep.contains(p)).collect();
+    let mut chunk = doc.clone();
+    chunk.delete_pages(&delete);
+    save_pdf(&mut chunk)
+}
+
+/// Enforce `max_outputs` then serialize each page-number chunk.
+fn chunks_to_pdfs(
+    doc: &lopdf::Document,
+    chunks: Vec<Vec<u32>>,
+    limits: &EngineLimits,
+) -> PdfResult<Vec<Vec<u8>>> {
+    if let Some(max) = limits.max_outputs
+        && chunks.len() > max as usize
+    {
+        return Err(PdfError::LimitExceeded(format!(
+            "split would produce {} files, exceeding max_outputs {max}",
+            chunks.len()
+        )));
+    }
+    chunks
+        .iter()
+        .map(|pages| chunk_pdf(doc, pages, limits))
+        .collect()
+}
+
+/// Greedy serialized-size split.
+fn split_by_size(input: &[u8], max_bytes: u64, limits: &EngineLimits) -> PdfResult<Vec<Vec<u8>>> {
+    if max_bytes == 0 {
+        return Err(PdfError::InvalidInput(
+            "max_bytes must be greater than 0".to_string(),
+        ));
+    }
+    let doc = load_pdf(input, limits)?;
+    reject_encrypted(&doc)?;
+    let page_count = doc.get_pages().len() as u32;
+    if page_count == 0 {
+        return Err(PdfError::InvalidInput(
+            "document has no pages to split".to_string(),
+        ));
+    }
+
+    let mut outputs = Vec::new();
+    let mut chunk_start = 1u32;
+    let mut chunk_end = 0u32; // last page confirmed to fit
+    for page in 1..=page_count {
+        let candidate: Vec<u32> = (chunk_start..=page).collect();
+        let size = chunk_pdf(&doc, &candidate, limits)?.len() as u64;
+        if size <= max_bytes {
+            chunk_end = page;
+            continue;
+        }
+        if chunk_end == 0 || chunk_end < chunk_start {
+            // Even a single page exceeds the budget.
+            return Err(PdfError::LimitExceeded(format!(
+                "page {page} alone serializes to {size} bytes, exceeding max_bytes {max_bytes}"
+            )));
+        }
+        outputs.push(chunk_pdf(
+            &doc,
+            &(chunk_start..=chunk_end).collect::<Vec<_>>(),
+            limits,
+        )?);
+        chunk_start = page;
+        chunk_end = 0;
+        // Re-test the single page at the new chunk start.
+        let size = chunk_pdf(&doc, &[page], limits)?.len() as u64;
+        if size > max_bytes {
+            return Err(PdfError::LimitExceeded(format!(
+                "page {page} alone serializes to {size} bytes, exceeding max_bytes {max_bytes}"
+            )));
+        }
+        chunk_end = page;
+    }
+    if chunk_end >= chunk_start {
+        outputs.push(chunk_pdf(
+            &doc,
+            &(chunk_start..=chunk_end).collect::<Vec<_>>(),
+            limits,
+        )?);
+    }
+    if let Some(max) = limits.max_outputs
+        && outputs.len() > max as usize
+    {
+        return Err(PdfError::LimitExceeded(format!(
+            "size-based split produced {} files, exceeding max_outputs {max}",
+            outputs.len()
+        )));
+    }
+    Ok(outputs)
+}
+
+/// Split after every provably blank page.
+fn split_at_blank_pages(input: &[u8], limits: &EngineLimits) -> PdfResult<Vec<Vec<u8>>> {
+    let doc = load_pdf(input, limits)?;
+    reject_encrypted(&doc)?;
+    let pages_map = doc.get_pages();
+    let page_count = pages_map.len() as u32;
+    if page_count == 0 {
+        return Err(PdfError::InvalidInput(
+            "document has no pages to split".to_string(),
+        ));
+    }
+
+    let mut chunks: Vec<Vec<u32>> = Vec::new();
+    let mut current: Vec<u32> = Vec::new();
+    for (num, page_id) in &pages_map {
+        current.push(*num);
+        if is_blank_page(&doc, *page_id) {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() {
+        chunks.push((1..=page_count).collect());
+    }
+    chunks_to_pdfs(&doc, chunks, limits)
+}
+
+/// Split before each page whose text contains `query`.
+fn split_on_text_match(
+    input: &[u8],
+    query: &str,
+    limits: &EngineLimits,
+) -> PdfResult<Vec<Vec<u8>>> {
+    if query.is_empty() {
+        return Err(PdfError::InvalidInput(
+            "text-match split requires a non-empty query".to_string(),
+        ));
+    }
+    let doc = load_pdf(input, limits)?;
+    reject_encrypted(&doc)?;
+    let page_count = doc.get_pages().len() as u32;
+    if page_count == 0 {
+        return Err(PdfError::InvalidInput(
+            "document has no pages to split".to_string(),
+        ));
+    }
+
+    let texts = extract_text(input, None, limits)?;
+    let mut chunks: Vec<Vec<u32>> = Vec::new();
+    let mut current: Vec<u32> = Vec::new();
+    for pt in texts {
+        if pt.text.contains(query) && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push(pt.page);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() {
+        chunks.push((1..=page_count).collect());
+    }
+    chunks_to_pdfs(&doc, chunks, limits)
 }
 
 /// One output per comma-separated item of `spec`.

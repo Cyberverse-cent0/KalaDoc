@@ -159,10 +159,18 @@ fn otsu_threshold(gray: &[u8]) -> u8 {
         sum_all += i as u64 * h;
     }
 
+    // The between-class variance is constant across the whole plateau of
+    // thresholds that produce the same partition (empty histogram bins do
+    // not change the classes). Track the first and last optimal bin so the
+    // reported threshold is the plateau midpoint — a canonical value that
+    // still lies strictly between the separated modes whenever a gap
+    // exists, instead of an arbitrary plateau edge that may coincide with
+    // a mode.
     let mut w0 = 0u64;
     let mut sum0 = 0u64;
-    let mut best_t = 128u8;
     let mut best_var = 0f64;
+    let mut first_t = 128usize;
+    let mut last_t = 128usize;
     for (t, &h) in hist.iter().enumerate() {
         w0 += h;
         sum0 += t as u64 * h;
@@ -175,10 +183,13 @@ fn otsu_threshold(gray: &[u8]) -> u8 {
         let var = (w0 as f64) * (w1 as f64) * (mu0 - mu1) * (mu0 - mu1);
         if var > best_var {
             best_var = var;
-            best_t = t as u8;
+            first_t = t;
+            last_t = t;
+        } else if var == best_var && best_var > 0.0 {
+            last_t = t;
         }
     }
-    best_t
+    ((first_t + last_t) / 2) as u8
 }
 
 /// Binarize `gray` with Otsu's threshold: pixels strictly above the

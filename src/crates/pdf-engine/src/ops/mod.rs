@@ -18,16 +18,21 @@
 
 mod annotations;
 mod article_threads;
+mod attachments;
 mod auto_orient;
+mod bates;
 mod booklet;
 mod cert_info;
 mod clean_scan;
 mod compare;
 mod compress;
+mod content_audit;
 mod convert;
 mod crop;
 mod crop_view;
 mod decrypt;
+mod dedup_images;
+mod deskew;
 mod doc_time;
 mod draw_shapes;
 mod draw_text;
@@ -38,8 +43,10 @@ mod encrypt;
 mod extract;
 mod extract_images;
 mod extract_metadata;
+mod extract_tables;
 mod fill_form;
 mod flatten;
+mod font_audit;
 mod form_fields;
 mod freehand;
 mod garbage_collect;
@@ -51,18 +58,24 @@ mod inspect_fonts;
 mod inspect_javascript;
 mod interleave;
 mod invert_colors;
+mod layers;
 mod linearize;
+mod links;
 mod load;
 mod merge;
 mod merge_modes;
 mod named_destinations;
 mod nup;
+mod object_report;
 mod ocr;
 mod optional_content;
 mod outline;
+mod outline_from_headings;
 mod overlay;
 mod package_files;
+mod page_boxes;
 mod page_count;
+mod page_import;
 mod page_labels;
 mod page_size;
 mod page_transitions;
@@ -70,6 +83,7 @@ mod pages;
 mod pdfa;
 mod pdfua;
 mod pdfx;
+mod permissions_report;
 mod portfolio;
 mod poster;
 mod print_marks;
@@ -78,6 +92,7 @@ mod redact;
 mod redact_pages;
 mod redact_regions;
 mod remove_blank_pages;
+mod remove_hidden_text;
 mod remove_images;
 mod remove_objects;
 mod remove_pages;
@@ -100,10 +115,13 @@ mod split;
 mod split_bookmarks;
 mod split_modes;
 mod stamp;
+mod stream_recompress;
 mod structure_tree;
 mod text;
 mod text_markup;
+mod text_spans;
 mod timestamp;
+mod trim_boxes;
 mod unlock_fields;
 mod validate;
 mod verify_signature;
@@ -153,11 +171,12 @@ pub use linearize::{LinearizeReport, linearize};
 pub use merge::merge;
 pub use merge_modes::{MergeMode, merge_mode};
 pub use nup::nup;
-pub use ocr::{ocr, ocr_languages};
+pub use ocr::{OcrLine, OcrOptions, OcrPageDetail, OcrWord, ocr, ocr_detailed, ocr_languages};
 pub use outline::{OutlineEntry, OutlineItemSpec, list_outline, remove_outline, set_outline};
 pub use overlay::overlay;
 pub use package_files::{PackageLayout, package_documents};
 pub use page_count::page_count;
+pub use page_import::{ImportPos, import_pages, replace_pages};
 pub use page_labels::{clear_page_labels, get_page_labels, set_page_labels};
 pub use page_size::{PageSizeInfo, PageSizeSpec, SizeUnit, get_page_sizes, set_page_size};
 pub use page_transitions::{
@@ -171,7 +190,7 @@ pub use pdfx::{PdfxLevel, PdfxReport, to_pdfx};
 pub use portfolio::{PortfolioEntry, create_portfolio, list_portfolio};
 pub use poster::poster;
 pub use print_marks::{DEFAULT_PRINT_MARK_OFFSET, PrintMarksSpec, add_print_marks};
-pub use raster::{PageImage, PageImageReport};
+pub use raster::{PageImage, PageImageReport, RasterFormat, RasterOptions, RenderedPage};
 pub use redact::redact;
 pub use remove_blank_pages::{BlankReport, remove_blank_pages};
 pub use remove_images::{RemoveReport, remove_images};
@@ -179,8 +198,8 @@ pub use remove_objects::{
     RemoveObjectsReport, remove_embedded_files, remove_javascript_names, remove_named_objects,
 };
 pub use remove_pages::remove_pages;
-pub use render::{RenderFormat, render};
-pub use reorder::reorder;
+pub use render::{RenderFormat, RenderPageOptions, RenderRegion, render, render_pages};
+pub use reorder::{reorder, swap_pages};
 pub use repair::{RepairReport, repair};
 pub use replace_image::{ImageInputFormat, replace_image};
 pub use resize::{ResizeSpec, resize};
@@ -201,6 +220,7 @@ pub use stamp::{StampOptions, stamp};
 pub use structure_tree::{StructElementInfo, StructReport, inspect_structure};
 pub use text::{PageText, extract_text};
 pub use text_markup::{MarkupKind, text_markup};
+pub use text_spans::{TextMatch, TextSpan, extract_spans, search_text};
 pub use timestamp::{
     DigestReport, DocumentTimestamp, TimestampAlgorithm, TimestampToken, build_timestamp_request,
     document_digest, request_external_timestamp, timestamp_document, timestamp_query,
@@ -219,9 +239,38 @@ pub use named_destinations::{
     FitMode, NamedDest, NamedDestInfo, add_named_destinations, list_named_destinations,
     remove_named_destination,
 };
+pub use object_report::{ObjectReport, ObjectStats, StreamInfo, object_report};
 pub use optional_content::{LayerInfo, list_layers, remove_oc_properties, set_layer_visibility};
 pub use redact_pages::{RedactReplacement, redact_pages};
 pub use redact_regions::{RedactReport, Redaction, redact_regions};
+
+pub use bates::{BatesSpec, add_bates};
+pub use deskew::{DeskewPageReport, DeskewReport, deskew};
+pub use layers::{OcUsage, list_oc_marked_content};
+pub use page_boxes::{PageBox, PageBoxInfo, get_page_boxes, remove_page_box, set_page_box};
+pub use trim_boxes::{
+    BoxPreset, DEFAULT_BLEED_PT, DEFAULT_MARKS_OFFSET_PT, MAX_BLEED_PT,
+    PageBoxInfo as TrimPageBoxInfo, TrimPreset, apply_trim_preset, get_trim_boxes,
+    get_trim_boxes_for_pages,
+};
+
+pub use stream_recompress::{RecompressReport, recompress_streams};
+
+pub use attachments::{
+    AttachmentSpec, EmbeddedFileInfo, add_attachment, extract_attachment, list_attachments,
+    remove_attachment,
+};
+pub use content_audit::{ContentAudit, ContentRisk, RiskKind, audit_content};
+pub use dedup_images::{DedupReport, dedup_images};
+pub use font_audit::{BASE14, FontAudit, FontRisk, audit_fonts};
+pub use links::{LinkInfo, LinkSpec, LinkTarget, add_links, list_links, remove_links};
+pub use outline_from_headings::{HeadingSpec, OutlineBuildReport, build_outline_from_text};
+pub use permissions_report::{
+    EncryptionDetails, PermissionsReport, ReportedPermissions, permissions_report,
+};
+pub use remove_hidden_text::{HiddenTextReport, remove_hidden_text};
+
+pub use extract_tables::{KvPair, Table, TableReport, extract_key_values, extract_tables};
 
 #[cfg(test)]
 pub(crate) mod test_utils {

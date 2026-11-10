@@ -14,6 +14,7 @@ use crate::crates::core::engine::{
 };
 
 use super::backend::{BackendAvailability, ConversionBackend};
+use super::backends::epub::EpubBackend;
 use super::backends::external;
 use super::backends::rust::RustBackend;
 use super::error::{ConvertError, ConvertResult};
@@ -28,22 +29,7 @@ pub const MAX_INPUT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_INPUT_BYTES_LABEL: &str = "256 MiB";
 
 /// All [`Format`] variants, for exhaustive capability/health scans.
-/// Kept local because `Format` lives in `model.rs` (owned elsewhere).
-const ALL_FORMATS: [Format; 13] = [
-    Format::Pdf,
-    Format::Txt,
-    Format::Markdown,
-    Format::Html,
-    Format::Png,
-    Format::Jpeg,
-    Format::Docx,
-    Format::Odt,
-    Format::Xlsx,
-    Format::Xls,
-    Format::Pptx,
-    Format::Ppt,
-    Format::Epub,
-];
+const ALL_FORMATS: [Format; 17] = Format::ALL;
 
 /// Format-conversion engine.
 ///
@@ -66,6 +52,10 @@ impl ConversionEngine {
     /// (preferred for fidelity), then the Rust fallback.
     pub fn new() -> Self {
         let mut backends = external::detect();
+        // Pure-Rust EPUB→PDF sits between external tools (pandoc can
+        // do epub→pdf only when a PDF engine like LaTeX is installed)
+        // and the generic Rust fallback.
+        backends.push(Arc::new(EpubBackend::new()));
         backends.push(Arc::new(RustBackend::new()));
         Self { backends }
     }
@@ -105,6 +95,13 @@ impl ConversionEngine {
                 limit: MAX_INPUT_BYTES_LABEL.to_string(),
                 actual,
             });
+        }
+
+        // `url` input is not document bytes — it is the target URL as
+        // a UTF-8 string. Handle it before backend dispatch: fetch the
+        // page, then run the normal `html` → `pdf` path.
+        if req.input_format == Format::Url {
+            return self.convert_url(req);
         }
 
         // Partition supporting backends by availability, preserving
@@ -162,6 +159,60 @@ impl ConversionEngine {
         )
     }
 
+    /// `url` → `pdf`: fetch the URL (http/https only, bounded) and
+    /// delegate to the regular `html` → `pdf` dispatch so whatever
+    /// backend handles HTML input produces the PDF.
+    ///
+    /// The fetch is skipped entirely when no *available* backend can
+    /// perform `html` → `pdf` — the request fails fast with
+    /// [`ConvertError::UnsupportedConversion`] instead of pulling a
+    /// page that cannot be converted anyway.
+    fn convert_url(&self, req: &ConvertRequest) -> ConvertResult<ConvertOutput> {
+        if req.output_format != Format::Pdf {
+            return Err(ConvertError::UnsupportedConversion {
+                from: Format::Url,
+                to: req.output_format,
+            });
+        }
+
+        let html_to_pdf_available = self.backends.iter().any(|backend| {
+            matches!(
+                backend.availability(),
+                BackendAvailability::Available { .. }
+            ) && backend.supports(Format::Html, Format::Pdf)
+        });
+        if !html_to_pdf_available {
+            return Err(ConvertError::UnsupportedConversion {
+                from: Format::Url,
+                to: Format::Pdf,
+            });
+        }
+
+        let url = std::str::from_utf8(&req.input).map_err(|_| ConvertError::InvalidInput {
+            reason: "url input is not valid UTF-8".to_string(),
+        })?;
+        let html = super::url::fetch_url(url)?;
+
+        let inner = ConvertRequest {
+            input_format: Format::Html,
+            output_format: Format::Pdf,
+            input: html,
+            options: req.options.clone(),
+        };
+        match self.convert(&inner) {
+            // If dispatch still cannot cover html → pdf (e.g. backend
+            // availability changed between the pre-check and now),
+            // report it against the caller's actual request.
+            Err(ConvertError::UnsupportedConversion { .. }) => {
+                Err(ConvertError::UnsupportedConversion {
+                    from: Format::Url,
+                    to: Format::Pdf,
+                })
+            }
+            other => other,
+        }
+    }
+
     /// Post-conversion sanity checks on a backend's output.
     fn validate_output(
         req: &ConvertRequest,
@@ -206,6 +257,10 @@ impl ProcessingEngine for ConversionEngine {
         // would be dishonest.
         let mut inputs = BTreeSet::new();
         let mut outputs = BTreeSet::new();
+        // `url` → `pdf` is engine-level (fetch + html→pdf delegation),
+        // not a backend pair — advertise it only when an available
+        // backend can actually turn the fetched HTML into a PDF.
+        let mut html_to_pdf = false;
         for backend in &self.backends {
             if !matches!(
                 backend.availability(),
@@ -218,9 +273,15 @@ impl ProcessingEngine for ConversionEngine {
                     if backend.supports(from, to) {
                         inputs.insert(from.as_str().to_string());
                         outputs.insert(to.as_str().to_string());
+                        if from == Format::Html && to == Format::Pdf {
+                            html_to_pdf = true;
+                        }
                     }
                 }
             }
+        }
+        if html_to_pdf {
+            inputs.insert(Format::Url.as_str().to_string());
         }
 
         EngineCapabilities {
@@ -228,9 +289,12 @@ impl ProcessingEngine for ConversionEngine {
             input_formats: inputs.into_iter().collect(),
             output_formats: outputs.into_iter().collect(),
             // Per-backend limits (external tools bound their own work);
-            // the engine-level cap is enforced in `convert` and
-            // surfaced via ConvertError::TooLarge.
-            limits: EngineLimits::default(),
+            // the engine-level input cap is enforced in `convert` and
+            // surfaced via ConvertError::TooLarge, so advertise it.
+            limits: EngineLimits {
+                max_input_bytes: Some(MAX_INPUT_BYTES),
+                ..EngineLimits::default()
+            },
         }
     }
 

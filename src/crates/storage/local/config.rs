@@ -12,6 +12,11 @@ pub struct StorageConfig {
     pub filesystem: Option<String>,
     /// Master switch for fault injection (debug builds / tests only).
     pub fault_injection: FaultInjectionConfig,
+    /// Content-addressed storage / dedup (see
+    /// [`crate::crates::storage::dedup`]). When `true`, committed
+    /// objects can be registered under `cas/<sha256>` so duplicate
+    /// content is stored once. Default `false` — opt-in.
+    pub dedup: bool,
 }
 
 /// Controls deterministic fault injection so disk-full, permission,
@@ -47,6 +52,7 @@ impl Default for StorageConfig {
             max_size_bytes: None,
             filesystem: None,
             fault_injection: FaultInjectionConfig::default(),
+            dedup: false,
         }
     }
 }
@@ -88,8 +94,16 @@ impl StorageConfig {
         self
     }
 
+    /// Builder: enable/disable content-addressed storage dedup.
+    /// See [`crate::crates::storage::dedup`] for the on-disk layout.
+    pub fn with_dedup(mut self, enabled: bool) -> Self {
+        self.dedup = enabled;
+        self
+    }
+
     /// Builds a config from environment variables:
     /// `KALADOC_STORAGE_DIR`, `KALADOC_STORAGE_MAX_BYTES`,
+    /// `KALADOC_STORAGE_DEDUP` ("1"/"0"),
     /// `KALADOC_FAULT_INJECTION` ("1"/"0"), `KALADOC_FAULT_EVERY_N`.
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
@@ -104,6 +118,9 @@ impl StorageConfig {
             && !fs.trim().is_empty()
         {
             cfg.filesystem = Some(fs.trim().to_lowercase());
+        }
+        if let Ok(v) = std::env::var("KALADOC_STORAGE_DEDUP") {
+            cfg.dedup = matches!(v.as_str(), "1" | "true" | "yes");
         }
         if let Ok(v) = std::env::var("KALADOC_FAULT_INJECTION") {
             cfg.fault_injection.enabled = matches!(v.as_str(), "1" | "true" | "yes");

@@ -117,9 +117,8 @@ const BLOCK_MARGIN: f64 = 10.0;
 /// invisible OCR text layer.
 ///
 /// `pages` is an optional 1-based range spec; `None` processes every
-/// page. Returns a [`SearchableReport`]; the modified PDF bytes are
-/// **not** returned — this op reports what it did. (Callers that need
-/// the bytes use the engine dispatch layer.)
+/// page. Returns the rewritten PDF bytes plus a [`SearchableReport`]
+/// describing what was injected.
 ///
 /// Errors: [`PdfError::MissingTool`] when `pdftoppm`/`tesseract` are
 /// absent, [`PdfError::Encrypted`] for encrypted input, range/limit
@@ -128,7 +127,7 @@ pub fn make_searchable(
     input: &[u8],
     pages: Option<&str>,
     limits: &EngineLimits,
-) -> PdfResult<SearchableReport> {
+) -> PdfResult<(Vec<u8>, SearchableReport)> {
     // Probe both tools before any work so the error names the missing one.
     let _pdftoppm = raster::find_tool(RENDER_TOOL)?;
     let tesseract = raster::find_tool(OCR_TOOL)?;
@@ -143,7 +142,7 @@ pub fn make_searchable(
         warnings: Vec::new(),
     };
     if images.is_empty() {
-        return Ok(report);
+        return Ok((input.to_vec(), report));
     }
 
     let mut doc = load_pdf(input, limits)?;
@@ -238,8 +237,8 @@ pub fn make_searchable(
     }
 
     doc.compress();
-    save_pdf(&mut doc)?;
-    Ok(report)
+    let bytes = save_pdf(&mut doc)?;
+    Ok((bytes, report))
 }
 
 /// Run `tesseract <png> stdout [config]` and return stdout as text.
@@ -586,7 +585,8 @@ mod tests {
             // tesseract is not installed on this system — skip.
             return;
         }
-        let report = make_searchable(&pdf, None, &EngineLimits::default()).unwrap();
+        let (bytes, report) = make_searchable(&pdf, None, &EngineLimits::default()).unwrap();
+        assert!(bytes.starts_with(b"%PDF"), "output is not a PDF");
         assert_eq!(report.pages_processed, 1);
         // A rendered text page OCRs into words; whether they parse as
         // positioned depends on tesseract TSV output.

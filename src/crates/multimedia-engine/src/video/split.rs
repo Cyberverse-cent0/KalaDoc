@@ -419,10 +419,7 @@ fn run_segment(
     ];
     if accurate {
         if let Some(enc) = video_encoder {
-            argv.extend([
-                OsString::from("-c:v"),
-                OsString::from(enc),
-            ]);
+            argv.extend([OsString::from("-c:v"), OsString::from(enc)]);
             if enc == "libx264" {
                 argv.extend([
                     OsString::from("-preset"),

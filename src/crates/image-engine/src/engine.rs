@@ -15,17 +15,19 @@ use crate::crates::core::engine::{
 
 use crate::crates::image_engine::error::ImageResult;
 use crate::crates::image_engine::ops::{
-    self, AdjustOptions, ColorOptions, ColorReplaceOptions, CompressOptions, FlipDirection,
-    ImageFormat, ImageInfo, ImageMetadata, LevelsOptions, PhotocopyOptions, ResizeOptions,
-    ValidationReport, WatermarkOptions,
+    self, AdjustOptions, ColorOptions, ColorReplaceOptions, CompressOptions, DeskewResult,
+    FlipDirection, ImageFormat, ImageInfo, ImageMetadata, LevelsOptions, OcrOptions, OcrReport,
+    PhotocopyOptions, ResizeOptions, ScannerMode, ValidationReport, WatermarkOptions,
 };
 
 /// The raster image processing engine.
 ///
 /// Backed by `image`, which is compiled into this crate — there is no
-/// external binary or service to probe, so
-/// [`ProcessingEngine::health`] always reports
-/// [`EngineHealthStatus::Healthy`].
+/// external binary or service to probe for the core ops, so
+/// [`ProcessingEngine::health`] reports
+/// [`EngineHealthStatus::Healthy`] unless `tesseract` (used only by
+/// `ocr_image`/`ocr_languages`) is missing from `PATH`, in which case
+/// it reports [`EngineHealthStatus::Degraded`].
 ///
 /// # Limits
 ///
@@ -220,6 +222,69 @@ impl ImageEngine {
     pub fn metadata(&self, input: &[u8]) -> ImageResult<ImageMetadata> {
         ops::metadata(input, &self.limits)
     }
+
+    /// Reduce impulse noise in `input` by `strength` passes of a 3×3
+    /// per-channel median filter. `strength` must be in `1..=5`.
+    ///
+    /// See [`ops::denoise`].
+    pub fn denoise(&self, input: &[u8], strength: u8) -> ImageResult<Vec<u8>> {
+        ops::denoise(input, strength, &self.limits)
+    }
+
+    /// Normalize the estimated background ("paper") color of `input`
+    /// toward white via per-channel multiplicative rescaling. Suited
+    /// to scans with uneven illumination.
+    ///
+    /// See [`ops::clean_background`].
+    pub fn clean_background(&self, input: &[u8]) -> ImageResult<Vec<u8>> {
+        ops::clean_background(input, &self.limits)
+    }
+
+    /// Estimate and remove skew from `input`, returning the deskewed
+    /// image bytes plus a [`DeskewReport`] (angle and confidence).
+    /// `max_angle` of `None` uses ±5°; must be finite and within
+    /// `(0.0, 45.0]`.
+    ///
+    /// Best-effort, tuned for text pages — check
+    /// `report.confidence` before trusting the result.
+    ///
+    /// See [`ops::deskew`].
+    pub fn deskew(&self, input: &[u8], max_angle: Option<f64>) -> ImageResult<DeskewResult> {
+        ops::deskew(input, max_angle, &self.limits)
+    }
+
+    /// Apply a scanner-cleanup preset to `input` per `mode`
+    /// ([`ScannerMode::Clean`], [`ScannerMode::Photocopy`], or
+    /// [`ScannerMode::HighContrast`]).
+    ///
+    /// See [`ops::scanner_preset`].
+    pub fn scanner_preset(&self, input: &[u8], mode: ScannerMode) -> ImageResult<Vec<u8>> {
+        ops::scanner_preset(input, mode, &self.limits)
+    }
+
+    /// Recognize text in `input` via the external `tesseract`
+    /// binary, returning an [`OcrReport`] (text, per-word bounding
+    /// boxes, confidences).
+    ///
+    /// Fails with [`ImageError::ExternalTool`](crate::crates::image_engine::ImageError::ExternalTool)
+    /// when `tesseract` is not on `PATH` — results are never faked.
+    /// `tesseract` runs as a blocking child process; async callers
+    /// should wrap this in `spawn_blocking`.
+    ///
+    /// See [`ops::ocr_image`].
+    pub fn ocr_image(&self, input: &[u8], options: &OcrOptions) -> ImageResult<OcrReport> {
+        ops::ocr_image(input, options, &self.limits)
+    }
+
+    /// List the language codes installed for `tesseract`
+    /// (`tesseract --list-langs`). Fails with
+    /// [`ImageError::ExternalTool`](crate::crates::image_engine::ImageError::ExternalTool)
+    /// when the tool is absent.
+    ///
+    /// See [`ops::ocr_languages`].
+    pub fn ocr_languages(&self) -> ImageResult<Vec<String>> {
+        ops::ocr_languages()
+    }
 }
 
 impl Default for ImageEngine {
@@ -255,8 +320,18 @@ impl ProcessingEngine for ImageEngine {
                 EngineOperation::Thumbnail,
                 EngineOperation::Compress,
                 EngineOperation::Watermark,
+                // `watermark` is a positioned image overlay with
+                // opacity/scale/tile controls — the same compositing
+                // primitive `Overlay` names.
+                EngineOperation::Overlay,
                 EngineOperation::Validate,
                 EngineOperation::ExtractMetadata,
+                EngineOperation::Ocr,
+                EngineOperation::Deskew,
+                // `scanner_preset` (background normalization + denoise
+                // + contrast/threshold) is the image-side analogue of
+                // the document-cleanup `CleanScan` operation.
+                EngineOperation::CleanScan,
             ],
             input_formats: formats.clone(),
             output_formats: formats,
@@ -273,11 +348,23 @@ impl ProcessingEngine for ImageEngine {
 
     fn health<'a>(&'a self) -> EngineFuture<'a, EngineHealth> {
         Box::pin(async move {
-            // image is embedded in this crate — there is no external
-            // process, service, or license to probe.
-            EngineHealth {
-                status: EngineHealthStatus::Healthy,
-                message: None,
+            // image is embedded in this crate — the core ops need
+            // nothing external. `ocr` delegates to `tesseract`;
+            // report degraded when it is absent so `engine health`/
+            // `doctor` see it (the op itself still fails honestly
+            // with ExternalTool).
+            if ops::tesseract_available() {
+                EngineHealth {
+                    status: EngineHealthStatus::Healthy,
+                    message: None,
+                }
+            } else {
+                EngineHealth {
+                    status: EngineHealthStatus::Degraded,
+                    message: Some(
+                        "external tool not found on PATH (ocr unavailable): tesseract".to_string(),
+                    ),
+                }
             }
         })
     }

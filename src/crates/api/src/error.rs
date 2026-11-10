@@ -13,6 +13,7 @@ use serde_json::json;
 
 use crate::crates::application::services::ServiceError;
 use crate::crates::document_engine::store::StoreError;
+use crate::crates::image_engine::ImageError;
 use crate::crates::job_engine::JobError;
 use crate::crates::observability::RequestId;
 use crate::crates::security_engine::SecurityError;
@@ -54,6 +55,12 @@ impl ApiError {
     /// `400` — malformed request (bad id, invalid input).
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", message, false)
+    }
+
+    /// `403` — authenticated, but the caller lacks access to the
+    /// addressed document/folder (see `services::access`).
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "forbidden", message, false)
     }
 
     /// `404` — the addressed resource does not exist.
@@ -152,6 +159,34 @@ impl From<SecurityError> for ApiError {
                 e.to_string(),
                 false,
             ),
+        }
+    }
+}
+
+impl From<ImageError> for ApiError {
+    fn from(e: ImageError) -> Self {
+        match e {
+            // Resource budgets map to 413 like storage/upload limits;
+            // everything else is caller-fixable input → 400.
+            ImageError::LimitExceeded(_) => Self::payload_too_large(e.to_string()),
+            _ => Self::new(
+                StatusCode::BAD_REQUEST,
+                "validation_failed",
+                e.to_string(),
+                false,
+            ),
+        }
+    }
+}
+
+impl From<crate::crates::scheduler::SchedulerError> for ApiError {
+    fn from(e: crate::crates::scheduler::SchedulerError) -> Self {
+        use crate::crates::scheduler::SchedulerError as S;
+        match e {
+            // Caller-fixable schedule input (blank name/kind, zero
+            // interval) → 400; storage/job failures → 500.
+            S::Invalid(_) => Self::bad_request(e.to_string()),
+            _ => Self::internal(e.to_string()),
         }
     }
 }

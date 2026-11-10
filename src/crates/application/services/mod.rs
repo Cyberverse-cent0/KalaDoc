@@ -33,6 +33,7 @@ pub mod app;
 pub mod documents;
 pub mod engines;
 pub mod error;
+pub mod folder_watch;
 pub mod ingestion;
 pub mod storage;
 
@@ -43,3 +44,7 @@ pub use ingestion::{
     DocumentIngestionService, IngestOutcome, IngestRequest, RecoveryOptions, RecoveryReport,
 };
 pub use storage::{StorageService, StorageStatus};
+pub mod access;
+pub mod schedules;
+
+pub mod media_ops;

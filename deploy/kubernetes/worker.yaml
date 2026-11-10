@@ -1,0 +1,61 @@
+# Optional: durable job worker.
+#
+# `kaladoc serve` only exposes the HTTP API. Jobs enqueued through the
+# API/CLI sit in the DB queue until a `kaladoc jobs worker` process
+# claims them. Deploy this alongside the API (same image, same PVC —
+# ReadWriteOnce is fine at 1 replica; use more replicas only with a
+# ReadWriteMany-capable storage class or per-replica volumes).
+#
+# Apply separately:
+#   kubectl apply -f deploy/kubernetes/worker.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kaladoc-worker
+  namespace: kaladoc
+  labels:
+    app: kaladoc-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kaladoc-worker
+  template:
+    metadata:
+      labels:
+        app: kaladoc-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: worker
+          image: kaladoc:local
+          imagePullPolicy: IfNotPresent
+          args: ["jobs", "worker"]
+          envFrom:
+            - configMapRef:
+                name: kaladoc-config
+            - secretRef:
+                name: kaladoc-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          # No HTTP port — liveness via process check only.
+          livenessProbe:
+            exec:
+              command: ["kaladoc", "--version"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: kaladoc-data

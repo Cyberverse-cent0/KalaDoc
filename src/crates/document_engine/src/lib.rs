@@ -14,5 +14,6 @@ pub mod lifecycle;
 pub mod metadata;
 pub mod organization;
 pub mod relationship;
+pub mod settings;
 pub mod store;
 pub mod version;

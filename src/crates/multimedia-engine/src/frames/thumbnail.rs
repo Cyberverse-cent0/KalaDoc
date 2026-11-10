@@ -394,7 +394,6 @@ fn sniff_extension(data: &[u8]) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     /// Generate a tiny mp4 with ffmpeg lavfi: `secs` seconds of
     /// 64x64@10fps testsrc + 440Hz sine → h264/aac. Returns `None`

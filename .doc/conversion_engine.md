@@ -23,7 +23,8 @@ CLI / MCP / jobs  →  ConversionEngine  →  ConversionBackend(s)
   `BackendFailed`/`InvalidInput` result falls through to the next
   supporting backend. Deterministic failures (`TooLarge`, `Timeout`,
   `Io`) do not retry.
-- `EngineRegistry::builtin()` registers `pdf`, `security`, `convert`.
+- `EngineRegistry::builtin()` registers all six engines: `convert`,
+  `image`, `multimedia`, `pdf`, `pipeline`, and `security`.
 
 ## Formats
 

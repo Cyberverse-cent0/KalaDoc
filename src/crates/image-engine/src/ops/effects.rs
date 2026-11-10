@@ -39,15 +39,16 @@ pub struct LevelsOptions {
     pub input_white: Option<u8>,
 
     /// Gamma correction exponent applied after the black/white
-    /// stretch, `0.1..=4.0` (finite). Values below 1.0 brighten
-    /// midtones, above 1.0 darken them. `1.0`/`None` is neutral.
+    /// stretch as `t^gamma`, `0.1..=4.0` (finite). Values below 1.0
+    /// brighten midtones, above 1.0 darken them. `1.0`/`None` is
+    /// neutral.
     pub gamma: Option<f32>,
 }
 
 /// Apply a levels/gamma curve to every color channel.
 ///
 /// Each channel is remapped independently through the same LUT:
-/// `out = clamp(((in - black) / (white - black))^(1/gamma) * 255)`.
+/// `out = clamp((clamp((in - black) / (white - black)))^gamma * 255)`.
 /// Fails with [`ImageError::InvalidInput`] when no field is set, when
 /// the effective black point is not below the white point, or when
 /// `gamma` is outside `0.1..=4.0`.
@@ -100,10 +101,9 @@ fn validate_levels(options: &LevelsOptions) -> ImageResult<(u8, u8, f32)> {
 fn build_levels_lut(black: u8, white: u8, gamma: f32) -> [u8; 256] {
     let mut lut = [0u8; 256];
     let span = f32::from(white) - f32::from(black);
-    let inv_gamma = 1.0 / gamma;
     for (i, v) in lut.iter_mut().enumerate() {
         let t = ((i as f32 - f32::from(black)) / span).clamp(0.0, 1.0);
-        *v = (t.powf(inv_gamma) * 255.0).round().clamp(0.0, 255.0) as u8;
+        *v = (t.powf(gamma) * 255.0).round().clamp(0.0, 255.0) as u8;
     }
     lut
 }

@@ -106,6 +106,11 @@ impl PdfEngine {
         ops::reorder(input, order, &self.limits)
     }
 
+    /// Swap two 1-based pages in the document.
+    pub fn swap_pages(&self, input: &[u8], a: u32, b: u32) -> PdfResult<Vec<u8>> {
+        ops::swap_pages(input, a, b, &self.limits)
+    }
+
     /// Rotate pages selected by a 1-based range spec
     /// (`"1-3,8"`, `"all"`) by `degrees`.
     ///
@@ -245,6 +250,23 @@ impl PdfEngine {
         ops::verify_signatures_crypto(input, &self.limits, trust_anchors)
     }
 
+    /// Extract signer X.509 certificates from signature fields —
+    /// `/Cert` entries plus certificates embedded in CMS `/Contents`
+    /// blobs (parsed via `openssl` when available; CMS-embedded certs
+    /// are skipped with the rest still returned when it is absent).
+    pub fn signer_certificates(&self, input: &[u8]) -> PdfResult<Vec<ops::SignerCert>> {
+        ops::extract_signer_certificates(input, &self.limits)
+    }
+
+    /// Parse one DER-encoded X.509 certificate via `openssl x509`.
+    ///
+    /// See [`ops::parse_cert_with_openssl`] for the produced
+    /// [`ops::CertSummary`] and its honesty notes. Requires `openssl`
+    /// on `PATH`.
+    pub fn parse_certificate(&self, der: &[u8]) -> PdfResult<ops::CertSummary> {
+        ops::parse_cert_with_openssl(der)
+    }
+
     /// Digitally sign `input` with an X.509 certificate, producing a
     /// real detached-CMS signature (`/ByteRange` + `/Contents`) via
     /// `openssl cms -sign`. See [`ops::sign`] for the produced
@@ -304,6 +326,29 @@ impl PdfEngine {
         ops::extract_text(input, pages, &self.limits)
     }
 
+    /// Positioned text-span extraction: one [`ops::TextSpan`] per
+    /// text-showing run with approximate coordinates, font and size.
+    /// `pages` is an optional range spec; `None` scans every page.
+    pub fn extract_spans(
+        &self,
+        input: &[u8],
+        pages: Option<&str>,
+    ) -> PdfResult<Vec<ops::TextSpan>> {
+        ops::extract_spans(input, pages, &self.limits)
+    }
+
+    /// Literal substring search over extracted page text (no regex —
+    /// see [`ops::search_text`] docs). `pages` is an optional range
+    /// spec; `None` searches every page.
+    pub fn search_text(
+        &self,
+        input: &[u8],
+        pattern: &str,
+        pages: Option<&str>,
+    ) -> PdfResult<Vec<ops::TextMatch>> {
+        ops::search_text(input, pattern, pages, &self.limits)
+    }
+
     /// Convert the text layer to plain text or Markdown bytes.
     pub fn convert(
         &self,
@@ -326,6 +371,19 @@ impl PdfEngine {
         ops::render(input, pages, dpi, format, &self.limits)
     }
 
+    /// Render every selected page with explicit options (multi-page,
+    /// region crop, PNG/JPEG/TIFF, grayscale/monochrome, scale-to,
+    /// JPEG quality) — see [`ops::render_pages`].
+    pub fn render_pages(
+        &self,
+        input: &[u8],
+        pages: Option<&str>,
+        dpi: Option<u32>,
+        options: &ops::RenderPageOptions,
+    ) -> PdfResult<Vec<ops::RenderedPage>> {
+        ops::render_pages(input, pages, dpi, options, &self.limits)
+    }
+
     /// OCR selected pages via `pdftoppm` + `tesseract`.
     pub fn ocr(&self, input: &[u8], pages: Option<&str>) -> PdfResult<Vec<PageText>> {
         ops::ocr(input, pages, &self.limits)
@@ -336,6 +394,17 @@ impl PdfEngine {
         ops::ocr_languages()
     }
 
+    /// Detailed OCR: word/line geometry and confidence via tesseract
+    /// TSV, with optional DPI/language/PSM — see [`ops::ocr_detailed`].
+    pub fn ocr_detailed(
+        &self,
+        input: &[u8],
+        pages: Option<&str>,
+        options: &ops::OcrOptions,
+    ) -> PdfResult<Vec<ops::OcrPageDetail>> {
+        ops::ocr_detailed(input, pages, options, &self.limits)
+    }
+
     /// Compare two PDFs (text diff / structure / bytes).
     pub fn compare(
         &self,
@@ -344,6 +413,19 @@ impl PdfEngine {
         mode: ops::CompareMode,
     ) -> PdfResult<ops::CompareReport> {
         ops::compare(input_a, input_b, mode, &self.limits)
+    }
+
+    /// Detect tabular text regions (aligned columns of text lines)
+    /// across the document's pages. Heuristic — see
+    /// [`ops::extract_tables`] for detection rules and limitations.
+    pub fn extract_tables(&self, input: &[u8]) -> PdfResult<ops::TableReport> {
+        ops::extract_tables(input, &self.limits)
+    }
+
+    /// Extract `key: value` / `key = value` pairs from page text.
+    /// Heuristic — see [`ops::extract_key_values`].
+    pub fn extract_key_values(&self, input: &[u8]) -> PdfResult<Vec<ops::KvPair>> {
+        ops::extract_key_values(input, &self.limits)
     }
 
     // -- page labels / outline ---------------------------------------------
@@ -445,6 +527,30 @@ impl PdfEngine {
         position: ops::DupPos,
     ) -> PdfResult<(Vec<u8>, Vec<u32>)> {
         ops::duplicate_pages(input, pages, copies, position, &self.limits)
+    }
+
+    /// Import pages selected by `source_pages` from `source` into
+    /// `input` at `position` (target-doc 1-based page numbers).
+    pub fn import_pages(
+        &self,
+        input: &[u8],
+        source: &[u8],
+        source_pages: &str,
+        position: ops::ImportPos,
+    ) -> PdfResult<Vec<u8>> {
+        ops::import_pages(input, source, source_pages, position, &self.limits)
+    }
+
+    /// Replace the target pages selected by `target_pages` with the
+    /// source pages selected by `source_pages`, preserving order.
+    pub fn replace_pages(
+        &self,
+        input: &[u8],
+        source: &[u8],
+        source_pages: &str,
+        target_pages: &str,
+    ) -> PdfResult<Vec<u8>> {
+        ops::replace_pages(input, source, source_pages, target_pages, &self.limits)
     }
 
     /// Remove provably blank pages. Returns the rewritten PDF plus a
@@ -790,13 +896,13 @@ impl PdfEngine {
 
     /// Inject an invisible OCR text layer over the selected pages.
     ///
-    /// Note: the underlying op discards its rewritten bytes — only the
-    /// [`ops::SearchableReport`] is returned (see op docs).
+    /// Returns the rewritten PDF bytes plus an
+    /// [`ops::SearchableReport`] describing what was injected.
     pub fn make_searchable(
         &self,
         input: &[u8],
         pages: Option<&str>,
-    ) -> PdfResult<ops::SearchableReport> {
+    ) -> PdfResult<(Vec<u8>, ops::SearchableReport)> {
         ops::make_searchable(input, pages, &self.limits)
     }
 
@@ -1021,6 +1127,142 @@ impl PdfEngine {
     ) -> PdfResult<(Vec<u8>, ops::FieldPatchReport)> {
         ops::edit_field_props(input, patches, &self.limits)
     }
+
+    // ---- round-3 ops ----
+
+    pub fn add_bates(&self, input: &[u8], spec: &ops::BatesSpec) -> PdfResult<Vec<u8>> {
+        ops::add_bates(input, spec, &self.limits)
+    }
+
+    pub fn deskew(
+        &self,
+        input: &[u8],
+        pages: Option<&str>,
+        max_angle: f64,
+    ) -> PdfResult<(Vec<u8>, ops::DeskewReport)> {
+        ops::deskew(input, pages, max_angle, &self.limits)
+    }
+
+    pub fn list_oc_marked_content(&self, input: &[u8]) -> PdfResult<Vec<ops::OcUsage>> {
+        ops::list_oc_marked_content(input, &self.limits)
+    }
+
+    pub fn get_page_boxes(&self, input: &[u8], pages: &str) -> PdfResult<Vec<ops::PageBoxInfo>> {
+        ops::get_page_boxes(input, pages, &self.limits)
+    }
+
+    pub fn set_page_box(
+        &self,
+        input: &[u8],
+        pages: &str,
+        which: ops::PageBox,
+        rect: [f64; 4],
+    ) -> PdfResult<Vec<u8>> {
+        ops::set_page_box(input, pages, which, rect, &self.limits)
+    }
+
+    pub fn remove_page_box(
+        &self,
+        input: &[u8],
+        pages: &str,
+        which: ops::PageBox,
+    ) -> PdfResult<Vec<u8>> {
+        ops::remove_page_box(input, pages, which, &self.limits)
+    }
+
+    pub fn apply_trim_preset(
+        &self,
+        input: &[u8],
+        pages: &str,
+        preset: ops::TrimPreset,
+        bleed: f64,
+    ) -> PdfResult<Vec<u8>> {
+        ops::apply_trim_preset(input, pages, preset, bleed, &self.limits)
+    }
+
+    pub fn get_trim_boxes(&self, input: &[u8]) -> PdfResult<Vec<ops::TrimPageBoxInfo>> {
+        ops::get_trim_boxes(input, &self.limits)
+    }
+
+    pub fn get_trim_boxes_for_pages(
+        &self,
+        input: &[u8],
+        pages: &str,
+    ) -> PdfResult<Vec<ops::TrimPageBoxInfo>> {
+        ops::get_trim_boxes_for_pages(input, pages, &self.limits)
+    }
+
+    pub fn add_links(&self, input: &[u8], links: &[ops::LinkSpec]) -> PdfResult<Vec<u8>> {
+        ops::add_links(input, links, &self.limits)
+    }
+
+    pub fn list_links(&self, input: &[u8]) -> PdfResult<Vec<ops::LinkInfo>> {
+        ops::list_links(input, &self.limits)
+    }
+
+    pub fn remove_links(&self, input: &[u8], pages: Option<&str>) -> PdfResult<Vec<u8>> {
+        ops::remove_links(input, pages, &self.limits)
+    }
+
+    pub fn audit_fonts(&self, input: &[u8]) -> PdfResult<ops::FontAudit> {
+        ops::audit_fonts(input, &self.limits)
+    }
+
+    pub fn audit_content(&self, input: &[u8]) -> PdfResult<ops::ContentAudit> {
+        ops::audit_content(input, &self.limits)
+    }
+
+    pub fn object_report(&self, input: &[u8]) -> PdfResult<ops::ObjectReport> {
+        ops::object_report(input, &self.limits)
+    }
+
+    pub fn dedup_images(&self, input: &[u8]) -> PdfResult<(Vec<u8>, ops::DedupReport)> {
+        ops::dedup_images(input, &self.limits)
+    }
+
+    pub fn recompress_streams(
+        &self,
+        input: &[u8],
+        level: u32,
+    ) -> PdfResult<(Vec<u8>, ops::RecompressReport)> {
+        ops::recompress_streams(input, level, &self.limits)
+    }
+
+    pub fn permissions_report(&self, input: &[u8]) -> PdfResult<ops::PermissionsReport> {
+        ops::permissions_report(input, &self.limits)
+    }
+
+    pub fn build_outline_from_text(
+        &self,
+        input: &[u8],
+        spec: &ops::HeadingSpec,
+    ) -> PdfResult<(Vec<u8>, ops::OutlineBuildReport)> {
+        ops::build_outline_from_text(input, spec, &self.limits)
+    }
+
+    pub fn remove_hidden_text(
+        &self,
+        input: &[u8],
+        pages: Option<&str>,
+    ) -> PdfResult<(Vec<u8>, ops::HiddenTextReport)> {
+        ops::remove_hidden_text(input, pages, &self.limits)
+    }
+
+    pub fn list_attachments(&self, input: &[u8]) -> PdfResult<Vec<ops::EmbeddedFileInfo>> {
+        ops::list_attachments(input, &self.limits)
+    }
+
+    pub fn extract_attachment(&self, input: &[u8], name: &str) -> PdfResult<Vec<u8>> {
+        ops::extract_attachment(input, name, &self.limits)
+    }
+
+    pub fn add_attachment(&self, input: &[u8], spec: &ops::AttachmentSpec) -> PdfResult<Vec<u8>> {
+        ops::add_attachment(input, spec, &self.limits)
+    }
+
+    pub fn remove_attachment(&self, input: &[u8], name: &str) -> PdfResult<Vec<u8>> {
+        ops::remove_attachment(input, name, &self.limits)
+    }
 }
 
 impl Default for PdfEngine {
@@ -1077,6 +1319,137 @@ impl ProcessingEngine for PdfEngine {
                 EngineOperation::Ocr,
                 EngineOperation::Encrypt,
                 EngineOperation::Decrypt,
+                // page manipulation / imposition
+                EngineOperation::InsertBlank,
+                EngineOperation::DuplicatePages,
+                EngineOperation::RemoveBlankPages,
+                EngineOperation::Interleave,
+                EngineOperation::MergeMode,
+                EngineOperation::Nup,
+                EngineOperation::SinglePage,
+                EngineOperation::Posterize,
+                EngineOperation::Booklet,
+                EngineOperation::ScaleContent,
+                EngineOperation::SplitMode,
+                EngineOperation::SplitAtOutline,
+                EngineOperation::ListPortfolio,
+                EngineOperation::CreatePortfolio,
+                EngineOperation::SetPageRotation,
+                EngineOperation::GetPageRotations,
+                EngineOperation::NormalizeRotations,
+                EngineOperation::SetViewCrop,
+                EngineOperation::ClearCrop,
+                EngineOperation::GetPageBoxes,
+                EngineOperation::SetPageBox,
+                EngineOperation::RemovePageBox,
+                EngineOperation::ApplyTrimPreset,
+                EngineOperation::GetTrimBoxes,
+                EngineOperation::GetTrimBoxesForPages,
+                EngineOperation::SetPageSize,
+                EngineOperation::GetPageSizes,
+                EngineOperation::DetectOrientation,
+                EngineOperation::NormalizeOrientation,
+                EngineOperation::Deskew,
+                EngineOperation::CleanScan,
+                EngineOperation::SetTransition,
+                EngineOperation::ClearTransitions,
+                EngineOperation::ListTransitions,
+                EngineOperation::PackageDocuments,
+                EngineOperation::Linearize,
+                // marks / drawing
+                EngineOperation::DrawShapes,
+                EngineOperation::HeadersFooters,
+                EngineOperation::AddPageNumbers,
+                EngineOperation::AddPrintMarks,
+                EngineOperation::AddBates,
+                // content ops
+                EngineOperation::Grayscale,
+                EngineOperation::InvertColors,
+                EngineOperation::RemoveImages,
+                EngineOperation::ReplaceImage,
+                EngineOperation::DedupImages,
+                EngineOperation::RecompressStreams,
+                EngineOperation::GarbageCollect,
+                EngineOperation::MakeSearchable,
+                EngineOperation::RedactRegions,
+                EngineOperation::RedactPages,
+                EngineOperation::RemoveHiddenText,
+                // annotations / freehand / markup
+                EngineOperation::AddComment,
+                EngineOperation::AddFreeText,
+                EngineOperation::ListAnnotations,
+                EngineOperation::RemoveAnnotations,
+                EngineOperation::ListArticles,
+                EngineOperation::RemoveArticles,
+                EngineOperation::AddInk,
+                EngineOperation::ListInk,
+                EngineOperation::RemoveInk,
+                EngineOperation::TextMarkup,
+                EngineOperation::EditText,
+                // forms
+                EngineOperation::ListFormFields,
+                EngineOperation::CreateTextField,
+                EngineOperation::DeleteFormField,
+                EngineOperation::FillForm,
+                EngineOperation::ClearForm,
+                EngineOperation::UnlockFields,
+                EngineOperation::LockFields,
+                EngineOperation::EditFieldProps,
+                // metadata / conformance
+                EngineOperation::SetMetadata,
+                EngineOperation::ClearMetadata,
+                EngineOperation::SetXmp,
+                EngineOperation::GetXmp,
+                EngineOperation::ToPdfa,
+                EngineOperation::ToPdfua,
+                EngineOperation::ToPdfx,
+                // page labels / outline / destinations
+                EngineOperation::SetPageLabels,
+                EngineOperation::ClearPageLabels,
+                EngineOperation::GetPageLabels,
+                EngineOperation::SetOutline,
+                EngineOperation::RemoveOutline,
+                EngineOperation::ListOutline,
+                EngineOperation::BuildOutlineFromText,
+                EngineOperation::AddNamedDestinations,
+                EngineOperation::ListNamedDestinations,
+                EngineOperation::RemoveNamedDestination,
+                // layers / optional content
+                EngineOperation::ListLayers,
+                EngineOperation::SetLayerVisibility,
+                EngineOperation::RemoveOcProperties,
+                EngineOperation::ListOcMarkedContent,
+                // links / attachments
+                EngineOperation::AddLinks,
+                EngineOperation::ListLinks,
+                EngineOperation::RemoveLinks,
+                EngineOperation::ListAttachments,
+                EngineOperation::ExtractAttachment,
+                EngineOperation::AddAttachment,
+                EngineOperation::RemoveAttachment,
+                // inspection / reports
+                EngineOperation::InspectFonts,
+                EngineOperation::InspectJavascript,
+                EngineOperation::InspectStructure,
+                EngineOperation::GetDocumentDates,
+                EngineOperation::SetDocumentDates,
+                EngineOperation::ObjectReport,
+                EngineOperation::FontAudit,
+                EngineOperation::ContentAudit,
+                EngineOperation::PermissionsReport,
+                // security extras
+                EngineOperation::SignerCertificates,
+                EngineOperation::ParseCertificate,
+                EngineOperation::ListSignatureTimestamps,
+                EngineOperation::HasTimestamps,
+                EngineOperation::DocumentDigest,
+                EngineOperation::TimestampQuery,
+                EngineOperation::BuildTimestampRequest,
+                EngineOperation::RequestExternalTimestamp,
+                EngineOperation::TimestampDocument,
+                EngineOperation::RemoveNamedObjects,
+                EngineOperation::RemoveEmbeddedFiles,
+                EngineOperation::RemoveJavascriptNames,
             ],
             input_formats: vec!["pdf".to_string()],
             output_formats: vec![
@@ -1085,6 +1458,8 @@ impl ProcessingEngine for PdfEngine {
                 "markdown".to_string(),
                 "png".to_string(),
                 "jpeg".to_string(),
+                "tiff".to_string(),
+                "der".to_string(),
             ],
             limits: self.limits.clone(),
         }

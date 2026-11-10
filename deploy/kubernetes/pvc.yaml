@@ -1,0 +1,14 @@
+# Persistent storage for KalaDoc state: SQLite DB + filesystem storage.
+# Sized for the SQLite file plus uploaded/derived documents; adjust to
+# expected workload. For the S3 backend only the DB needs this volume.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kaladoc-data
+  namespace: kaladoc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

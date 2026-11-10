@@ -106,7 +106,7 @@ pub fn remove_blank_pages(input: &[u8], limits: &EngineLimits) -> PdfResult<Blan
 }
 
 /// Whether `page_id` is provably blank. Any doubt resolves to `false`.
-fn is_blank_page(doc: &Document, page_id: ObjectId) -> bool {
+pub(crate) fn is_blank_page(doc: &Document, page_id: ObjectId) -> bool {
     if has_annotations(doc, page_id) {
         return false;
     }

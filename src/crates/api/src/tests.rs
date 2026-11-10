@@ -13,6 +13,7 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 use tower::ServiceExt;
 
+use crate::config::ApiKey;
 use crate::crates::api::{ApiState, router};
 use crate::crates::application::Organization::auth_user::{NewUser, create_user};
 use crate::crates::application::Organization::init_db::{
@@ -52,8 +53,10 @@ fn test_session_config() -> SessionConfig {
 }
 
 /// Builds router state over a tempdir storage root + in-memory DB,
-/// plus a valid bearer token for a freshly created user.
-async fn test_app() -> (Router, String, tempfile::TempDir) {
+/// plus a valid bearer token for a freshly created user. Callers can
+/// further configure the state (API keys, disabled groups) before
+/// wrapping it in [`router`].
+async fn test_state() -> (ApiState, String, tempfile::TempDir) {
     let pool = test_pool().await;
     let storage_dir = tempfile::tempdir().unwrap();
     let storage_config = StorageConfig::new(storage_dir.path().to_path_buf());
@@ -82,7 +85,13 @@ async fn test_app() -> (Router, String, tempfile::TempDir) {
         .await
         .unwrap();
 
-    (router(Arc::new(state)), token, storage_dir)
+    (state, token, storage_dir)
+}
+
+/// Default test app: unmodified state + session token.
+async fn test_app() -> (Router, String, tempfile::TempDir) {
+    let (state, token, dir) = test_state().await;
+    (router(Arc::new(state)), token, dir)
 }
 
 async fn body_json(res: axum::response::Response) -> Value {
@@ -668,4 +677,1253 @@ async fn jobs_list_process_cancel_retry() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn openapi_json_is_public_and_describes_routes() {
+    let (app, token, _dir) = test_app().await;
+
+    // Public like /health — no Authorization header needed.
+    let res = app.clone().oneshot(get("/openapi.json")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["openapi"], "3.0.3");
+    assert_eq!(body["info"]["title"], "KalaDoc API");
+
+    // The spec covers every route family, including the newest ones.
+    let paths = body["paths"].as_object().unwrap();
+    for path in [
+        "/health",
+        "/documents",
+        "/documents/{id}/process",
+        "/pipelines/run",
+        "/jobs",
+        "/jobs/batch",
+        "/jobs/batch/{id}",
+        "/jobs/batch/{id}/cancel",
+    ] {
+        assert!(paths.contains_key(path), "missing path {path}");
+    }
+    // Authenticated routes declare the bearer scheme.
+    assert!(
+        paths["/pipelines/run"]["post"]["security"]
+            .as_array()
+            .is_some()
+    );
+
+    // Still reachable with a token (middleware doesn't break it).
+    let res = app
+        .oneshot(authed_get("/openapi.json", &token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn pipelines_run_enqueues_pipeline_run_job() {
+    let (app, token, _dir) = test_app().await;
+    let doc_id = upload_doc(&app, &token).await;
+
+    // Unknown document → 404.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/pipelines/run",
+            &token,
+            serde_json::json!({
+                "document_id": "doc-missing",
+                "pipeline": { "name": "pdf.intake" }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Unknown built-in name → 400 (resolved up front, not queued).
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/pipelines/run",
+            &token,
+            serde_json::json!({
+                "document_id": doc_id,
+                "pipeline": { "name": "no.such.pipeline" }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Neither a name nor a steps-bearing definition → 400.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/pipelines/run",
+            &token,
+            serde_json::json!({ "document_id": doc_id, "pipeline": {} }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // A `steps` key selects definition mode; malformed → 400.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/pipelines/run",
+            &token,
+            serde_json::json!({
+                "document_id": doc_id,
+                "pipeline": { "name": "x", "steps": "not-a-list" }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Built-in name resolves to its full definition in the payload.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/pipelines/run",
+            &token,
+            serde_json::json!({
+                "document_id": doc_id,
+                "pipeline": { "name": "pdf.intake" }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+    let job = body_json(res).await["job"].clone();
+    assert_eq!(job["kind"], "pipeline.run");
+    assert_eq!(job["payload"]["document_id"], doc_id);
+    assert_eq!(job["payload"]["pipeline"]["name"], "pdf.intake");
+    assert!(job["payload"]["pipeline"]["steps"].is_array());
+
+    // A full PipelineDefinition JSON is stored verbatim.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/pipelines/run",
+            &token,
+            serde_json::json!({
+                "document_id": doc_id,
+                "pipeline": {
+                    "name": "custom.count",
+                    "steps": [{ "name": "count", "engine": "pdf", "operation": "page_count" }]
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+    let job = body_json(res).await["job"].clone();
+    assert_eq!(job["kind"], "pipeline.run");
+    assert_eq!(job["payload"]["pipeline"]["name"], "custom.count");
+    assert_eq!(
+        job["payload"]["pipeline"]["steps"][0]["operation"],
+        "page_count"
+    );
+}
+
+#[tokio::test]
+async fn job_batches_create_progress_and_cancel() {
+    let (app, token, _dir) = test_app().await;
+    let doc_id = upload_doc(&app, &token).await;
+
+    // Empty batch → 400.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/jobs/batch",
+            &token,
+            serde_json::json!([]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Non-object payload → 400.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/jobs/batch",
+            &token,
+            serde_json::json!([{ "kind": "system.ping", "payload": "nope" }]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Two jobs share one batch_id (the first job's id).
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/jobs/batch",
+            &token,
+            serde_json::json!([
+                { "kind": "system.ping" },
+                { "kind": "document.index", "payload": { "document_id": doc_id }, "priority": 5 }
+            ]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let body = body_json(res).await;
+    let batch_id = body["batch_id"].as_i64().unwrap();
+    let jobs = body["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 2);
+    for job in jobs {
+        assert_eq!(job["batch_id"], batch_id);
+        assert!(job["progress"].is_null() || job["progress"].is_object());
+    }
+    assert_eq!(jobs[1]["priority"], 5);
+    assert_eq!(jobs[1]["payload"]["document_id"], doc_id);
+
+    // Batch progress endpoint reports counts + member jobs.
+    let res = app
+        .clone()
+        .oneshot(authed_get(&format!("/jobs/batch/{batch_id}"), &token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["batch_id"], batch_id);
+    assert_eq!(body["progress"]["items_total"], 2);
+    assert_eq!(body["jobs"].as_array().unwrap().len(), 2);
+
+    // Cancel the batch → both pending jobs cancelled.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/jobs/batch/{batch_id}/cancel"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["cancelled"], 2);
+
+    // Progress reflects the cancellations; unknown/non-integer → 404/400.
+    let res = app
+        .clone()
+        .oneshot(authed_get(&format!("/jobs/batch/{batch_id}"), &token))
+        .await
+        .unwrap();
+    let progress = body_json(res).await["progress"].clone();
+    assert_eq!(progress["items_cancelled"], 2);
+    assert_eq!(progress["complete"], true);
+
+    let res = app
+        .clone()
+        .oneshot(authed_get("/jobs/batch/999999", &token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = app
+        .clone()
+        .oneshot(authed_get("/jobs/batch/abc", &token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn api_keys_authenticate_alongside_sessions() {
+    let (state, session_token, _dir) = test_state().await;
+    let app = router(Arc::new(state.with_api_keys(vec![ApiKey {
+        name: "ci".into(),
+        key: "key-123".into(),
+    }])));
+
+    // Session tokens keep working.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/engines", &session_token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // A configured key authenticates as `apikey:<name>`.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/engines", "key-123"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Upload via the key: the document is owned/scoped to the key actor.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/documents?filename=keyed.png")
+                .header("authorization", "Bearer key-123")
+                .header("content-type", "image/png")
+                .body(Body::from(b"\x89PNG\r\n\x1a\n".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let body = body_json(res).await;
+    assert_eq!(body["document"]["owner_id"], "apikey:ci");
+
+    // The key's owner scope lists its own uploads.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/documents", "key-123"))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(res).await["documents"].as_array().unwrap().len(),
+        1
+    );
+
+    // Wrong key and unknown session token both → 401.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/engines", "key-124"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let res = app
+        .clone()
+        .oneshot(authed_get("/engines", "not-a-real-token"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn disabled_groups_return_404_before_auth() {
+    let (state, token, _dir) = test_state().await;
+    let app =
+        router(Arc::new(state.with_disabled_groups([
+            "jobs".to_string(),
+            "pipelines".to_string(),
+        ])));
+
+    // Disabled groups 404 even with a valid token.
+    for uri in [
+        "/jobs",
+        "/jobs/1",
+        "/jobs/batch",
+        "/pipelines",
+        "/pipelines/pdf.intake",
+        "/pipelines/run",
+    ] {
+        let res = app.clone().oneshot(authed_get(uri, &token)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{uri} should 404");
+        let body = body_json(res).await;
+        assert_eq!(body["error"]["code"], "not_found");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("disabled"),
+            "{uri} error should mention disabled: {}",
+            body["error"]["message"]
+        );
+    }
+
+    // The gate runs before auth: no token still 404s (not 401).
+    let res = app.clone().oneshot(get("/jobs")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Other groups and public routes are unaffected.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/documents", &token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app.clone().oneshot(get("/health")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn pipelines_list_and_get_builtin_definitions() {
+    let (app, token, _dir) = test_app().await;
+
+    // GET /pipelines lists the built-ins as full definitions.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/pipelines", &token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let pipelines = body_json(res).await["pipelines"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let names: Vec<&str> = pipelines
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"pdf.intake"));
+    assert!(names.contains(&"pdf.extract-text"));
+    for def in &pipelines {
+        assert!(def["steps"].as_array().unwrap().len() > 0);
+    }
+
+    // GET /pipelines/{name} returns one definition.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/pipelines/pdf.intake", &token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["pipeline"]["name"], "pdf.intake");
+    assert_eq!(body["pipeline"]["steps"].as_array().unwrap().len(), 4);
+
+    // Unknown name → 404; unauthenticated → 401.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/pipelines/nope", &token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = app
+        .clone()
+        .oneshot(get("/pipelines/pdf.intake"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// Authorization — owner / permission / stranger matrix
+// ---------------------------------------------------------------------------
+
+/// Creates a second user + session token on the same pool. Returns
+/// `(user_id, bearer_token)`.
+async fn second_user(pool: &SqlitePool, name: &str) -> (i64, String) {
+    let user_id = create_user(
+        pool,
+        &NewUser {
+            first_name: "Second".into(),
+            last_name: name.into(),
+            user_name: format!("user_{name}"),
+            email: format!("{name}@example.com"),
+            password: "correct horse battery".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let (_session, token) = create_session(pool, user_id, &test_session_config())
+        .await
+        .unwrap();
+    (user_id, token)
+}
+
+#[tokio::test]
+async fn document_access_matrix_owner_permitted_stranger() {
+    let (state, token_a, _dir) = test_state().await;
+    let pool = state.services.pool().clone();
+    let app = router(Arc::new(state));
+    let doc_id = upload_doc(&app, &token_a).await;
+
+    let (user_b, token_b) = second_user(&pool, "bob").await;
+    let bob = user_b.to_string();
+
+    // Stranger: every document route is 403 (or absent from lists).
+    for uri in [
+        format!("/documents/{doc_id}"),
+        format!("/documents/{doc_id}/versions"),
+        format!("/documents/{doc_id}/tags"),
+        format!("/documents/{doc_id}/history"),
+        format!("/documents/{doc_id}/metadata"),
+        format!("/documents/{doc_id}/settings"),
+        format!("/documents/{doc_id}/permissions"),
+        format!("/documents/{doc_id}/relationships"),
+        format!("/documents/{doc_id}/related"),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(authed_get(&uri, &token_b))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "GET {uri}");
+        let body = body_json(res).await;
+        assert_eq!(body["error"]["code"], "forbidden");
+    }
+    // Mutations are 403 too.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "PATCH",
+            &format!("/documents/{doc_id}"),
+            &token_b,
+            serde_json::json!({ "name": "hijack.png" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/documents/{doc_id}"))
+                .header("authorization", format!("Bearer {token_b}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{doc_id}/process"),
+            &token_b,
+            serde_json::json!({ "op": "index" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // owner_id override is ignored: Bob sees only his own (zero) docs.
+    let res = app
+        .clone()
+        .oneshot(authed_get(&format!("/documents?owner_id={bob}"), &token_a))
+        .await
+        .unwrap();
+    // Alice asking for Bob's scope still gets Alice's docs only.
+    assert_eq!(
+        body_json(res).await["documents"].as_array().unwrap().len(),
+        1
+    );
+    let res = app
+        .clone()
+        .oneshot(authed_get(
+            &format!("/documents?owner_id={doc_id}"),
+            &token_b,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        body_json(res).await["documents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // Search never leaks unreadable documents.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/documents?q=dot", &token_b))
+        .await
+        .unwrap();
+    assert!(
+        body_json(res).await["documents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // Alice grants Bob `read` — but only `manage` holders (i.e. Alice)
+    // may grant, so exercise the happy path as Alice.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{doc_id}/permissions"),
+            &token_a,
+            serde_json::json!({ "subject_id": bob, "access_level": "read" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    // Bob can now read but not write.
+    let res = app
+        .clone()
+        .oneshot(authed_get(&format!("/documents/{doc_id}"), &token_b))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "PATCH",
+            &format!("/documents/{doc_id}"),
+            &token_b,
+            serde_json::json!({ "name": "hijack.png" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    // Shared doc shows up in Bob's listing and search.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/documents", &token_b))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(res).await["documents"].as_array().unwrap().len(),
+        1
+    );
+    let res = app
+        .clone()
+        .oneshot(authed_get("/documents?q=dot", &token_b))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(res).await["documents"].as_array().unwrap().len(),
+        1
+    );
+
+    // Upgrade to write: PATCH succeeds, grant management still 403.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{doc_id}/permissions"),
+            &token_a,
+            serde_json::json!({ "subject_id": bob, "access_level": "write" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "PATCH",
+            &format!("/documents/{doc_id}"),
+            &token_b,
+            serde_json::json!({ "name": "bob-edit.png" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{doc_id}/permissions"),
+            &token_b,
+            serde_json::json!({ "subject_id": "999", "access_level": "read" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    // Purge needs manage — write is not enough.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/documents/{doc_id}/purge"))
+                .header("authorization", format!("Bearer {token_b}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // Revoke → back to 403.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/documents/{doc_id}/permissions/{bob}"))
+                .header("authorization", format!("Bearer {token_a}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["revoked"], true);
+    let res = app
+        .clone()
+        .oneshot(authed_get(&format!("/documents/{doc_id}"), &token_b))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn permissions_routes_validation_and_subject_listing() {
+    let (app, token, _dir) = test_app().await;
+    let doc_id = upload_doc(&app, &token).await;
+
+    // Unknown document → 404.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/documents/doc-missing/permissions", &token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Bad access_level → 400 (serde rejection); empty subject → 400.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{doc_id}/permissions"),
+            &token,
+            serde_json::json!({ "subject_id": "x", "access_level": "bogus" }),
+        ))
+        .await
+        .unwrap();
+    // Serde-level rejections surface as axum's 422.
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{doc_id}/permissions"),
+            &token,
+            serde_json::json!({ "subject_id": "  ", "access_level": "read" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Grant + list + subject-scoped list.
+    app.clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{doc_id}/permissions"),
+            &token,
+            serde_json::json!({ "subject_id": "user-9", "access_level": "read" }),
+        ))
+        .await
+        .unwrap();
+    let res = app
+        .clone()
+        .oneshot(authed_get(
+            &format!("/documents/{doc_id}/permissions"),
+            &token,
+        ))
+        .await
+        .unwrap();
+    let perms = body_json(res).await["permissions"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(perms.len(), 1);
+    assert_eq!(perms[0]["subject_id"], "user-9");
+    assert_eq!(perms[0]["access_level"], "read");
+
+    // Self-service subject listing works for the caller's own actor id
+    // (the session user's numeric id) — grant the caller first.
+    let res = app
+        .clone()
+        .oneshot(authed_get(&format!("/documents/{doc_id}"), &token))
+        .await
+        .unwrap();
+    let _ = res;
+    // Listing another subject without manage → the owner has manage
+    // implicitly, so this succeeds for the owner.
+    let res = app
+        .clone()
+        .oneshot(authed_get(
+            &format!("/documents/{doc_id}/permissions/subject/user-9"),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(res).await["permissions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn document_lifecycle_extensions_copy_archive_purge_version() {
+    let (app, token, _dir) = test_app().await;
+    let doc_id = upload_doc(&app, &token).await;
+
+    // Create a second version explicitly.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{doc_id}/versions"),
+            &token,
+            serde_json::json!({ "note": "checkpoint" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let version = body_json(res).await["version"].clone();
+    assert!(version["version_number"].as_u64().unwrap() >= 2);
+    assert_eq!(version["note"], "checkpoint");
+
+    // Copy → new document owned by the caller.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{doc_id}/copy"),
+            &token,
+            serde_json::json!({ "name": "dot-copy.png" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let copy_id = body_json(res).await["document"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(copy_id, doc_id);
+
+    // Archive → unarchive roundtrip.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/documents/{doc_id}/archive"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // Double archive → 400 (store validation).
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/documents/{doc_id}/archive"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/documents/{doc_id}/unarchive"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Purge requires a trashed document → 400 while active.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/documents/{doc_id}/purge"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Trash then purge → gone for good.
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/documents/{doc_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/documents/{doc_id}/purge"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["purged"], true);
+    let res = app
+        .clone()
+        .oneshot(authed_get(&format!("/documents/{doc_id}"), &token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn relationships_endpoints() {
+    let (app, token, _dir) = test_app().await;
+    let a = upload_doc(&app, &token).await;
+    let b = upload_doc(&app, &token).await;
+
+    // Link a → b.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{a}/relationships"),
+            &token,
+            serde_json::json!({
+                "target_document_id": b,
+                "relationship_type": "attachment"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let rel_id = body_json(res).await["relationship"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Both directions are visible; related dedups.
+    for id in [&a, &b] {
+        let res = app
+            .clone()
+            .oneshot(authed_get(
+                &format!("/documents/{id}/relationships"),
+                &token,
+            ))
+            .await
+            .unwrap();
+        let body = body_json(res).await;
+        assert_eq!(
+            body["outgoing"].as_array().unwrap().len() + body["incoming"].as_array().unwrap().len(),
+            1
+        );
+        let res = app
+            .clone()
+            .oneshot(authed_get(&format!("/documents/{id}/related"), &token))
+            .await
+            .unwrap();
+        assert_eq!(body_json(res).await["related"].as_array().unwrap().len(), 1);
+    }
+
+    // Unknown target → 404; self-link → 400; bad rel id → 404.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{a}/relationships"),
+            &token,
+            serde_json::json!({ "target_document_id": "doc-missing" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            &format!("/documents/{a}/relationships"),
+            &token,
+            serde_json::json!({ "target_document_id": a }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/documents/{a}/relationships/rel-nope"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Delete via the target side too (incoming link counts).
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/documents/{b}/relationships/{rel_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["deleted"], true);
+}
+
+#[tokio::test]
+async fn folder_patch_and_delete() {
+    let (app, token, _dir) = test_app().await;
+    let doc_id = upload_doc(&app, &token).await;
+
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/folders",
+            &token,
+            serde_json::json!({ "name": "inbox" }),
+        ))
+        .await
+        .unwrap();
+    let folder_id = body_json(res).await["folder"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Rename.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "PATCH",
+            &format!("/folders/{folder_id}"),
+            &token,
+            serde_json::json!({ "name": "archive" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["folder"]["name"], "archive");
+
+    // Move doc into folder via document patch, then delete folder →
+    // doc returns to root.
+    app.clone()
+        .oneshot(authed_json(
+            "PATCH",
+            &format!("/documents/{doc_id}"),
+            &token,
+            serde_json::json!({ "folder_id": folder_id }),
+        ))
+        .await
+        .unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/folders/{folder_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .clone()
+        .oneshot(authed_get(&format!("/documents/{doc_id}"), &token))
+        .await
+        .unwrap();
+    assert!(body_json(res).await["document"]["folder_id"].is_null());
+
+    // Missing folder → 404 on both verbs.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "PATCH",
+            "/folders/fld-missing",
+            &token,
+            serde_json::json!({ "name": "x" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/folders/fld-missing")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn schedules_crud_and_tick() {
+    let (app, token, _dir) = test_app().await;
+
+    // Empty list.
+    let res = app
+        .clone()
+        .oneshot(authed_get("/schedules", &token))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        body_json(res).await["schedules"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // Validation: zero interval → 400; missing fields → 400.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/schedules",
+            &token,
+            serde_json::json!({
+                "name": "bad", "kind": "system.ping", "interval_secs": 0
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/schedules",
+            &token,
+            serde_json::json!({ "name": "only-name" }),
+        ))
+        .await
+        .unwrap();
+    // Missing required fields → axum's 422 (serde rejection).
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Create a schedule due in the past so tick fires it.
+    let past = 1_000_000i64;
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/schedules",
+            &token,
+            serde_json::json!({
+                "name": "gc",
+                "kind": "system.ping",
+                "payload": {"n": 1},
+                "interval_secs": 60,
+                "next_run_at": past,
+                "enabled": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let schedule = body_json(res).await["schedule"].clone();
+    assert_eq!(schedule["name"], "gc");
+    assert_eq!(schedule["next_run_at"], past);
+
+    // Upsert same name → still one row.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/schedules",
+            &token,
+            serde_json::json!({
+                "name": "gc", "kind": "system.ping", "interval_secs": 120
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .clone()
+        .oneshot(authed_get("/schedules", &token))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(res).await["schedules"].as_array().unwrap().len(),
+        1
+    );
+
+    // Tick at a time after next_run_at enqueues one job; second tick
+    // does not double-fire.
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/schedules/tick",
+            &token,
+            serde_json::json!({ "now": past + 200 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await["enqueued"], 1);
+    let res = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/schedules/tick",
+            &token,
+            serde_json::json!({ "now": past + 200 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(body_json(res).await["enqueued"], 0);
+
+    // Delete → 200; again → 404.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/schedules/gc")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/schedules/gc")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }

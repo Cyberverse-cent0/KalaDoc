@@ -1,19 +1,19 @@
-//! Advanced-operations integration tests for the PDF engine.
-//!
-//! Exercises the extended `ops` surface through the **public API**
-//! (`kaladoc::crates::pdf_engine::*`) only. All fixtures are tiny PDFs
-//! built in-test with `lopdf` — no fixture files, no external tools.
-//!
-//! Operations that require external binaries (`make_searchable` needs
-//! `pdftoppm` + `tesseract`) are exercised "gracefully": the test
-//! accepts either a successful report or a `MissingTool` error, which
-//! is the engine's honest contract.
-//!
-//! Coverage gaps (no public op exists for these, so they cannot be
-//! tested here): named-destination create/read/update (only bulk
-//! removal via `remove_named_objects` is covered), page transitions,
-//! optional-content (OCG) inspection, and a dedicated font-inspection
-//! report.
+// Advanced-operations integration tests for the PDF engine.
+//
+// Exercises the extended `ops` surface through the **public API**
+// (`kaladoc::crates::pdf_engine::*`) only. All fixtures are tiny PDFs
+// built in-test with `lopdf` — no fixture files, no external tools.
+//
+// Operations that require external binaries (`make_searchable` needs
+// `pdftoppm` + `tesseract`) are exercised "gracefully": the test
+// accepts either a successful report or a `MissingTool` error, which
+// is the engine's honest contract.
+//
+// Coverage gaps (no public op exists for these, so they cannot be
+// tested here): named-destination create/read/update (only bulk
+// removal via `remove_named_objects` is covered), page transitions,
+// optional-content (OCG) inspection, and a dedicated font-inspection
+// report.
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Document, Object, Stream, dictionary};
@@ -188,6 +188,11 @@ fn pdf_with_named_dest() -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 use kaladoc::crates::pdf_engine::{
+    AnnotFilter, BookletSpec, ColorReport, DrawSpec, EditOutcome, HeaderFooterSpec, InkSpec,
+    BookletMode, BookletSize, DupPos, InsertPos, MarkupKind, MergeMode, MetadataPatch,
+    OrientMode, OutlineItemSpec, PageNumberStyle, PageSize, PageSizeSpec, PdfaLevel, PdfuaLevel,
+    PdfxLevel, Shape, ShapeStyle, SizeUnit, SplitMode, Stroke, TimestampAlgorithm,
+    TextEdit, TextFieldSpec, add_ink, add_page_numbers, booklet,
     clear_form, clear_page_labels, create_portfolio, create_text_field, delete_form_field,
     detect_orientation, document_digest, draw_shapes, duplicate_pages, edit_text, extract_metadata,
     extract_text, fill_form, get_page_labels, get_page_rotations, get_page_sizes, get_xmp,
@@ -290,7 +295,7 @@ fn adv_edit_text_replaces_and_reports() {
     assert_eq!(outcome.report.replacements, 1);
     assert_eq!(outcome.report.pages_affected, vec![1]);
 
-    let pages = extract_text(&outcome.bytes, None).unwrap();
+    let pages = extract_text(&outcome.bytes, None, &unlimited()).unwrap();
     assert!(pages[0].text.contains("goodbye"));
     assert!(!pages[0].text.contains("hello"));
 }
@@ -331,7 +336,7 @@ fn adv_redact_removes_matching_text_ops() {
     let pdf = pdf_text(&["top secret page", "clean page"]);
     let out = redact(&pdf, &["secret".to_string()], None, &unlimited()).unwrap();
     assert_eq!(page_count(&out), 2);
-    let pages = extract_text(&out, None).unwrap();
+    let pages = extract_text(&out, None, &unlimited()).unwrap();
     assert!(!pages[0].text.contains("secret"));
     assert!(pages[1].text.contains("clean"));
 }
@@ -549,7 +554,7 @@ fn adv_duplicate_pages() {
     assert_eq!(page_count(&out), 4);
     assert_eq!(positions.len(), 2);
 
-    let texts = extract_text(&out, None).unwrap();
+    let texts = extract_text(&out, None, &unlimited()).unwrap();
     assert_eq!(texts.len(), 4);
     assert!(texts[2].text.contains("one"));
     assert!(texts[3].text.contains("one"));
@@ -580,7 +585,7 @@ fn adv_interleave_documents() {
     let b = pdf_text(&["b1"]);
     let out = interleave(&[&a, &b], &unlimited()).unwrap();
     assert_eq!(page_count(&out), 3);
-    let pages = extract_text(&out, None).unwrap();
+    let pages = extract_text(&out, None, &unlimited()).unwrap();
     assert!(pages[0].text.contains("a1"));
     assert!(pages[1].text.contains("b1"));
     assert!(pages[2].text.contains("a2"));
@@ -679,17 +684,17 @@ fn adv_merge_modes() {
     let b = pdf_text(&["b1", "b2"]);
 
     let seq = merge_mode(&[&a, &b], MergeMode::Sequential, &unlimited()).unwrap();
-    let pages = extract_text(&seq, None).unwrap();
+    let pages = extract_text(&seq, None, &unlimited()).unwrap();
     let order: Vec<String> = pages.iter().map(|p| p.text.trim().to_string()).collect();
     assert_eq!(order, vec!["a1", "a2", "b1", "b2"]);
 
     let inter = merge_mode(&[&a, &b], MergeMode::Interleave, &unlimited()).unwrap();
-    let pages = extract_text(&inter, None).unwrap();
+    let pages = extract_text(&inter, None, &unlimited()).unwrap();
     let order: Vec<String> = pages.iter().map(|p| p.text.trim().to_string()).collect();
     assert_eq!(order, vec!["a1", "b1", "a2", "b2"]);
 
     let rev = merge_mode(&[&a, &b], MergeMode::Reverse, &unlimited()).unwrap();
-    let pages = extract_text(&rev, None).unwrap();
+    let pages = extract_text(&rev, None, &unlimited()).unwrap();
     let order: Vec<String> = pages.iter().map(|p| p.text.trim().to_string()).collect();
     assert_eq!(order, vec!["b1", "b2", "a1", "a2"]);
 }
@@ -813,8 +818,9 @@ fn adv_document_digest_sha256_known_answer() {
 fn adv_make_searchable_graceful_without_tools() {
     let pdf = pdf_text(&["scan me"]);
     match make_searchable(&pdf, None, &unlimited()) {
-        Ok(report) => {
-            // Tools present: pipeline ran.
+        Ok((_bytes, report)) => {
+            // Tools present: pipeline ran and produced PDF bytes.
+            assert!(_bytes.starts_with(b"%PDF"));
             assert!(report.pages_processed >= 0);
         }
         Err(e) => {

@@ -17,7 +17,7 @@ Source: `src/crates/job_engine/`
 | `JobHandler` | `handler.rs` | Trait handlers implement; object-safe boxed-future `handle()` |
 | `JobContext` | `handler.rs` | Shared services handed to handlers (currently the `SqlitePool`) |
 | `NewJob` / `Job` | `job.rs` | Enqueue input / row shape |
-| Built-in handlers | `application/job_handlers.rs` | `document.ingest`, `system.ping`, `pdf.inspect`, `storage.gc_staging` |
+| Built-in handlers | `application/job_handlers.rs` | `document.ingest`, `document.metadata_extract`, `document.index`, `thumbnail.generate`, `document.pdf_op`, `pipeline.run`, `pdf.inspect`, `storage.gc_staging`, `system.ping` |
 
 Claiming is atomic: `UPDATE ... WHERE id = (SELECT ... pending ...)`
 with `RETURNING`, so two engines can share one database safely.
@@ -73,6 +73,8 @@ job `kind` on the engine at worker startup:
 | `document.metadata_extract` | `{document_id, artifact_id?}` | Sniffs the format and extracts PDF metadata into document metadata. |
 | `document.index` | `{document_id, artifact_id?}` | Extracts searchable text into an `index` metadata field. |
 | `thumbnail.generate` | `{document_id, artifact_id?}` | Extracts an embedded PDF thumbnail image into storage. |
+| `document.pdf_op` | `{document_id, artifact_id?, op, params?}` | Runs one `pdf_engine` op (validated against `PDF_OPS`, ~100 ops) over the resolved artifact's bytes. Engine-level failures are recorded as terminal `{op}_status` values (`error`/`unsupported`/`unavailable`/`skipped_too_large`), not job retries; only infrastructure failures consume attempts. Results land in document metadata under `pdf_ops.{op}` plus produced output files in storage. Prefer `enqueue_pdf_op`, which validates `op` up front. |
+| `pipeline.run` | `{document_id, artifact_id?, pipeline}` | Runs a full `PipelineDefinition` (JSON) through `pipeline_engine`; producers resolve built-in pipeline names to a definition before enqueueing so retries replay identically. Use `enqueue_pipeline_run`. |
 | `pdf.inspect` | `{ "path": "<relative under storage root>", "max_bytes"?: u64 }` | Size-checks before reading (default cap 100 MiB), validates bytes via `security_engine::validate_pdf`, inspects via `pdf_engine`, writes `<path>.inspect.json` next to the input. Paths are confined to the storage root — absolute paths and `..` are rejected. |
 | `storage.gc_staging` | `{ "retention_secs"?: u64 }` | Deletes `<storage_root>/staging/` entries older than the retention window (default 86400 s). Abandoned staging objects from interrupted uploads are cleaned up here — the issue's crash-recovery requirement. |
 
@@ -92,9 +94,10 @@ in `job_handlers.rs` for the full contract):
   `failed` / `skipped_too_large`) backed by audit events.
 
 Producers should enqueue via the `enqueue_ingest`,
-`enqueue_metadata_extract`, `enqueue_index`, and `enqueue_thumbnail`
-helpers rather than hand-building payloads — they construct the
-documented payload contracts and stamp `processing_status = queued`.
+`enqueue_metadata_extract`, `enqueue_index`, `enqueue_thumbnail`,
+`enqueue_pdf_op`, and `enqueue_pipeline_run` helpers rather than
+hand-building payloads — they construct the documented payload
+contracts and stamp `processing_status = queued`.
 
 Handlers resolve the storage root via `AppConfig::load_lenient()` →
 `to_storage_config().root_dir`.
@@ -169,7 +172,9 @@ stale_after_secs = 600      # running jobs older than this are reaped
 ```
 
 Env overrides: `JOB_POLL_INTERVAL_SECS`, `JOB_MAX_ATTEMPTS`,
-`JOB_BACKOFF_BASE_SECS`, `JOB_STALE_AFTER_SECS`.
+`JOB_BACKOFF_BASE_SECS`, `JOB_STALE_AFTER_SECS`, plus
+`JOB_RECOVERY_TIMEOUT_SECS` as an alias for `stale_after_secs` (it wins
+when both are set).
 
 `poll_interval_secs = 0` and `default_max_attempts = 0` are rejected at
 config load.

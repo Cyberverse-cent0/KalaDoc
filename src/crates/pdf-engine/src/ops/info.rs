@@ -61,3 +61,89 @@ fn info_string(doc: &Document, key: &[u8], encrypted: bool) -> Option<String> {
     let value = dict.get(key).ok()?;
     decode_text_string(value).ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crates::core::engine::EngineLimits;
+    use crate::crates::pdf_engine::error::PdfError;
+    use crate::crates::pdf_engine::ops::encrypt::{PdfPermissions, encrypt};
+    use crate::crates::pdf_engine::ops::test_utils::{
+        page_count, pdf_with_pages, pdf_with_pages_and_title,
+    };
+    use lopdf::dictionary;
+
+    #[test]
+    fn reports_metadata_and_page_count() {
+        let pdf = pdf_with_pages_and_title(&["one", "two", "three"], "My Doc Title");
+        let info = inspect(&pdf, &EngineLimits::default()).unwrap();
+        assert_eq!(info.page_count, 3);
+        assert_eq!(page_count(&pdf), 3);
+        assert_eq!(info.title.as_deref(), Some("My Doc Title"));
+        assert_eq!(info.author.as_deref(), Some("KalaDoc Tests"));
+        assert_eq!(info.creator.as_deref(), Some("kaladoc-test-utils"));
+        assert_eq!(info.producer.as_deref(), Some("lopdf"));
+        assert!(!info.encrypted);
+        assert_eq!(info.file_size_bytes, pdf.len() as u64);
+    }
+
+    #[test]
+    fn reports_missing_metadata_as_none() {
+        // A bare document with no /Info dictionary.
+        let mut doc = lopdf::Document::with_version("1.4");
+        let pages_id = doc.new_object_id();
+        doc.objects.insert(
+            pages_id,
+            lopdf::Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => Vec::<lopdf::Object>::new(),
+                "Count" => 0,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        let mut pdf = Vec::new();
+        doc.save_to(&mut pdf).unwrap();
+
+        let info = inspect(&pdf, &EngineLimits::default()).unwrap();
+        assert_eq!(info.page_count, 0);
+        assert_eq!(info.title, None);
+        assert_eq!(info.author, None);
+        assert!(!info.encrypted);
+    }
+
+    #[test]
+    fn tolerates_encrypted_input() {
+        let plain = pdf_with_pages_and_title(&["secret"], "Hidden Title");
+        let encrypted = encrypt(
+            &plain,
+            "pw",
+            None,
+            PdfPermissions::default(),
+            &EngineLimits::default(),
+        )
+        .unwrap();
+        let info = inspect(&encrypted, &EngineLimits::default()).unwrap();
+        assert!(info.encrypted);
+        // Metadata strings cannot be decoded without decrypting.
+        assert_eq!(info.title, None);
+        assert_eq!(info.author, None);
+        assert_eq!(info.page_count, 1);
+    }
+
+    #[test]
+    fn rejects_unloadable_input_and_enforces_limits() {
+        assert!(inspect(b"junk", &EngineLimits::default()).is_err());
+
+        let pdf = pdf_with_pages(&["one", "two"]);
+        let limits = EngineLimits {
+            max_pages: Some(1),
+            ..EngineLimits::default()
+        };
+        let err = inspect(&pdf, &limits).unwrap_err();
+        assert!(matches!(err, PdfError::LimitExceeded(_)), "got {err:?}");
+    }
+}

@@ -260,10 +260,13 @@ mod tests {
     use crate::crates::job_engine::JobHandler;
     use crate::crates::job_engine::job::JobStatus;
     use serde_json::json;
-    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use std::time::Instant;
 
     async fn test_pool() -> SqlitePool {
         let pool = SqlitePoolOptions::new()
@@ -1006,5 +1009,424 @@ mod tests {
         let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
         assert_eq!(jobs[0].status, JobStatus::Pending);
         assert_eq!(jobs[0].progress, None);
+    }
+
+    // ------------------------------------------------------------------
+    // Multi-engine tests. `sqlite::memory:` databases are per-pool, so
+    // these use a shared on-disk file pool that several `JobEngine`s
+    // can connect to concurrently.
+    // ------------------------------------------------------------------
+
+    /// A pool backed by a real file so multiple engines (and multiple
+    /// connections) share one database. Returns the tempdir guard —
+    /// keep it alive for the test's duration.
+    async fn shared_file_pool() -> (tempfile::TempDir, SqlitePool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.db");
+        let opts = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(8)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        store::create_jobs_table(&pool).await.unwrap();
+        (dir, pool)
+    }
+
+    /// Polls `list_jobs` until `job_id` reaches `status` or ~5s pass.
+    async fn wait_for_job_status(pool: &SqlitePool, job_id: i64, status: JobStatus) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let jobs = store::list_jobs(pool, None, 200).await.unwrap();
+            if let Some(job) = jobs.iter().find(|j| j.id == job_id) {
+                if job.status == status {
+                    return;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for job {job_id} to reach {status:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+
+    /// Counts every `handle()` invocation per job id, tracks peak
+    /// handler concurrency, and yields briefly so concurrent claims
+    /// overlap in time.
+    struct RaceHandler {
+        entries: Mutex<HashMap<i64, u32>>,
+        inflight: AtomicUsize,
+        max_inflight: AtomicUsize,
+    }
+
+    impl RaceHandler {
+        fn new() -> Self {
+            Self {
+                entries: Mutex::new(HashMap::new()),
+                inflight: AtomicUsize::new(0),
+                max_inflight: AtomicUsize::new(0),
+            }
+        }
+
+        fn entry_count(&self, job_id: i64) -> u32 {
+            self.entries
+                .lock()
+                .unwrap()
+                .get(&job_id)
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
+    impl JobHandler for RaceHandler {
+        fn handle<'a>(
+            &'a self,
+            _ctx: &'a JobContext,
+            job: &'a Job,
+        ) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'a>> {
+            Box::pin(async move {
+                *self.entries.lock().unwrap().entry(job.id).or_insert(0) += 1;
+                let now = self.inflight.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                self.max_inflight.fetch_max(now, AtomicOrdering::SeqCst);
+                // Widen the claim→complete window so a buggy double
+                // claim would actually overlap two handler runs.
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                self.inflight.fetch_sub(1, AtomicOrdering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn multiple_engines_claim_each_job_exactly_once() {
+        let (_dir, pool) = shared_file_pool().await;
+        const N_JOBS: usize = 60;
+        const N_ENGINES: usize = 4;
+
+        let handler = Arc::new(RaceHandler::new());
+        let mut engines = Vec::new();
+        for _ in 0..N_ENGINES {
+            let mut eng = engine(pool.clone());
+            eng.register("race.ping", handler.clone());
+            engines.push(Arc::new(eng));
+        }
+
+        // Seed the queue with a single batch insert.
+        let jobs: Vec<NewJob> = (0..N_JOBS)
+            .map(|n| NewJob {
+                kind: "race.ping".into(),
+                payload: json!({"n": n}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .collect();
+        store::enqueue_batch(&pool, &jobs, 3).await.unwrap();
+
+        // Every engine drains the shared queue concurrently until the
+        // monitor below observes all jobs succeeded.
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::new();
+        for eng in &engines {
+            let eng = eng.clone();
+            let stop = stop.clone();
+            handles.push(tokio::spawn(async move {
+                while !stop.load(AtomicOrdering::SeqCst) {
+                    match eng.run_once().await {
+                        Ok(true) => {}
+                        Ok(false) => tokio::time::sleep(Duration::from_millis(1)).await,
+                        Err(_) => break,
+                    }
+                }
+            }));
+        }
+
+        // Wait until every job is terminal-success, then stop engines.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let listed = store::list_jobs(&pool, None, 500).await.unwrap();
+            let done = listed
+                .iter()
+                .filter(|j| j.status == JobStatus::Succeeded)
+                .count();
+            if done == N_JOBS {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out draining queue: {done}/{N_JOBS} succeeded, \
+                 statuses: {:?}",
+                listed.iter().map(|j| j.status).collect::<Vec<_>>()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        stop.store(true, AtomicOrdering::SeqCst);
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Exactly-once: each job id was handed to a handler once, was
+        // claimed once (attempts == 1), and finished succeeded.
+        let listed = store::list_jobs(&pool, None, 500).await.unwrap();
+        assert_eq!(listed.len(), N_JOBS);
+        for job in &listed {
+            assert_eq!(
+                job.status,
+                JobStatus::Succeeded,
+                "job {} not succeeded",
+                job.id
+            );
+            assert_eq!(job.attempts, 1, "job {} claimed more than once", job.id);
+            assert_eq!(
+                handler.entry_count(job.id),
+                1,
+                "job {} executed {} times",
+                job.id,
+                handler.entry_count(job.id)
+            );
+        }
+        let total: u32 = listed.iter().map(|j| handler.entry_count(j.id)).sum();
+        assert_eq!(total, N_JOBS as u32);
+        // Evidence for the report: handlers did overlap in time.
+        assert!(
+            handler.max_inflight.load(AtomicOrdering::SeqCst) > 1,
+            "expected handler executions to overlap across engines"
+        );
+    }
+
+    /// Handler that never completes — simulates a worker killed
+    /// mid-job when the engine task is aborted.
+    struct HangHandler;
+
+    impl JobHandler for HangHandler {
+        fn handle<'a>(
+            &'a self,
+            _ctx: &'a JobContext,
+            _job: &'a Job,
+        ) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'a>> {
+            Box::pin(async move {
+                std::future::pending::<()>().await;
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn engine_crash_between_claim_and_finish_is_recovered_once() {
+        let (_dir, pool) = shared_file_pool().await;
+
+        // Engine A claims the job then "crashes" (task aborted) before
+        // store::complete runs — the row stays `running`.
+        let mut eng_a = engine(pool.clone());
+        eng_a.register("crash.hang", Arc::new(HangHandler));
+        let job = eng_a
+            .enqueue(&NewJob {
+                kind: "crash.hang".into(),
+                payload: json!({}),
+                priority: 0,
+                run_at: None,
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+
+        let eng_a = Arc::new(eng_a);
+        let crashed = {
+            let eng_a = eng_a.clone();
+            tokio::spawn(async move { eng_a.run_once().await })
+        };
+        wait_for_job_status(&pool, job.id, JobStatus::Running).await;
+        crashed.abort();
+        let _ = crashed.await;
+
+        // Engine B starts up: recover() requeues the orphaned row and
+        // a single run_once completes it exactly once.
+        let mut eng_b = engine(pool.clone());
+        let handler = Arc::new(CountingHandler {
+            calls: AtomicUsize::new(0),
+            fail_times: 0,
+        });
+        eng_b.register("crash.hang", handler.clone());
+
+        assert_eq!(eng_b.recover().await.unwrap(), 1);
+        assert!(eng_b.run_once().await.unwrap());
+        // Queue drained — no phantom re-execution of the orphan.
+        assert!(!eng_b.run_once().await.unwrap());
+
+        assert_eq!(handler.calls.load(AtomicOrdering::SeqCst), 1);
+        let jobs = store::list_jobs(&pool, None, 10).await.unwrap();
+        let job = jobs.iter().find(|j| j.id == job.id).unwrap();
+        assert_eq!(job.status, JobStatus::Succeeded);
+        // Claimed twice (crash + recovery); recover() intentionally
+        // does not reset attempts.
+        assert_eq!(job.attempts, 2);
+    }
+
+    /// Fails every job whose payload `n` equals `fail_n`.
+    struct FailOnN {
+        fail_n: i64,
+        calls: Mutex<HashMap<i64, u32>>,
+    }
+
+    impl JobHandler for FailOnN {
+        fn handle<'a>(
+            &'a self,
+            _ctx: &'a JobContext,
+            job: &'a Job,
+        ) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'a>> {
+            Box::pin(async move {
+                let n = job.payload["n"].as_i64().unwrap_or(-1);
+                *self.calls.lock().unwrap().entry(n).or_insert(0) += 1;
+                if n == self.fail_n {
+                    Err(JobError::Failed(format!("item {n} failed")))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_partial_failure_leaves_siblings_unaffected() {
+        let pool = test_pool().await;
+        let mut eng = engine(pool.clone());
+        let handler = Arc::new(FailOnN {
+            fail_n: 2,
+            calls: Mutex::new(HashMap::new()),
+        });
+        eng.register("test.partial", handler.clone());
+
+        // One batch where the middle item is capped at 2 attempts and
+        // always fails; siblings use the engine default (3).
+        let mk = |n: i64, max: Option<u32>| NewJob {
+            kind: "test.partial".into(),
+            payload: json!({"n": n}),
+            priority: 0,
+            run_at: None,
+            max_attempts: max,
+        };
+        let jobs = eng
+            .enqueue_batch(&[mk(1, None), mk(2, Some(2)), mk(3, None)])
+            .await
+            .unwrap();
+        let batch_id = jobs[0].id;
+
+        // Drain until the batch reaches a terminal aggregate state.
+        // backoff_base = 0 → the failing item's retries are immediate.
+        for _ in 0..50 {
+            let _ = eng.run_once().await.unwrap();
+            if eng
+                .batch_progress(batch_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_complete()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        let progress = eng.batch_progress(batch_id).await.unwrap().unwrap();
+        assert!(progress.is_complete());
+        assert_eq!(progress.items_total, 3);
+        assert_eq!(progress.items_succeeded, 2);
+        assert_eq!(progress.items_failed, 1);
+        assert_eq!(progress.items_pending, 0);
+
+        let listed = store::batch_jobs(&pool, batch_id).await.unwrap();
+        let by_n = |n: i64| {
+            listed
+                .iter()
+                .find(|j| j.payload["n"].as_i64() == Some(n))
+                .unwrap()
+        };
+        assert_eq!(by_n(1).status, JobStatus::Succeeded);
+        assert_eq!(by_n(1).attempts, 1);
+        assert_eq!(by_n(3).status, JobStatus::Succeeded);
+        assert_eq!(by_n(3).attempts, 1);
+
+        // The failing item retried exactly up to its own max_attempts
+        // and failed terminally; siblings ran exactly once.
+        let failed = by_n(2);
+        assert_eq!(failed.status, JobStatus::Failed);
+        assert_eq!(failed.attempts, 2);
+        assert_eq!(failed.last_error.as_deref(), Some("item 2 failed"));
+        let calls = handler.calls.lock().unwrap();
+        assert_eq!(calls.get(&1), Some(&1));
+        assert_eq!(calls.get(&2), Some(&2));
+        assert_eq!(calls.get(&3), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn list_jobs_filters_by_status_orders_newest_first_and_limits() {
+        let pool = test_pool().await;
+        let mut eng = engine(pool.clone());
+        eng.register(
+            "test.ping",
+            Arc::new(CountingHandler {
+                calls: AtomicUsize::new(0),
+                fail_times: 0,
+            }),
+        );
+
+        // Three jobs: run two to success, leave one pending, and add
+        // one manually-failed row for filter coverage.
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            ids.push(
+                eng.enqueue(&NewJob {
+                    kind: "test.ping".into(),
+                    payload: json!({}),
+                    priority: 0,
+                    run_at: None,
+                    max_attempts: None,
+                })
+                .await
+                .unwrap()
+                .id,
+            );
+        }
+        eng.run_once().await.unwrap();
+        eng.run_once().await.unwrap();
+
+        // Highest-priority/id ordering: jobs are claimed oldest-first,
+        // so ids[0] and ids[1] succeeded, ids[2] stays pending.
+        sqlx::query("UPDATE jobs_tbl SET status = 'failed', finished_at = ? WHERE id = ?")
+            .bind(now_unix())
+            .bind(ids[2])
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let succeeded = store::list_jobs(&pool, Some(JobStatus::Succeeded), 10)
+            .await
+            .unwrap();
+        assert_eq!(succeeded.len(), 2);
+        assert!(succeeded.iter().all(|j| j.status == JobStatus::Succeeded));
+        // Newest first.
+        assert!(succeeded[0].id > succeeded[1].id);
+        assert_eq!(succeeded[0].id, ids[1]);
+        assert_eq!(succeeded[1].id, ids[0]);
+
+        let pending = store::list_jobs(&pool, Some(JobStatus::Pending), 10)
+            .await
+            .unwrap();
+        assert!(pending.is_empty());
+
+        let failed = store::list_jobs(&pool, Some(JobStatus::Failed), 10)
+            .await
+            .unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].id, ids[2]);
+
+        // Limit applies after ordering: newest two of all three.
+        let all = store::list_jobs(&pool, None, 2).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, ids[2]);
+        assert_eq!(all[1].id, ids[1]);
     }
 }

@@ -228,9 +228,8 @@ pub fn orient(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crates::multimedia_engine::runtime::discovery::{self, find_tool};
+    use crate::crates::multimedia_engine::runtime::discovery::find_tool;
     use crate::crates::multimedia_engine::runtime::tempdir::TempDir;
-    use std::path::Path;
     use std::process::Command;
 
     fn runtime() -> Option<Runtime> {

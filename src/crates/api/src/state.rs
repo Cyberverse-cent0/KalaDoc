@@ -6,9 +6,10 @@
 //! [`ResourceLimits`] applied to uploads. Construct it once at startup
 //! and share it as `Arc<ApiState>` — it is the router state.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::config::AppConfig;
+use crate::config::{ApiKey, AppConfig};
 use crate::crates::application::Organization::init_db::SessionConfig;
 use crate::crates::application::services::{AppServices, ServiceError};
 use crate::crates::engine_registry::EngineRegistry;
@@ -29,6 +30,12 @@ pub struct ApiState {
     /// through it (storage ops need `&mut`, which `Arc<ApiState>`
     /// cannot provide, so each download builds a fresh backend).
     pub storage_config: StorageConfig,
+    /// Static API keys accepted as `Authorization: Bearer <key>`
+    /// alongside session tokens (`api.api_keys` / `KALADOC_API_KEYS`).
+    pub api_keys: Vec<ApiKey>,
+    /// Route groups disabled via `KALADOC_API_DISABLE` / TOML
+    /// `api.disabled_groups`; see [`crate::crates::api::flags`].
+    pub disabled_groups: BTreeSet<String>,
 }
 
 impl ApiState {
@@ -46,6 +53,8 @@ impl ApiState {
             session_config: config.to_db_config().session,
             security_limits: ResourceLimits::default(),
             storage_config: config.to_storage_config(),
+            api_keys: config.api.api_keys.clone(),
+            disabled_groups: config.api.disabled_groups.iter().cloned().collect(),
         })
     }
 
@@ -64,12 +73,26 @@ impl ApiState {
             session_config,
             security_limits: ResourceLimits::default(),
             storage_config,
+            api_keys: Vec::new(),
+            disabled_groups: BTreeSet::new(),
         }
     }
 
     /// Overrides the upload [`ResourceLimits`] (builder-style).
     pub fn with_security_limits(mut self, limits: ResourceLimits) -> Self {
         self.security_limits = limits;
+        self
+    }
+
+    /// Replaces the static API keys (builder-style; tests/embedders).
+    pub fn with_api_keys(mut self, keys: Vec<ApiKey>) -> Self {
+        self.api_keys = keys;
+        self
+    }
+
+    /// Replaces the disabled route groups (builder-style).
+    pub fn with_disabled_groups(mut self, groups: impl IntoIterator<Item = String>) -> Self {
+        self.disabled_groups = groups.into_iter().collect();
         self
     }
 

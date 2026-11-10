@@ -2,16 +2,18 @@
 //!
 //! # Why a hand-rolled TIFF writer
 //!
-//! The `image` crate's TIFF codec (including CMYK photometric) is
-//! behind its `tiff` cargo feature, which this crate does not enable
-//! (see the root `Cargo.toml`). Rather than approximate CMYK as a
-//! lossy RGB re-encode, [`cmyk`] writes a minimal, spec-compliant
-//! **uncompressed** TIFF directly: baseline TIFF 6.0, little-endian,
+//! The `image` crate's TIFF codec *is* compiled in (the `tiff`
+//! feature), but its [`image::codecs::tiff::TiffEncoder`] only emits
+//! gray/RGB/RGBA photometrics — there is no CMYK/separated encoder.
+//! Rather than approximate CMYK as a lossy RGB re-encode, [`cmyk`]
+//! writes a minimal, spec-compliant **uncompressed** TIFF directly:
+//! baseline TIFF 6.0, little-endian,
 //! `PhotometricInterpretation = 5` (Separated), `InkSet = 1` (CMYK),
 //! `SamplesPerPixel = 4`, `BitsPerSample = 8` per sample, chunky
 //! (`PlanarConfiguration = 1`) single-strip layout. No compression,
 //! no tiling, no alpha — readers that support CMYK TIFF (most print
-//! pipelines, `image` with the `tiff` feature, libtiff) will read it.
+//! pipelines, libtiff, and this engine's own `tiff` decoder, which
+//! maps separated CMYK back to RGB) will read it.
 //!
 //! # Conversion
 //!
@@ -35,7 +37,7 @@
 use image::GenericImageView;
 
 use crate::crates::core::engine::EngineLimits;
-use crate::crates::image_engine::error::ImageResult;
+use crate::crates::image_engine::error::{ImageError, ImageResult};
 
 use super::load::{decode, normalize_8bit};
 
@@ -56,6 +58,14 @@ pub fn cmyk(input: &[u8], limits: &EngineLimits) -> ImageResult<Vec<u8>> {
     let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 4);
     for px in rgba.pixels() {
         pixels.extend_from_slice(&rgb_to_cmyk(px.0[0], px.0[1], px.0[2], px.0[3]));
+    }
+    // The TIFF writer emits 32-bit StripOffsets/StripByteCounts; a
+    // strip larger than u32::MAX would silently truncate.
+    if pixels.len() > u32::MAX as usize {
+        return Err(ImageError::InvalidInput(format!(
+            "CMYK output would be {} bytes, exceeding the TIFF 32-bit strip limit",
+            pixels.len()
+        )));
     }
 
     Ok(encode_cmyk_tiff(width, height, &pixels))
@@ -369,5 +379,40 @@ mod tests {
     #[test]
     fn decode_still_rejects_garbage_for_cmyk() {
         assert!(cmyk(b"not an image", &EngineLimits::default()).is_err());
+    }
+
+    #[test]
+    fn cmyk_tiff_is_readable_by_image_tiff_decoder() {
+        // The `tiff` feature is enabled, so `image`'s real TIFF
+        // decoder must read our hand-rolled file — this is the
+        // strongest available check that the container is
+        // spec-compliant (it maps separated CMYK back to RGB8).
+        let input = png_of(&[
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 255, 255],
+        ]);
+        let out = cmyk(&input, &EngineLimits::default()).expect("cmyk must succeed");
+
+        let decoded = image::load_from_memory(&out).expect("image crate must decode the TIFF");
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
+        let rgb = decoded.to_rgb8();
+
+        // Naive CMYK→RGB inverts cleanly for saturated primaries and
+        // white; allow a few levels of rounding slack.
+        let expected = [[255u8, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]];
+        for (i, want) in expected.iter().enumerate() {
+            let p = *rgb.get_pixel((i % 2) as u32, (i / 2) as u32);
+            for c in 0..3 {
+                let diff = i32::from(p[c]) - i32::from(want[c]);
+                assert!(
+                    diff.abs() <= 10,
+                    "pixel {i} channel {c}: got {}, want {}",
+                    p[c],
+                    want[c]
+                );
+            }
+        }
     }
 }

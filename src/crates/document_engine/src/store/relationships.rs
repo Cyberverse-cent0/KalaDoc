@@ -1,5 +1,6 @@
 //! Document relationship persistence — directed links between documents.
 
+use serde::Serialize;
 use serde_json::json;
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 
@@ -185,7 +186,7 @@ pub async fn list_incoming_relationships(
 }
 
 /// A document related to another via a [`DocumentRelationship`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RelatedDocument {
     /// The other document in the relationship.
     pub document: Document,
