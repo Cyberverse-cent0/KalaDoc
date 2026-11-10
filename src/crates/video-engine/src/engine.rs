@@ -18,6 +18,7 @@
 //! never approximated.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::crates::core::engine::{
     EngineCapabilities, EngineFuture, EngineHealth, EngineHealthStatus, EngineKind, EngineLimits,
@@ -32,6 +33,9 @@ use crate::crates::video_engine::model::{
 use crate::crates::video_engine::ops;
 use crate::crates::video_engine::ops::audio_time::{AudioSpeedParams, ChannelLayout, LoopParams};
 use crate::crates::video_engine::ops::av_visual::VisualStyle;
+use crate::crates::video_engine::ops::capture::{
+    CaptureFormat, CaptureInputOpts, CaptureOutputOpts, CaptureSource,
+};
 use crate::crates::video_engine::ops::composite::{
     PictureInPictureParams, SideBySideParams, SplitScreenParams,
 };
@@ -40,6 +44,7 @@ use crate::crates::video_engine::ops::enhance::{
 };
 use crate::crates::video_engine::ops::hdr::HdrToneMapParams;
 use crate::crates::video_engine::ops::interpolate::InterpolateParams;
+use crate::crates::video_engine::ops::live::{StreamCapabilityReport, StreamPushOpts};
 use crate::crates::video_engine::ops::metadata_export::ExportFormat;
 use crate::crates::video_engine::ops::preview::{PreviewFormat, PreviewParams};
 use crate::crates::video_engine::ops::proxy::ProxyParams;
@@ -893,6 +898,104 @@ impl VideoEngine {
     /// Best-guess usable hwaccel on this host (`None` → software).
     pub fn detect_hwaccel(&self) -> Option<String> {
         ops::capture::detect_hwaccel()
+    }
+
+    /// Validate a capture device string for `format` without building
+    /// arguments. Thin wrapper over the same grammar
+    /// [`capture_input_args`] enforces; returns
+    /// [`VideoError::InvalidInput`] on malformed specs.
+    pub fn validate_capture_device(&self, format: CaptureFormat, device: &str) -> VideoResult<()> {
+        let source = CaptureSource {
+            format,
+            device: device.to_string(),
+            audio_device: None,
+            audio_format: None,
+        };
+        // capture_args validates the device before emitting options;
+        // default input opts contribute no additional constraints.
+        ops::capture::capture_args(&source, &CaptureInputOpts::default()).map(|_| ())
+    }
+
+    /// Input-side ffmpeg arguments for a capture `source` +
+    /// `in_opts` (`-f <fmt> <input opts> -i <device> ...`). Pure
+    /// builder — nothing is executed. See [`ops::capture::capture_args`].
+    pub fn capture_input_args(
+        &self,
+        source: &CaptureSource,
+        in_opts: &CaptureInputOpts,
+    ) -> VideoResult<Vec<String>> {
+        ops::capture::capture_args(source, in_opts)
+    }
+
+    /// Output-side ffmpeg arguments for capture `out_opts`
+    /// (`-t`/`-s`/`-r`/codec selection). Pure builder — nothing is
+    /// executed. See [`ops::capture::capture_output_args`].
+    pub fn capture_output_args(&self, out_opts: &CaptureOutputOpts) -> VideoResult<Vec<String>> {
+        ops::capture::capture_output_args(out_opts)
+    }
+
+    /// Full ffmpeg argv for a capture session:
+    /// `["-hide_banner", "-y", <input args>, <output args>,
+    /// <output_path>]`. Pure builder — the caller decides whether and
+    /// where to execute it. See [`ops::capture::capture_argv`].
+    pub fn capture_argv(
+        &self,
+        source: &CaptureSource,
+        in_opts: &CaptureInputOpts,
+        out_opts: &CaptureOutputOpts,
+        output_path: &str,
+    ) -> VideoResult<Vec<String>> {
+        ops::capture::capture_argv(source, in_opts, out_opts, output_path)
+    }
+
+    // ------------------------------------------------------------------
+    // Live streaming (safe surface: no method pushes a stream)
+    // ------------------------------------------------------------------
+
+    /// Stream protocols this engine permits pushing to — the static
+    /// whitelist enforced by [`validate_stream_url`] (rtmp/rtsp/srt/
+    /// udp/rtp/http/https/icecast families). Does not probe ffmpeg;
+    /// use [`stream_targets`] for what this build actually supports.
+    pub fn stream_protocols(&self) -> &'static [&'static str] {
+        ops::live::STREAM_PROTOCOLS
+    }
+
+    /// Stream output protocols this ffmpeg build actually supports:
+    /// the whitelist ∩ output-capable protocols from
+    /// `ffmpeg -protocols`. Sorted, lowercase. Errors propagate
+    /// honestly (`MissingTool`/`ExternalTool`).
+    pub fn stream_targets(&self) -> VideoResult<Vec<String>> {
+        ops::live::stream_targets()
+    }
+
+    /// Per-protocol input/output capability plus the muxer list for
+    /// this ffmpeg build. Read-only; safe for health/capability
+    /// probes. See [`ops::live::stream_capability_report`].
+    pub fn stream_capabilities(&self) -> VideoResult<StreamCapabilityReport> {
+        ops::live::stream_capability_report()
+    }
+
+    /// Validate a stream destination URL for [`stream_args`]: scheme
+    /// must be whitelisted, `scheme://authority` form with non-empty
+    /// authority, no dangerous characters. Returns `()` or
+    /// [`VideoError::InvalidInput`].
+    pub fn validate_stream_url(&self, url: &str) -> VideoResult<()> {
+        ops::live::stream_validate_url(url)
+    }
+
+    /// Build the ffmpeg argument vector for pushing `input_path` to
+    /// `url` — a **pure builder** that validates inputs and returns
+    /// argv (`ffmpeg -re -i <input> <codec args> <url>`); it never
+    /// opens a socket or executes anything. Executing the push is the
+    /// caller/job layer's responsibility. See
+    /// [`ops::live::stream_args`].
+    pub fn stream_args(
+        &self,
+        input_path: &Path,
+        url: &str,
+        opts: &StreamPushOpts,
+    ) -> VideoResult<Vec<String>> {
+        ops::live::stream_args(input_path, url, opts)
     }
 
     /// Full capability snapshot of the installed ffmpeg build.

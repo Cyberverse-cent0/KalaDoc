@@ -68,6 +68,7 @@ pub use model::{
 };
 pub use ops::audio_time::{AudioSpeedParams, ChannelLayout, LoopParams};
 pub use ops::av_visual::VisualStyle;
+pub use ops::capture::{CaptureFormat, CaptureInputOpts, CaptureOutputOpts, CaptureSource};
 pub use ops::chapters::ChapterInfo as ChapterEdit;
 pub use ops::composite::{
     Orientation, OverlayPosition, PictureInPictureParams, SideBySideParams, SplitScreenParams,
@@ -79,6 +80,9 @@ pub use ops::enhance::{
 pub use ops::filters::FilterPreset;
 pub use ops::hdr::{HdrInfo, HdrToneMapParams};
 pub use ops::interpolate::{InterpolateMode, InterpolateParams, MinterpolateOptions};
+pub use ops::live::{
+    STREAM_PROTOCOLS, StreamCapabilityReport, StreamCodec, StreamProtocolCap, StreamPushOpts,
+};
 pub use ops::metadata_export::{ExportFormat, MetadataDiff, MetadataReport};
 pub use ops::preview::{PreviewFormat, PreviewParams};
 pub use ops::proxy::{ProxyKind, ProxyParams};

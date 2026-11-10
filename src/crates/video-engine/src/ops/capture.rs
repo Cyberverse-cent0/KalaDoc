@@ -419,7 +419,7 @@ pub(crate) fn detect_hwaccel() -> Option<String> {
 /// ffmpeg `-f <name>` input format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
-pub(crate) enum CaptureFormat {
+pub enum CaptureFormat {
     /// Linux V4L2 video device (`/dev/videoN`).
     V4l2,
     /// Windows DirectShow (`dshow`); device is a friendly name.
@@ -472,7 +472,7 @@ impl CaptureFormat {
 /// optional second (audio) input.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub(crate) struct CaptureSource {
+pub struct CaptureSource {
     /// Primary input format/device kind.
     pub format: CaptureFormat,
     /// Device specifier — see [`validate_capture_device`] for the
@@ -489,7 +489,7 @@ pub(crate) struct CaptureSource {
 /// ffmpeg *input* options — they must precede `-i`).
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
-pub(crate) struct CaptureInputOpts {
+pub struct CaptureInputOpts {
     /// Frame width in pixels (`-video_size`).
     pub width: Option<u32>,
     /// Frame height in pixels (`-video_size`).
@@ -503,7 +503,7 @@ pub(crate) struct CaptureInputOpts {
 /// Output-side capture options (duration limit, scaling, codec).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub(crate) struct CaptureOutputOpts {
+pub struct CaptureOutputOpts {
     /// Stop after N seconds (`-t`).
     pub duration_secs: Option<u32>,
     /// Output frame width (`-s` scale). Both `out_width`/`out_height`
@@ -671,10 +671,7 @@ fn validate_capture_device(format: CaptureFormat, device: &str) -> VideoResult<(
 /// `source.audio_device` is set, a second input block is appended
 /// with its own `-f`/options/`-i`.
 #[allow(dead_code)]
-pub(crate) fn capture_args(
-    source: &CaptureSource,
-    opts: &CaptureInputOpts,
-) -> VideoResult<Vec<String>> {
+pub fn capture_args(source: &CaptureSource, opts: &CaptureInputOpts) -> VideoResult<Vec<String>> {
     validate_capture_device(source.format, &source.device)?;
     match (opts.width, opts.height) {
         (Some(w), Some(h)) => {
@@ -777,7 +774,7 @@ fn push_input_block(
 /// stream-copy capture never silently re-encodes. `include_audio:
 /// false` emits `-an` and suppresses audio codec arguments.
 #[allow(dead_code)]
-pub(crate) fn capture_output_args(opts: &CaptureOutputOpts) -> VideoResult<Vec<String>> {
+pub fn capture_output_args(opts: &CaptureOutputOpts) -> VideoResult<Vec<String>> {
     let mut args = Vec::new();
 
     if let Some(secs) = opts.duration_secs {
@@ -861,7 +858,7 @@ pub(crate) fn capture_output_args(opts: &CaptureOutputOpts) -> VideoResult<Vec<S
 /// their own risk layer. `output_path` must be non-empty and free of
 /// control characters.
 #[allow(dead_code)]
-pub(crate) fn capture_argv(
+pub fn capture_argv(
     source: &CaptureSource,
     in_opts: &CaptureInputOpts,
     out_opts: &CaptureOutputOpts,

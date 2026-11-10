@@ -39,7 +39,7 @@ use crate::crates::video_engine::ops::{FFMPEG, PROBE_TIMEOUT, find_tool, h264_en
 /// [`stream_validate_url`] even when the build supports it, because
 /// pushing to them is either meaningless for "live" delivery or a
 /// local-file side effect this module must not enable.
-pub(crate) const STREAM_PROTOCOLS: &[&str] = &[
+pub const STREAM_PROTOCOLS: &[&str] = &[
     // Real-Time Messaging Protocol family (all share the RTMP muxer).
     "rtmp", "rtmps", "rtmpt", "rtmpe", "rtmpte", "rtmpts",
     // RTP/RTSP realtime transport.
@@ -86,7 +86,7 @@ fn url_has_dangerous_chars(url: &str) -> bool {
 /// `scheme://authority...` form with a non-empty authority, and no
 /// dangerous characters may appear anywhere. Returns `()` on success
 /// or [`VideoError::InvalidInput`] with a caller-facing reason.
-pub(crate) fn stream_validate_url(url: &str) -> VideoResult<()> {
+pub fn stream_validate_url(url: &str) -> VideoResult<()> {
     if url.is_empty() {
         return Err(VideoError::InvalidInput("stream URL is empty".to_string()));
     }
@@ -139,7 +139,7 @@ fn is_stream_protocol(name: &str) -> bool {
 /// Video codec selection for [`stream_args`]. `Copy` is the default:
 /// live push normally reuses the source's already-encoded streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StreamCodec {
+pub enum StreamCodec {
     /// `-c copy` — remux only, no re-encode. Fastest, requires the
     /// source codecs to be acceptable to the target muxer.
     Copy,
@@ -160,7 +160,7 @@ impl Default for StreamCodec {
 /// Tunables for [`stream_args`]. All fields optional except `codec`;
 /// bitrate strings must match `[0-9]+(\.[0-9]+)?[kKmMgG]?`.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct StreamPushOpts {
+pub struct StreamPushOpts {
     /// Codec strategy; defaults to [`StreamCodec::Copy`].
     pub codec: Option<StreamCodec>,
     /// Video bitrate, e.g. `"2500k"`, `"4M"`. Emitted as `-b:v`.
@@ -206,7 +206,7 @@ fn valid_bitrate(s: &str) -> bool {
 /// requests H.264 re-encode and this build has no H.264 encoder, the
 /// result is the honest [`VideoError::ExternalTool`] from
 /// [`h264_encoder`].
-pub(crate) fn stream_args(
+pub fn stream_args(
     input_path: &Path,
     url: &str,
     opts: &StreamPushOpts,
@@ -299,7 +299,7 @@ pub(crate) fn stream_args(
 /// [`list_protocols`]). Sorted, deduplicated, `Vec<String>` of
 /// lowercase scheme names. Errors propagate honestly
 /// (`MissingTool`/`ExternalTool`).
-pub(crate) fn stream_targets() -> VideoResult<Vec<String>> {
+pub fn stream_targets() -> VideoResult<Vec<String>> {
     let protocols = list_protocols()?;
     let mut targets: Vec<String> = protocols
         .iter()
@@ -320,7 +320,7 @@ pub(crate) fn stream_targets() -> VideoResult<Vec<String>> {
 
 /// Per-protocol capability row for [`stream_capability_report`].
 #[derive(Debug, Clone)]
-pub(crate) struct StreamProtocolCap {
+pub struct StreamProtocolCap {
     /// Protocol/scheme name (lowercase), e.g. `"rtmp"`.
     pub name: String,
     /// Whether ffmpeg lists it under `Input:`.
@@ -337,7 +337,7 @@ pub(crate) struct StreamProtocolCap {
 /// What this ffmpeg build can actually push to: whitelisted protocols
 /// with their direction support plus the muxer names present.
 #[derive(Debug, Clone)]
-pub(crate) struct StreamCapabilityReport {
+pub struct StreamCapabilityReport {
     /// Whitelisted stream protocols found in `ffmpeg -protocols`,
     /// sorted by name.
     pub protocols: Vec<StreamProtocolCap>,
@@ -391,7 +391,7 @@ fn list_muxers() -> VideoResult<Vec<String>> {
 /// protocols with input/output direction and same-named muxer
 /// presence, plus the full muxer list. Read-only; safe to call from
 /// health/capability probes.
-pub(crate) fn stream_capability_report() -> VideoResult<StreamCapabilityReport> {
+pub fn stream_capability_report() -> VideoResult<StreamCapabilityReport> {
     let protocols = list_protocols()?;
     let muxers = list_muxers()?;
     let mut caps: Vec<StreamProtocolCap> = protocols
