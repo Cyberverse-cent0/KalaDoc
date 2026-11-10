@@ -6,6 +6,8 @@ This directory contains container deployment artifacts:
   runtime, non-root user `kaladoc` uid 10001).
 - `../docker-compose.yml` — single-node API + optional job worker / MinIO.
 - `kubernetes/` — Deployment, Service, ConfigMap, PVC, optional worker.
+- [`server.md`](server.md) — bare-metal server deployment: prebuilt binary,
+  source build, systemd units, and UI-development notes.
 
 ## Image
 
