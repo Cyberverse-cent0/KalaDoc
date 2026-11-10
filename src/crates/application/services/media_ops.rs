@@ -60,6 +60,29 @@
 //! | `packaging.hls` | files | [`HlsOptions`] |
 //! | `packaging.dash` | files | [`DashOptions`] |
 //! | `filters.apply` | files | [`FilterGraphOptions`] (`video_filter?`, `audio_filter?`, `map?`, `frames?`, `output_format`) |
+//! | `filters.presets` | files | [`PresetOptions`] (`preset` req, `intensity?`, `output_format?`) |
+//! | `filters.list_presets` | report | — |
+//! | `encoding.two_pass` | files | [`TwoPassOptions`] |
+//! | `container.select_streams` | files | [`SelectStreamsOptions`] |
+//! | `container.set_language` | files | [`LanguageOptions`] (`assignments` req) |
+//! | `container.chapters_edit` | files | [`ChaptersEditOptions`] |
+//! | `extraction.attachments` | files | [`AttachmentOptions`] |
+//! | `extraction.list_attachments` | report | — |
+//! | `extraction.chapters_export` | files | [`ChapterExportOptions`] (`formats`) |
+//! | `extraction.embedded_images` | files | [`EmbeddedImageOptions`] |
+//! | `extraction.list_embedded_images` | report | — |
+//! | `extraction.stream_copy` | files | [`StreamCopyOptions`] |
+//! | `metadata.chapters` | files | [`ChaptersOptions`] |
+//! | `metadata.cover_art_add` / `_extract` / `_remove` | files/report | second input for `_add` |
+//! | `video.reverse`/`loop`/`freeze_frame`/`chroma_key`/`fps_convert` | files | option structs |
+//! | `video.picture_in_picture`/`split_screen`/`xfade`/`overlay` | files | second input via `secondary_input` |
+//! | `audio.equalizer`/`compressor`/`channel_remix`/`tempo`/`spectrogram`/`remove_silence` | files | option structs (`equalizer` also takes `params.bands`) |
+//! | `audio.crossfade` | files | second input via `secondary_input` |
+//! | `frames.all_frames`/`gif_preview` | files | option structs |
+//! | `subtitles.retime` | files | [`RetimeOptions`] (subtitle file input) |
+//! | `analysis.histogram`/`av_sync` | report | option structs |
+//! | `analysis.quality` | report | `metric` (`psnr`/`ssim`) + second input |
+//! | `conversion.mux_replace_audio` | files | second input (audio) |
 //!
 //! Bracketed params are the multimedia-engine option structs; they are
 //! `serde` types, so `params` is deserialized directly into them
@@ -67,13 +90,12 @@
 //! exists — the `*_defaulted` helpers below merge `Default` values
 //! under the supplied params first).
 //!
-//! Not wired (implemented in the engine but needing inputs this job
-//! kind doesn't model): `video.concat`, `video.overlay`,
-//! `video.remove_sections`, `audio.merge`, `audio.merge`-family,
-//! `conversion.mux_replace`, `conversion.slideshow`,
-//! `metadata.cover_art`, `analysis.quality`, `frames.interval`,
-//! `frames.contact_sheet`, `video.scenes`. Multi-input ops can be
-//! added later by extending the payload with an input list.
+//! Two-input ops consume `secondary_input` (the job handler/CLI
+//! resolves it from a second payload field). Ops needing more than
+//! two inputs (`video.concat`, `audio.merge`, `conversion.slideshow`,
+//! `conversion.mux_streams`) or whose option structs are not `serde`
+//! (`video.remove_sections`, `frames.interval`, `frames.contact_sheet`,
+//! `video.scenes`) remain unwired.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -81,7 +103,9 @@ use serde_json::{Value, json};
 
 use crate::crates::multimedia_engine::analysis::av_sync::{AvSyncOptions, av_sync};
 use crate::crates::multimedia_engine::analysis::blackdetect::{BlackDetectOptions, blackdetect};
-use crate::crates::multimedia_engine::analysis::freezedetect::{FreezeOptions, detect_freeze};
+use crate::crates::multimedia_engine::analysis::freezedetect::{
+    FreezeOptions as FreezeDetectOptions, detect_freeze,
+};
 use crate::crates::multimedia_engine::analysis::histogram::{HistogramOptions, histogram};
 use crate::crates::multimedia_engine::analysis::loudness::{LoudnessOptions, measure_loudness};
 use crate::crates::multimedia_engine::analysis::quality::{QualityMetric, compare_quality};
@@ -205,6 +229,7 @@ pub const MEDIA_OPS: &[&str] = &[
     "audio.normalize",
     "audio.remove_silence",
     "audio.resample",
+    "audio.spectrogram",
     "audio.tempo",
     "audio.trim",
     "audio.volume",
@@ -719,7 +744,7 @@ pub fn run_media_op(
             })))
         }
         "analysis.freezedetect" => {
-            let opts: FreezeOptions = op_params_defaulted(op, params)?;
+            let opts: FreezeDetectOptions = op_params_defaulted(op, params)?;
             let report = detect_freeze(input, &opts, limits, rt)?;
             Ok(MediaOpOutcome::Report(json!({
                 "events": report.events,
@@ -832,10 +857,6 @@ pub fn run_media_op(
             let opts: LoopOptions = op_params_defaulted(op, params)?;
             files(loop_video(input, &opts, limits, rt)?)
         }
-        "video.freeze_frame" => {
-            let opts: FreezeOptions = op_params(op, params)?;
-            files(freeze_frame(input, &opts, limits, rt)?)
-        }
         "video.picture_in_picture" => {
             let pip = secondary_input.ok_or_else(|| {
                 invalid_params(op, "video.picture_in_picture requires a pip input")
@@ -844,9 +865,8 @@ pub fn run_media_op(
             files(picture_in_picture(input, pip, &opts, limits, rt)?)
         }
         "video.split_screen" => {
-            let right = secondary_input.ok_or_else(|| {
-                invalid_params(op, "video.split_screen requires a second input")
-            })?;
+            let right = secondary_input
+                .ok_or_else(|| invalid_params(op, "video.split_screen requires a second input"))?;
             let opts: SplitScreenOptions = op_params(op, params)?;
             files(split_screen(input, right, &opts, limits, rt)?)
         }
@@ -855,9 +875,8 @@ pub fn run_media_op(
             files(chroma_key(input, &opts, limits, rt)?)
         }
         "video.xfade" => {
-            let b = secondary_input.ok_or_else(|| {
-                invalid_params(op, "video.xfade requires a second input")
-            })?;
+            let b = secondary_input
+                .ok_or_else(|| invalid_params(op, "video.xfade requires a second input"))?;
             let opts: XfadeOptions = op_params(op, params)?;
             files(xfade(input, b, &opts, limits, rt)?)
         }
@@ -924,9 +943,8 @@ pub fn run_media_op(
             files(remove_silence(input, &opts, limits, rt)?)
         }
         "audio.crossfade" => {
-            let b = secondary_input.ok_or_else(|| {
-                invalid_params(op, "audio.crossfade requires a second input")
-            })?;
+            let b = secondary_input
+                .ok_or_else(|| invalid_params(op, "audio.crossfade requires a second input"))?;
             let opts: CrossfadeOptions = op_params(op, params)?;
             files(crossfade(input, b, &opts, limits, rt)?)
         }
