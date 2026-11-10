@@ -341,6 +341,7 @@ Project documentation is maintained in the `.doc/` directory.
 Start with:
 
 - [Architecture](.doc/Architecture.md) — System architecture and design decisions.
+- [PDF engine](.doc/pdf_engine.md) — PDF operation catalog, contracts, and external tool requirements.
 
 ## Contributing
 
