@@ -171,3 +171,146 @@ impl Document {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crates::document_engine::ids::FolderId;
+
+    #[test]
+    fn document_name_trims_and_accepts_valid() {
+        let name = DocumentName::new("  report.pdf  ").expect("valid name");
+        assert_eq!(name.as_str(), "report.pdf");
+        assert_eq!(
+            DocumentName::new("a".repeat(DocumentName::MAX_LEN))
+                .expect("max len")
+                .as_str(),
+            "a".repeat(DocumentName::MAX_LEN)
+        );
+    }
+
+    #[test]
+    fn document_name_rejects_invalid() {
+        for bad in ["", "   ", "\t\n"] {
+            assert!(
+                DocumentName::new(bad).is_err(),
+                "name {bad:?} should be rejected"
+            );
+        }
+        // One over the limit.
+        assert!(DocumentName::new("a".repeat(DocumentName::MAX_LEN + 1)).is_err());
+        // Path separators and control characters.
+        for bad in ["a/b.pdf", "a\\b.pdf", "a\u{7}b.pdf", "a\nb.pdf"] {
+            assert!(
+                DocumentName::new(bad).is_err(),
+                "name {bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn document_name_serde_roundtrip() {
+        let name = DocumentName::new("report.pdf").expect("name");
+        // Serializes transparently as a plain string.
+        let json = serde_json::to_string(&name).expect("serialize");
+        assert_eq!(json, "\"report.pdf\"");
+        let back: DocumentName = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, name);
+
+        // Deserialization runs the same validation.
+        assert!(serde_json::from_str::<DocumentName>("\"a/b\"").is_err());
+        assert!(serde_json::from_str::<DocumentName>("\"\"").is_err());
+
+        // TryFrom<String> / Into<String> conversions.
+        let owned: String = name.clone().into();
+        assert_eq!(owned, "report.pdf");
+        let again = DocumentName::try_from(owned).expect("try_from");
+        assert_eq!(again, name);
+    }
+
+    #[test]
+    fn document_type_serde_snake_case_with_other() {
+        assert_eq!(
+            serde_json::to_value(DocumentType::Pdf).unwrap(),
+            serde_json::json!("pdf")
+        );
+        assert_eq!(
+            serde_json::to_value(DocumentType::Spreadsheet).unwrap(),
+            serde_json::json!("spreadsheet")
+        );
+        assert_eq!(
+            serde_json::from_str::<DocumentType>("\"image\"").unwrap(),
+            DocumentType::Image
+        );
+        // Unknown variants fall back to `Other` via #[serde(other)].
+        assert_eq!(
+            serde_json::from_str::<DocumentType>("\"hologram\"").unwrap(),
+            DocumentType::Other
+        );
+    }
+
+    #[test]
+    fn document_status_and_origin_serde() {
+        for (status, s) in [
+            (DocumentStatus::Active, "active"),
+            (DocumentStatus::Archived, "archived"),
+            (DocumentStatus::Trashed, "trashed"),
+            (DocumentStatus::Deleted, "deleted"),
+        ] {
+            assert_eq!(serde_json::to_value(status).unwrap(), serde_json::json!(s));
+            assert_eq!(
+                serde_json::from_str::<DocumentStatus>(&format!("\"{s}\"")).unwrap(),
+                status
+            );
+        }
+
+        for (origin, s) in [
+            (DocumentOrigin::Upload, "upload"),
+            (DocumentOrigin::Import, "import"),
+            (DocumentOrigin::Generated, "generated"),
+            (DocumentOrigin::External, "external"),
+        ] {
+            assert_eq!(serde_json::to_value(origin).unwrap(), serde_json::json!(s));
+        }
+        assert_eq!(
+            serde_json::from_str::<DocumentOrigin>("\"mystery\"").unwrap(),
+            DocumentOrigin::Other
+        );
+    }
+
+    #[test]
+    fn document_source_new_defaults() {
+        let source = DocumentSource::new(DocumentOrigin::External);
+        assert_eq!(source.origin, DocumentOrigin::External);
+        assert_eq!(source.uri, None);
+        assert_eq!(source.external_reference, None);
+        assert_eq!(source.imported_at, None);
+    }
+
+    #[test]
+    fn document_new_defaults_and_serde_roundtrip() {
+        let doc = Document::new(
+            DocumentId::new("doc-1"),
+            DocumentName::new("report.pdf").unwrap(),
+            DocumentType::Pdf,
+            "user-1",
+            DocumentSource::new(DocumentOrigin::Upload),
+            "2024-01-01T00:00:00Z",
+        );
+        assert_eq!(doc.status, DocumentStatus::Active);
+        assert_eq!(doc.folder_id, None);
+        assert_eq!(doc.created_at, "2024-01-01T00:00:00Z");
+        assert_eq!(doc.updated_at, doc.created_at);
+
+        let json = serde_json::to_string(&doc).expect("serialize");
+        let back: Document = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, doc);
+
+        // With a folder assigned, the roundtrip preserves it.
+        let mut with_folder = doc.clone();
+        with_folder.folder_id = Some(FolderId::new("fld-9"));
+        let json = serde_json::to_string(&with_folder).expect("serialize");
+        let back: Document = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.folder_id, Some(FolderId::new("fld-9")));
+    }
+}

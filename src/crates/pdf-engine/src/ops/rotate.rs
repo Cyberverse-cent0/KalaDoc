@@ -91,3 +91,137 @@ pub fn rotate(
 
     save_pdf(&mut doc)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crates::pdf_engine::ops::test_utils::{page_count, pdf_with_pages};
+    use lopdf::Document;
+
+    /// Read the `/Rotate` value of a 1-based page in a serialized PDF.
+    fn rotate_of(pdf: &[u8], page: u32) -> Option<i64> {
+        let doc = Document::load_mem(pdf).unwrap();
+        let pages = doc.get_pages();
+        let dict = doc.get_dictionary(pages[&page]).unwrap();
+        dict.get(b"Rotate").ok().and_then(|o| o.as_i64().ok())
+    }
+
+    #[test]
+    fn try_from_accepts_only_right_angles() {
+        assert_eq!(
+            RotateDegrees::try_from(90).unwrap(),
+            RotateDegrees::Degrees90
+        );
+        assert_eq!(
+            RotateDegrees::try_from(180).unwrap(),
+            RotateDegrees::Degrees180
+        );
+        assert_eq!(
+            RotateDegrees::try_from(270).unwrap(),
+            RotateDegrees::Degrees270
+        );
+        for bad in [0u16, 45, 91, 359, 360] {
+            let err = RotateDegrees::try_from(bad).unwrap_err();
+            assert!(matches!(err, PdfError::InvalidInput(_)), "got {err:?}");
+        }
+    }
+
+    #[test]
+    fn rotates_only_selected_pages() {
+        let pdf = pdf_with_pages(&["one", "two", "three"]);
+        let out = rotate(
+            &pdf,
+            "2",
+            RotateDegrees::Degrees90,
+            &EngineLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(page_count(&out), 3);
+        assert_eq!(rotate_of(&out, 1), None);
+        assert_eq!(rotate_of(&out, 2), Some(90));
+        assert_eq!(rotate_of(&out, 3), None);
+    }
+
+    #[test]
+    fn all_rotates_every_page() {
+        let pdf = pdf_with_pages(&["one", "two"]);
+        let out = rotate(
+            &pdf,
+            "all",
+            RotateDegrees::Degrees180,
+            &EngineLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(rotate_of(&out, 1), Some(180));
+        assert_eq!(rotate_of(&out, 2), Some(180));
+    }
+
+    #[test]
+    fn rotation_accumulates_and_wraps() {
+        let pdf = pdf_with_pages(&["one"]);
+        let once = rotate(
+            &pdf,
+            "1",
+            RotateDegrees::Degrees90,
+            &EngineLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(rotate_of(&once, 1), Some(90));
+
+        let twice = rotate(
+            &once,
+            "1",
+            RotateDegrees::Degrees90,
+            &EngineLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(rotate_of(&twice, 1), Some(180));
+
+        // 180 + 270 = 450 -> normalized to 90.
+        let thrice = rotate(
+            &twice,
+            "1",
+            RotateDegrees::Degrees270,
+            &EngineLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(rotate_of(&thrice, 1), Some(90));
+
+        // 90 + 270 = 360 -> normalized to 0.
+        let back = rotate(
+            &thrice,
+            "1",
+            RotateDegrees::Degrees270,
+            &EngineLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(rotate_of(&back, 1), Some(0));
+    }
+
+    #[test]
+    fn rejects_invalid_range_and_input() {
+        let pdf = pdf_with_pages(&["one", "two"]);
+        for spec in ["", "0", "3", "2-1", "1,x", "alll"] {
+            let err = rotate(
+                &pdf,
+                spec,
+                RotateDegrees::Degrees90,
+                &EngineLimits::default(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, PdfError::InvalidPageRange(_)),
+                "spec {spec:?} got {err:?}"
+            );
+        }
+        assert!(
+            rotate(
+                b"junk",
+                "1",
+                RotateDegrees::Degrees90,
+                &EngineLimits::default()
+            )
+            .is_err()
+        );
+    }
+}

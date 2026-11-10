@@ -1,8 +1,9 @@
 //! Pipeline engine — chains operations across processing engines.
 //!
 //! A [`PipelineDefinition`] is a named, ordered sequence of
-//! [`PipelineStep`]s. Each step names a target engine (`"pdf"` or
-//! `"security"`), an operation, and a JSON `params` object. Running a
+//! [`PipelineStep`]s. Each step names a target engine (`"pdf"`,
+//! `"security"`, `"image"`, `"convert"`, or `"media"`), an operation,
+//! and a JSON `params` object. Running a
 //! definition feeds the input bytes through the steps in order: byte
 //! transforms replace the current document, report steps (`validate`,
 //! `inspect`, `extract_text`, ...) leave the bytes untouched and record
@@ -16,8 +17,11 @@
 //! stores trait objects for discovery, not invocation. Pipelines
 //! therefore dispatch **directly to the concrete engine types**
 //! ([`PdfEngine`](crate::crates::pdf_engine::PdfEngine),
-//! [`SecurityEngine`](crate::crates::security_engine::SecurityEngine))
-//! held inside [`PipelineEngine`]. This is deliberate: engines are
+//! [`SecurityEngine`](crate::crates::security_engine::SecurityEngine),
+//! [`ImageEngine`](crate::crates::image_engine::ImageEngine),
+//! [`ConversionEngine`](crate::crates::conversion_engine::ConversionEngine),
+//! and the multimedia ffprobe report functions) held inside
+//! [`PipelineEngine`]. This is deliberate: engines are
 //! in-process libraries here, not remote services, so a pipeline is a
 //! typed composition, not a dynamic plugin call. Adding an engine means
 //! adding a dispatch arm — the compiler enforces exhaustiveness.
@@ -44,6 +48,7 @@
 /// Base64 helpers for byte artifacts in JSON output.
 mod b64_serde;
 mod builtin;
+mod dag;
 mod engine;
 mod error;
 mod limits;
@@ -52,6 +57,10 @@ mod model;
 mod tests;
 
 pub use builtin::{builtin_definitions, pdf_extract_text, pdf_intake};
+pub use dag::{
+    DagDefinition, DagEdge, DagError, DagNode, DagNodeReport, DagNodeStatus, DagReport,
+    MAX_DAG_EDGES, MAX_DAG_NODES, run_dag,
+};
 pub use engine::PipelineEngine;
 pub use error::{PipelineError, PipelineResult, StepError};
 pub use limits::PipelineLimits;

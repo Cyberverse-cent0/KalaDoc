@@ -1,0 +1,91 @@
+# KalaDoc API — Deployment + Service.
+#
+# Probes:
+#   * readiness — HTTP GET /health on port 8080. The endpoint is public
+#     (no auth) and returns 503 when any engine reports Unavailable,
+#     200 otherwise (see crates/api/src/handlers.rs). A degraded-but-
+#     alive pod stays ready; a dead one is pulled from endpoints.
+#   * liveness  — TCP connect on port 8080. Deliberately NOT /health:
+#     an engine reporting Unavailable must not trigger a restart loop.
+#
+# Port 8080 comes from the built-in api.addr default
+# (127.0.0.1:8080, src/config/mod.rs); KALADOC_API_ADDR overrides it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kaladoc
+  namespace: kaladoc
+  labels:
+    app: kaladoc
+spec:
+  replicas: 1 # SQLite on a RWO PVC: scale up only with an external DB.
+  selector:
+    matchLabels:
+      app: kaladoc
+  template:
+    metadata:
+      labels:
+        app: kaladoc
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001 # `kaladoc` user created in the Dockerfile
+        fsGroup: 10001   # lets the pod write the PVC as that group
+      containers:
+        - name: kaladoc
+          image: kaladoc:local # replace with your registry image:tag
+          imagePullPolicy: IfNotPresent
+          args: ["serve"] # ENTRYPOINT is already `kaladoc`
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: kaladoc-config
+            - secretRef:
+                name: kaladoc-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: kaladoc-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kaladoc
+  namespace: kaladoc
+  labels:
+    app: kaladoc
+spec:
+  selector:
+    app: kaladoc
+  ports:
+    - name: http
+      port: 80
+      targetPort: http # 8080
+  type: ClusterIP

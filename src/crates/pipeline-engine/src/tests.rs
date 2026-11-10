@@ -173,26 +173,29 @@ fn definition_problems_rejected_before_execution() {
         Err(PipelineError::InvalidDefinition(_))
     ));
 
-    // Unknown engine.
+    // Unknown engine. `image` is a real registered engine now, so use
+    // a name no dispatcher arm knows.
     let bad_engine = PipelineDefinition {
         name: "bad".to_string(),
         description: None,
-        steps: vec![PipelineStep::new("x", "image", "resize")],
+        steps: vec![PipelineStep::new("x", "not-an-engine", "resize")],
     };
     assert!(matches!(
         engine.run_pipeline(&bad_engine, MINIMAL_PDF),
-        Err(PipelineError::UnknownEngine { engine, .. }) if engine == "image"
+        Err(PipelineError::UnknownEngine { engine, .. }) if engine == "not-an-engine"
     ));
 
-    // Unsupported operation on a known engine.
+    // Unsupported operation on a known engine. (`pdf.merge` is
+    // implemented — extra inputs arrive as base64 `other_inputs`
+    // params — so pick an operation name nothing dispatches.)
     let bad_op = PipelineDefinition {
         name: "bad".to_string(),
         description: None,
-        steps: vec![PipelineStep::new("x", "pdf", "merge")],
+        steps: vec![PipelineStep::new("x", "pdf", "not-an-operation")],
     };
     assert!(matches!(
         engine.run_pipeline(&bad_op, MINIMAL_PDF),
-        Err(PipelineError::UnsupportedOperation { operation, .. }) if operation == "merge"
+        Err(PipelineError::UnsupportedOperation { operation, .. }) if operation == "not-an-operation"
     ));
 
     // Non-object params.
@@ -389,6 +392,137 @@ fn definitions_and_outputs_are_serde_round_trippable() {
 }
 
 #[test]
+fn page_size_and_orientation_steps() {
+    let engine = PipelineEngine::new();
+    let pdf = pdf_with_text("size me");
+
+    let def = PipelineDefinition {
+        name: "page-geometry".to_string(),
+        description: None,
+        steps: vec![
+            PipelineStep::new("resize", engine_name::PDF, operation::PDF_SET_PAGE_SIZE)
+                .with_params(serde_json::json!({
+                    "pages": "all",
+                    "width": 200,
+                    "height": 300,
+                    "unit": "pt",
+                    "scale_content": true
+                })),
+            PipelineStep::new("sizes", engine_name::PDF, operation::PDF_GET_PAGE_SIZES),
+            PipelineStep::new(
+                "orient",
+                engine_name::PDF,
+                operation::PDF_DETECT_ORIENTATION,
+            ),
+            PipelineStep::new(
+                "normalize",
+                engine_name::PDF,
+                operation::PDF_NORMALIZE_ORIENTATION,
+            )
+            .with_params(serde_json::json!({ "mode": "landscape" })),
+        ],
+    };
+    let out = engine.run_pipeline(&def, &pdf).unwrap();
+
+    // get_page_sizes report reflects the new MediaBox.
+    let sizes = &out.steps[1].output.as_ref().unwrap();
+    assert_eq!(sizes[0]["width_pt"], 200.0);
+    assert_eq!(sizes[0]["height_pt"], 300.0);
+    // detect_orientation ran before the transform and reported a page.
+    let orient = &out.steps[2].output.as_ref().unwrap();
+    assert_eq!(orient[0]["page"], 1);
+    // Final artifact is still a valid PDF.
+    match &out.artifact {
+        PipelineArtifact::Bytes(b) => {
+            PdfEngine::new().inspect(b).unwrap();
+        }
+        other => panic!("expected bytes, got {other:?}"),
+    }
+}
+
+#[test]
+fn document_dates_and_inspect_steps() {
+    let engine = PipelineEngine::new();
+    let pdf = pdf_with_text("dates and inspection");
+
+    let def = PipelineDefinition {
+        name: "doc-meta".to_string(),
+        description: None,
+        steps: vec![
+            PipelineStep::new("dates", engine_name::PDF, operation::PDF_SET_DOCUMENT_DATES)
+                .with_params(serde_json::json!({
+                    "creation_date": "2024-01-15T14:30:00Z",
+                    "mod_date": "2024-02-03T04:05:06Z"
+                })),
+            PipelineStep::new(
+                "get-dates",
+                engine_name::PDF,
+                operation::PDF_GET_DOCUMENT_DATES,
+            ),
+            PipelineStep::new("js", engine_name::PDF, operation::PDF_INSPECT_JAVASCRIPT),
+            PipelineStep::new("struct", engine_name::PDF, operation::PDF_INSPECT_STRUCTURE),
+            PipelineStep::new(
+                "certs",
+                engine_name::PDF,
+                operation::PDF_EXTRACT_SIGNER_CERTS,
+            ),
+        ],
+    };
+    let out = engine.run_pipeline(&def, &pdf).unwrap();
+
+    let dates = &out.steps[1].output.as_ref().unwrap();
+    assert_eq!(dates["creation_date"], "2024-01-15T14:30:00Z");
+    assert_eq!(dates["mod_date"], "2024-02-03T04:05:06Z");
+    // Report steps pass bytes through; the transform step's output is
+    // still a valid PDF.
+    let js = &out.steps[2].output.as_ref().unwrap();
+    assert!(js.as_array().unwrap().is_empty());
+    let st = &out.steps[3].output.as_ref().unwrap();
+    assert_eq!(st["tagged"], false);
+    let certs = &out.steps[4].output.as_ref().unwrap();
+    assert!(certs.as_array().unwrap().is_empty());
+    match &out.artifact {
+        PipelineArtifact::Bytes(b) => {
+            PdfEngine::new().inspect(b).unwrap();
+        }
+        other => panic!("expected bytes, got {other:?}"),
+    }
+}
+
+#[test]
+fn edit_field_props_step_reports_unmatched() {
+    let engine = PipelineEngine::new();
+    let pdf = pdf_with_text("no form here");
+
+    let def = PipelineDefinition {
+        name: "fields".to_string(),
+        description: None,
+        steps: vec![
+            PipelineStep::new("props", engine_name::PDF, operation::PDF_EDIT_FIELD_PROPS)
+                .with_params(serde_json::json!({
+                    "patches": [
+                        { "name": "missing.field", "value": "x", "required": true },
+                        { "name": "also.missing", "max_len": 10 }
+                    ]
+                })),
+        ],
+    };
+    let out = engine.run_pipeline(&def, &pdf).unwrap();
+    let report = &out.steps[0].output.as_ref().unwrap();
+    assert_eq!(report["matched"], 0);
+    assert_eq!(
+        report["unmatched"],
+        serde_json::json!(["missing.field", "also.missing"])
+    );
+    match &out.artifact {
+        PipelineArtifact::Bytes(b) => {
+            PdfEngine::new().inspect(b).unwrap();
+        }
+        other => panic!("expected bytes, got {other:?}"),
+    }
+}
+
+#[test]
 fn engine_metadata_and_capabilities() {
     let engine = PipelineEngine::new();
     assert_eq!(engine.name(), "pipeline");
@@ -406,8 +540,9 @@ fn engine_metadata_and_capabilities() {
     ] {
         assert!(caps.operations.contains(&op), "missing {op:?}");
     }
-    // merge needs multiple inputs — must not be advertised.
-    assert!(!caps.operations.contains(&EngineOperation::Merge));
+    // Multi-input ops are expressible: extra documents arrive as
+    // base64 `other_inputs` params, so merge IS advertised.
+    assert!(caps.operations.contains(&EngineOperation::Merge));
     assert!(caps.input_formats.contains(&"pdf".to_string()));
     assert!(caps.limits.max_input_bytes.is_some());
 }

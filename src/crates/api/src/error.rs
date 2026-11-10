@@ -1,62 +1,201 @@
-//! HTTP error type — the single [`IntoResponse`] surface for the API.
+//! HTTP error type — the stable JSON error envelope.
 //!
-//! Handlers return `Result<_, ApiError>`; every variant maps to a
-//! status code plus a small JSON body `{"error": "<message>"}`.
-//! Messages are client-safe: they describe *what* was wrong with the
-//! request, never internal state (SQL errors, paths, stack traces).
+//! Every API error serializes as
+//! `{"error": {"code", "message", "request_id", "retryable"}}`,
+//! matching the CLI's spec §5.3 shape (`cli::report_error`). `code` is
+//! a stable machine-readable string; `retryable` tells clients whether
+//! repeating the request may succeed.
 
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-/// Errors produced by API handlers and extractors.
-#[derive(Debug, thiserror::Error)]
-pub enum ApiError {
-    /// Missing, malformed, expired, or revoked bearer token.
-    #[error("authentication required")]
-    Unauthorized,
+use crate::crates::application::services::ServiceError;
+use crate::crates::document_engine::store::StoreError;
+use crate::crates::image_engine::ImageError;
+use crate::crates::job_engine::JobError;
+use crate::crates::observability::RequestId;
+use crate::crates::security_engine::SecurityError;
+use crate::crates::storage::local::debug_when_full::StorageError;
 
-    /// The request was well-formed HTTP/JSON but semantically invalid
-    /// (bad payload shape, unknown status filter, ...). The message
-    /// is safe to show the client.
-    #[error("{0}")]
-    BadRequest(String),
+/// An API error ready to become a response.
+#[derive(Debug)]
+pub struct ApiError {
+    status: StatusCode,
+    code: String,
+    message: String,
+    retryable: bool,
+    request_id: RequestId,
+}
 
-    /// The addressed resource does not exist.
-    #[error("{0}")]
-    NotFound(String),
+impl ApiError {
+    /// Generic constructor. `retryable` should be `true` only when the
+    /// client may succeed by retrying the identical request.
+    pub fn new(
+        status: StatusCode,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        retryable: bool,
+    ) -> Self {
+        Self {
+            status,
+            code: code.into(),
+            message: message.into(),
+            retryable,
+            request_id: RequestId::new(),
+        }
+    }
 
-    /// An internal failure (database, store, engine). The detail is
-    /// logged, not returned — clients get a generic message.
-    #[error("{0}")]
-    Internal(String),
+    /// `401` — missing, malformed, or invalid/expired Bearer token.
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", message, false)
+    }
+
+    /// `400` — malformed request (bad id, invalid input).
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "bad_request", message, false)
+    }
+
+    /// `403` — authenticated, but the caller lacks access to the
+    /// addressed document/folder (see `services::access`).
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "forbidden", message, false)
+    }
+
+    /// `404` — the addressed resource does not exist.
+    pub fn not_found(entity: &str, id: impl ToString) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("{entity} not found: {}", id.to_string()),
+            false,
+        )
+    }
+
+    /// `413` — request body or upload exceeds a size limit.
+    pub fn payload_too_large(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            message,
+            false,
+        )
+    }
+
+    /// `500` — unexpected internal failure.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", message, true)
+    }
+
+    /// Replaces the generated request id (e.g. propagated from an
+    /// incoming `x-request-id` header).
+    pub fn with_request_id(mut self, id: RequestId) -> Self {
+        self.request_id = id;
+        self
+    }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, public_message) = match &self {
-            Self::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
-            Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            Self::Internal(msg) => {
-                // Log the detail server-side; respond generically so
-                // internals (SQL text, paths) never reach the client.
-                tracing::error!(error = %msg, "api internal error");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal server error".to_string(),
-                )
+        (
+            self.status,
+            Json(json!({
+                "error": {
+                    "code": self.code,
+                    "message": self.message,
+                    "request_id": self.request_id,
+                    "retryable": self.retryable,
+                }
+            })),
+        )
+            .into_response()
+    }
+}
+
+impl From<ServiceError> for ApiError {
+    fn from(e: ServiceError) -> Self {
+        match e {
+            ServiceError::Store(StoreError::NotFound { entity, id }) => Self::not_found(entity, id),
+            ServiceError::Store(StoreError::Validation { field, reason }) => Self::new(
+                StatusCode::BAD_REQUEST,
+                "validation_failed",
+                format!("invalid {field}: {reason}"),
+                false,
+            ),
+            ServiceError::Store(_) => Self::internal(e.to_string()),
+            ServiceError::Storage(StorageError::TooLarge { .. })
+            | ServiceError::Storage(StorageError::QuotaExceeded { .. }) => {
+                Self::payload_too_large(e.to_string())
             }
-        };
-        let mut response = (status, Json(json!({ "error": public_message }))).into_response();
-        if matches!(self, Self::Unauthorized) {
-            // RFC 7235 hint so clients know to retry with credentials.
-            response.headers_mut().insert(
-                axum::http::header::WWW_AUTHENTICATE,
-                axum::http::HeaderValue::from_static("Bearer"),
-            );
+            ServiceError::Storage(StorageError::NotFound { .. }) => {
+                Self::not_found("storage object", "unknown")
+            }
+            ServiceError::Storage(StorageError::PathOutsideRoot { .. }) => {
+                Self::bad_request(e.to_string())
+            }
+            ServiceError::Storage(_) | ServiceError::Io(_) => Self::internal(e.to_string()),
+            ServiceError::Config(_) | ServiceError::Db(_) => Self::internal(e.to_string()),
         }
-        response
+    }
+}
+
+impl From<SecurityError> for ApiError {
+    fn from(e: SecurityError) -> Self {
+        use SecurityError as S;
+        match e {
+            S::FileTooLarge { .. } | S::OperationTooLarge { .. } => {
+                Self::payload_too_large(e.to_string())
+            }
+            S::TooManyPages { .. } | S::TooManyOutputs { .. } => Self::new(
+                StatusCode::BAD_REQUEST,
+                "limit_exceeded",
+                e.to_string(),
+                false,
+            ),
+            _ => Self::new(
+                StatusCode::BAD_REQUEST,
+                "validation_failed",
+                e.to_string(),
+                false,
+            ),
+        }
+    }
+}
+
+impl From<ImageError> for ApiError {
+    fn from(e: ImageError) -> Self {
+        match e {
+            // Resource budgets map to 413 like storage/upload limits;
+            // everything else is caller-fixable input → 400.
+            ImageError::LimitExceeded(_) => Self::payload_too_large(e.to_string()),
+            _ => Self::new(
+                StatusCode::BAD_REQUEST,
+                "validation_failed",
+                e.to_string(),
+                false,
+            ),
+        }
+    }
+}
+
+impl From<crate::crates::scheduler::SchedulerError> for ApiError {
+    fn from(e: crate::crates::scheduler::SchedulerError) -> Self {
+        use crate::crates::scheduler::SchedulerError as S;
+        match e {
+            // Caller-fixable schedule input (blank name/kind, zero
+            // interval) → 400; storage/job failures → 500.
+            S::Invalid(_) => Self::bad_request(e.to_string()),
+            _ => Self::internal(e.to_string()),
+        }
+    }
+}
+
+impl From<JobError> for ApiError {
+    fn from(e: JobError) -> Self {
+        match e {
+            JobError::Payload(_) => Self::bad_request(e.to_string()),
+            _ => Self::internal(e.to_string()),
+        }
     }
 }

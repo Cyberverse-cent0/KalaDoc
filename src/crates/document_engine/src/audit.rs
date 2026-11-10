@@ -21,6 +21,9 @@ pub enum DocumentAuditEventType {
     Restored,
     Deleted,
     MetadataUpdated,
+    /// Per-document settings (JSON blob or flags such as `is_locked`)
+    /// were changed.
+    SettingsUpdated,
     RelationshipCreated,
     RelationshipDeleted,
     /// A document processing job (metadata extract, index, thumbnail,
@@ -30,9 +33,9 @@ pub enum DocumentAuditEventType {
     ProcessingCompleted,
     /// A document processing job failed permanently (retries exhausted).
     ProcessingFailed,
-    /// A document's text content was indexed for search.
+    /// Searchable text was extracted into the document index.
     Indexed,
-    /// A document thumbnail image was generated and stored.
+    /// A thumbnail image was generated for the document.
     ThumbnailGenerated,
     #[serde(other)]
     Other,

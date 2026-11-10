@@ -21,6 +21,11 @@ pub enum ImageFormat {
     WebP,
     /// BMP — uncompressed or RLE.
     Bmp,
+    /// TIFF — decoded via the `tiff` feature; encoded for the color
+    /// types `image`'s `TiffEncoder` supports (gray, RGB, RGBA, and
+    /// their 16/32-bit forms — gray+alpha is rejected at encode time).
+    /// CMYK/separated TIFFs decode to RGB.
+    Tiff,
 }
 
 impl ImageFormat {
@@ -32,12 +37,20 @@ impl ImageFormat {
             Self::Gif => "gif",
             Self::WebP => "webp",
             Self::Bmp => "bmp",
+            Self::Tiff => "tiff",
         }
     }
 
     /// Every format the engine supports, for capability reporting.
     pub fn all() -> &'static [ImageFormat] {
-        &[Self::Bmp, Self::Gif, Self::Jpeg, Self::Png, Self::WebP]
+        &[
+            Self::Bmp,
+            Self::Gif,
+            Self::Jpeg,
+            Self::Png,
+            Self::Tiff,
+            Self::WebP,
+        ]
     }
 
     /// Format identifiers as owned strings.
@@ -52,6 +65,7 @@ impl ImageFormat {
             Self::Gif => image::ImageFormat::Gif,
             Self::WebP => image::ImageFormat::WebP,
             Self::Bmp => image::ImageFormat::Bmp,
+            Self::Tiff => image::ImageFormat::Tiff,
         }
     }
 
@@ -64,6 +78,7 @@ impl ImageFormat {
             image::ImageFormat::Gif => Some(Self::Gif),
             image::ImageFormat::WebP => Some(Self::WebP),
             image::ImageFormat::Bmp => Some(Self::Bmp),
+            image::ImageFormat::Tiff => Some(Self::Tiff),
             _ => None,
         }
     }
@@ -72,9 +87,9 @@ impl ImageFormat {
 /// Parses a caller-supplied format identifier for *output*.
 ///
 /// Accepts surrounding whitespace and mixed case (`" JPG "` works);
-/// `"jpg"` is an alias for [`ImageFormat::Jpeg`]. Anything outside the
-/// supported set — including real formats this engine does not compile
-/// (e.g. `"tiff"`) — is rejected with [`ImageError::InvalidInput`].
+/// `"jpg"` is an alias for [`ImageFormat::Jpeg`], and `"tif"` for
+/// [`ImageFormat::Tiff`]. Anything outside the supported set is
+/// rejected with [`ImageError::InvalidInput`].
 pub(crate) fn parse_target(
     s: &str,
 ) -> crate::crates::image_engine::error::ImageResult<ImageFormat> {
@@ -85,6 +100,7 @@ pub(crate) fn parse_target(
         "gif" => Ok(ImageFormat::Gif),
         "webp" => Ok(ImageFormat::WebP),
         "bmp" => Ok(ImageFormat::Bmp),
+        "tif" | "tiff" => Ok(ImageFormat::Tiff),
         other => Err(ImageError::InvalidInput(format!(
             "unsupported target image format {other:?}"
         ))),

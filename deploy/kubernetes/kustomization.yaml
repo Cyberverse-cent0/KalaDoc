@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: kaladoc
+
+resources:
+  - configmap.yaml
+  - pvc.yaml
+  - deployment.yaml
+  # Optional: uncomment to include the job worker.
+  # - worker.yaml
+
+# Replace `kaladoc:local` with your real image before applying:
+#   kustomize edit set image kaladoc=registry.example.com/kaladoc:1.2.3
+images:
+  - name: kaladoc
+    newName: kaladoc
+    newTag: local
+
+# NOTE: kaladoc-secrets is intentionally NOT managed here — create it
+# out-of-band (see secret.example.yaml).

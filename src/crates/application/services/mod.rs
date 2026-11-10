@@ -12,6 +12,11 @@
 //! - [`documents::DocumentService`] — async facade over the
 //!   `document_engine` SQLite store: documents, artifacts, folders,
 //!   versions, tags, permissions, and audit history.
+//! - [`ingestion::DocumentIngestionService`] — the full ingestion
+//!   pipeline: async byte stream → staged streaming upload → atomic
+//!   commit (SHA-256) → document/artifact/version/metadata/audit
+//!   registration, with rollback on failure and a `recover` sweeper
+//!   for crash leftovers.
 //! - [`app::AppServices`] — aggregate bundling storage + documents plus
 //!   the shared `SqlitePool`, built from [`crate::config::AppConfig`] via
 //!   [`app::AppServices::init`]. This is the handle CLI commands hold.
@@ -28,9 +33,18 @@ pub mod app;
 pub mod documents;
 pub mod engines;
 pub mod error;
+pub mod folder_watch;
+pub mod ingestion;
 pub mod storage;
 
 pub use app::AppServices;
 pub use documents::DocumentService;
 pub use error::ServiceError;
+pub use ingestion::{
+    DocumentIngestionService, IngestOutcome, IngestRequest, RecoveryOptions, RecoveryReport,
+};
 pub use storage::{StorageService, StorageStatus};
+pub mod access;
+pub mod schedules;
+
+pub mod media_ops;

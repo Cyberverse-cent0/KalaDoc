@@ -9,6 +9,7 @@ mod args;
 mod command;
 mod context;
 mod credentials;
+mod envfile;
 mod error;
 mod global;
 mod output;
@@ -66,9 +67,35 @@ async fn dispatch(cli: &Cli, ctx: Context) -> Result<i32, CliError> {
         Commands::Auth(args) => command::auth::run(&ctx, args).await,
         Commands::User(args) => command::user::run(&ctx, args).await,
         Commands::Jobs(args) => command::jobs::run(&ctx, args).await,
+        Commands::Storage(args) => command::storage::run(&ctx, args).await,
+        Commands::Schedule(args) => command::schedule::run(&ctx, args).await,
+        Commands::Media(args) => command::media::run(&ctx, args).await,
+        Commands::Convert {
+            input,
+            from,
+            to,
+            options,
+            output_file,
+        } => {
+            command::convert::run(
+                &ctx,
+                input,
+                from,
+                to,
+                options.as_deref(),
+                output_file.as_ref(),
+            )
+            .await
+        }
+        Commands::Serve { addr, worker } => {
+            command::serve::run(&ctx, addr.as_deref(), *worker).await
+        }
         Commands::Engine(args) => command::engine::run(&ctx, args).await,
-        Commands::Image(args) => command::image::run(&ctx, args),
-        Commands::Pipeline(args) => command::pipeline::run(&ctx, args),
+        Commands::Doc(args) => command::doc::run(&ctx, args).await,
+        Commands::Pdf(args) => command::pdf::run(&ctx, args).await,
+        Commands::Image(args) => command::image::run(&ctx, args).await,
+        Commands::Pipeline(args) => command::pipeline::run(&ctx, args).await,
+        Commands::Mcp(args) => command::mcp::run(&ctx, args).await,
         Commands::Video(args) => command::video::run(&ctx, args),
     }
 }

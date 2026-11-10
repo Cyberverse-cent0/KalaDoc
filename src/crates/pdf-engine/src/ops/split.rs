@@ -58,3 +58,69 @@ pub fn split(input: &[u8], pages_per_file: u32, limits: &EngineLimits) -> PdfRes
     }
     Ok(outputs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crates::pdf_engine::ops::encrypt::{PdfPermissions, encrypt};
+    use crate::crates::pdf_engine::ops::test_utils::{page_count, pdf_with_pages};
+
+    #[test]
+    fn rejects_zero_pages_per_file() {
+        let pdf = pdf_with_pages(&["x"]);
+        let err = split(&pdf, 0, &EngineLimits::default()).unwrap_err();
+        assert!(matches!(err, PdfError::InvalidInput(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn splits_into_equal_chunks_with_smaller_tail() {
+        let pdf = pdf_with_pages(&["p1", "p2", "p3", "p4", "p5"]);
+        let outputs = split(&pdf, 2, &EngineLimits::default()).unwrap();
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(page_count(&outputs[0]), 2);
+        assert_eq!(page_count(&outputs[1]), 2);
+        assert_eq!(page_count(&outputs[2]), 1);
+    }
+
+    #[test]
+    fn single_chunk_when_pages_per_file_covers_document() {
+        let pdf = pdf_with_pages(&["only"]);
+        let outputs = split(&pdf, 10, &EngineLimits::default()).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(page_count(&outputs[0]), 1);
+
+        let pdf = pdf_with_pages(&["a", "b", "c"]);
+        let outputs = split(&pdf, 3, &EngineLimits::default()).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(page_count(&outputs[0]), 3);
+    }
+
+    #[test]
+    fn enforces_max_outputs() {
+        let pdf = pdf_with_pages(&["p1", "p2", "p3", "p4", "p5"]);
+        let limits = EngineLimits {
+            max_outputs: Some(2),
+            ..EngineLimits::default()
+        };
+        // 5 pages / 2 per file => 3 chunks > max_outputs 2.
+        let err = split(&pdf, 2, &limits).unwrap_err();
+        assert!(matches!(err, PdfError::LimitExceeded(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_encrypted_and_corrupt_input() {
+        let plain = pdf_with_pages(&["x"]);
+        let encrypted = encrypt(
+            &plain,
+            "pw",
+            None,
+            PdfPermissions::default(),
+            &EngineLimits::default(),
+        )
+        .unwrap();
+        let err = split(&encrypted, 1, &EngineLimits::default()).unwrap_err();
+        assert!(matches!(err, PdfError::Encrypted), "got {err:?}");
+
+        assert!(split(b"junk", 1, &EngineLimits::default()).is_err());
+    }
+}

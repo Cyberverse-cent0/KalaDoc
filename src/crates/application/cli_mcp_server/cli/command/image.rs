@@ -1,207 +1,211 @@
-//! `kaladoc image inspect|resize|convert`
+//! `kaladoc image <op>` — local-file raster image operations via
+//! `ImageEngine`.
 //!
-//! Thin adapter over [`ImageEngine`]: reads the input file, calls the
-//! matching engine method, and either prints the [`ImageInfo`] report
-//! or writes the produced bytes to `--output-file` (or a derived path next
-//! to the input). No configuration or database access is needed.
+//! Commands read an image file from disk, run the synchronous
+//! image-engine operation on a blocking thread, and write byte
+//! outputs to `--output-file` or emit structured reports as JSON.
+//! Supported codecs: PNG, JPEG, GIF, WebP, BMP.
 
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::Path;
 
 use serde::Serialize;
 
-use crate::crates::image_engine::{ImageEngine, ImageError, ResizeOptions};
+use crate::crates::core::engine::EngineLimits;
+use crate::crates::image_engine::{
+    CompressOptions, ImageEngine, ImageError, ImageFormat, ImageResult, ResizeOptions,
+};
 
 use super::super::args::ImageArgs;
 use super::{CliError, Context};
 
-pub fn run(ctx: &Context, args: &ImageArgs) -> Result<i32, CliError> {
-    let engine = ImageEngine::new();
+/// Input-size/pixel caps mirroring the pdf command's limits — generous
+/// for interactive CLI use while still bounding hostile files.
+fn limits() -> EngineLimits {
+    EngineLimits {
+        max_input_bytes: Some(256 * 1024 * 1024),
+        max_pixels: Some(100_000_000),
+        ..Default::default()
+    }
+}
+
+fn engine() -> ImageEngine {
+    ImageEngine::with_limits(limits())
+}
+
+pub async fn run(ctx: &Context, args: &ImageArgs) -> Result<i32, CliError> {
     match args {
-        ImageArgs::Inspect { file } => inspect(ctx, &engine, file),
+        ImageArgs::Inspect { input } => {
+            let data = read_file(input)?;
+            let info = blocking(move || engine().inspect(&data)).await?;
+            emit_report(ctx, &info)?;
+            Ok(0)
+        }
         ImageArgs::Resize {
-            file,
+            input,
             width,
             height,
-            output_file: output,
-        } => resize(ctx, &engine, file, *width, *height, output.as_deref()),
+            output_file,
+        } => {
+            if width.is_none() && height.is_none() {
+                return Err(CliError::Usage(
+                    "resize requires --width and/or --height".to_string(),
+                ));
+            }
+            let data = read_file(input)?;
+            let options = ResizeOptions {
+                max_width: *width,
+                max_height: *height,
+            };
+            let out = blocking(move || engine().resize(&data, options)).await?;
+            write_file(output_file, &out)?;
+            Ok(0)
+        }
         ImageArgs::Convert {
-            file,
-            target,
-            output_file: output,
-        } => convert(ctx, &engine, file, target, output.as_deref()),
+            input,
+            to,
+            output_file,
+        } => {
+            let data = read_file(input)?;
+            let target = to.clone();
+            // `convert` takes the format name directly and validates it.
+            let out = blocking(move || engine().convert(&data, &target)).await?;
+            write_file(output_file, &out)?;
+            Ok(0)
+        }
+        ImageArgs::Rotate {
+            input,
+            degrees,
+            output_file,
+        } => {
+            let data = read_file(input)?;
+            let degrees = *degrees;
+            let out = blocking(move || engine().rotate(&data, degrees)).await?;
+            write_file(output_file, &out)?;
+            Ok(0)
+        }
+        ImageArgs::Compress {
+            input,
+            format,
+            quality,
+            output_file,
+        } => {
+            let data = read_file(input)?;
+            let options = CompressOptions {
+                format: format.as_deref().map(parse_format).transpose()?,
+                quality: *quality,
+            };
+            let out = blocking(move || engine().compress(&data, options)).await?;
+            write_file(output_file, &out)?;
+            Ok(0)
+        }
+        ImageArgs::Thumbnail {
+            input,
+            width,
+            height,
+            output_file,
+        } => {
+            if *width == 0 || *height == 0 {
+                return Err(CliError::Usage(
+                    "thumbnail --width and --height must be positive".to_string(),
+                ));
+            }
+            let data = read_file(input)?;
+            let (w, h) = (*width, *height);
+            let out = blocking(move || engine().thumbnail(&data, w, h)).await?;
+            write_file(output_file, &out)?;
+            Ok(0)
+        }
+        ImageArgs::Metadata { input } => {
+            let data = read_file(input)?;
+            let meta = blocking(move || engine().metadata(&data)).await?;
+            emit_report(ctx, &meta)?;
+            Ok(0)
+        }
+        ImageArgs::Validate { input } => {
+            let data = read_file(input)?;
+            let report = blocking(move || engine().validate(&data)).await?;
+            emit_report(ctx, &report)?;
+            Ok(0)
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// inspect
+// Helpers
 // ---------------------------------------------------------------------------
 
-fn inspect(ctx: &Context, engine: &ImageEngine, file: &Path) -> Result<i32, CliError> {
-    let input = read_input(file)?;
-    let info = engine.inspect(&input).map_err(map_image_error)?;
-
-    if ctx.emit_structured(&info)? {
-        return Ok(0);
-    }
-    println!("file: {}", file.display());
-    println!("format: {}", info.format);
-    println!("dimensions: {}x{}", info.width, info.height);
-    println!("pixel_count: {}", info.pixel_count);
-    println!("file_size_bytes: {}", info.file_size_bytes);
-    println!(
-        "color_type: {}",
-        info.color_type.as_deref().unwrap_or("unknown")
-    );
-    println!("has_alpha: {}", info.has_alpha);
-    Ok(0)
+/// Run a synchronous engine call on the blocking pool.
+async fn blocking<F, R>(f: F) -> Result<R, CliError>
+where
+    F: FnOnce() -> ImageResult<R> + Send + 'static,
+    R: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| CliError::Internal(format!("image worker task failed: {e}")))?
+        .map_err(image_err)
 }
 
-// ---------------------------------------------------------------------------
-// resize / convert
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize)]
-struct WriteReport {
-    input: String,
-    output: String,
-    operation: &'static str,
-    bytes_written: u64,
-}
-
-fn resize(
-    ctx: &Context,
-    engine: &ImageEngine,
-    file: &Path,
-    width: Option<u32>,
-    height: Option<u32>,
-    output: Option<&Path>,
-) -> Result<i32, CliError> {
-    if width.is_none() && height.is_none() {
-        return Err(CliError::Usage(
-            "at least one of --width or --height is required".to_string(),
-        ));
-    }
-    let input = read_input(file)?;
-    let bytes = engine
-        .resize(
-            &input,
-            ResizeOptions {
-                max_width: width,
-                max_height: height,
-            },
-        )
-        .map_err(map_image_error)?;
-
-    // Resized output keeps the input format; default to
-    // `<stem>.resized.<ext>` so the input is never overwritten.
-    let out = match output {
-        Some(p) => p.to_path_buf(),
-        None => resized_default(file)?,
-    };
-    write_output(&out, &bytes)?;
-    report(ctx, file, &out, "resize", bytes.len())
-}
-
-fn convert(
-    ctx: &Context,
-    engine: &ImageEngine,
-    file: &Path,
-    target: &str,
-    output: Option<&Path>,
-) -> Result<i32, CliError> {
-    let input = read_input(file)?;
-    let bytes = engine.convert(&input, target).map_err(map_image_error)?;
-
-    let ext = normalize_extension(target);
-    let out = match output {
-        Some(p) => p.to_path_buf(),
-        None => file.with_extension(&ext),
-    };
-    if out.as_path() == file {
-        return Err(CliError::Usage(format!(
-            "output would overwrite the input {}; pass --output-file",
-            file.display()
-        )));
-    }
-    write_output(&out, &bytes)?;
-    report(ctx, file, &out, "convert", bytes.len())
-}
-
-fn report(
-    ctx: &Context,
-    input: &Path,
-    output: &Path,
-    operation: &'static str,
-    bytes: usize,
-) -> Result<i32, CliError> {
-    let report = WriteReport {
-        input: input.display().to_string(),
-        output: output.display().to_string(),
-        operation,
-        bytes_written: bytes as u64,
-    };
-    if ctx.emit_structured(&report)? {
-        return Ok(0);
-    }
-    println!(
-        "{} {} -> {} ({} bytes)",
-        report.operation, report.input, report.output, report.bytes_written
-    );
-    Ok(0)
-}
-
-// ---------------------------------------------------------------------------
-// Internals
-// ---------------------------------------------------------------------------
-
-fn read_input(file: &Path) -> Result<Vec<u8>, CliError> {
-    std::fs::read(file).map_err(|e| {
-        CliError::Io(std::io::Error::new(
-            e.kind(),
-            format!("cannot read {}: {e}", file.display()),
-        ))
-    })
-}
-
-fn write_output(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
-    std::fs::write(path, bytes).map_err(|e| {
-        CliError::Io(std::io::Error::new(
-            e.kind(),
-            format!("cannot write {}: {e}", path.display()),
-        ))
-    })
-}
-
-/// `<stem>.resized.<ext>` next to the input; falls back to appending
-/// `.resized` when the input has no usable name/extension.
-fn resized_default(file: &Path) -> Result<PathBuf, CliError> {
-    let name = file
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| CliError::Usage(format!("bad input path {}", file.display())))?;
-    let out_name = if let Some((stem, ext)) = name.rsplit_once('.') {
-        format!("{stem}.resized.{ext}")
-    } else {
-        format!("{name}.resized")
-    };
-    Ok(file.with_file_name(out_name))
-}
-
-/// Lowercased target name usable as a file extension (`" JPG "` →
-/// `"jpg"`). The engine validates the format itself; this only shapes
-/// the default output path.
-fn normalize_extension(target: &str) -> String {
-    target.trim().to_ascii_lowercase()
-}
-
-/// Maps [`ImageError`] onto the CLI contract: bad input is a usage
-/// problem, unsupported formats are `unsupported`, encode failures are
-/// internal.
-fn map_image_error(e: ImageError) -> CliError {
+fn image_err(e: ImageError) -> CliError {
     match e {
-        ImageError::UnsupportedFormat(msg) => CliError::Unsupported(msg),
-        ImageError::InvalidInput(msg) | ImageError::LimitExceeded(msg) => CliError::Validation(msg),
+        ImageError::UnsupportedFormat(m) => CliError::Unsupported(m),
+        ImageError::InvalidInput(m) => CliError::Usage(m),
+        ImageError::LimitExceeded(m) => CliError::Validation(m),
         ImageError::Decode(_) => CliError::Validation("invalid or unreadable image".to_string()),
         ImageError::Encode(_) => CliError::Internal("image encoding failed".to_string()),
+        ImageError::Io(io) => CliError::Io(io),
+        ImageError::ExternalTool { tool, detail } => {
+            CliError::Internal(format!("external tool {tool} failed: {detail}"))
+        }
     }
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>, CliError> {
+    fs::read(path).map_err(|e| {
+        CliError::Io(std::io::Error::new(
+            e.kind(),
+            format!("{}: {e}", path.display()),
+        ))
+    })
+}
+
+fn write_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    // Write-then-rename keeps a failed write from leaving a truncated
+    // output at the target path.
+    let tmp = path.with_extension("kaladoc-tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Parse a `--format` identifier for `compress`. `ImageFormat`'s own
+/// parser is crate-private, so the accepted names are mirrored here.
+fn parse_format(s: &str) -> Result<ImageFormat, CliError> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "png" => Ok(ImageFormat::Png),
+        "jpg" | "jpeg" => Ok(ImageFormat::Jpeg),
+        "gif" => Ok(ImageFormat::Gif),
+        "webp" => Ok(ImageFormat::WebP),
+        "bmp" => Ok(ImageFormat::Bmp),
+        other => Err(CliError::Usage(format!(
+            "unknown format {other:?}; expected png|jpeg|gif|webp|bmp"
+        ))),
+    }
+}
+
+/// Reports are JSON-first: structured formats get the typed value;
+/// table mode falls back to pretty JSON (these are data reports, not
+/// human tables).
+fn emit_report<T: Serialize>(ctx: &Context, report: &T) -> Result<(), CliError> {
+    if ctx.emit_structured(report)? {
+        return Ok(());
+    }
+    println!("{}", serde_json::to_string_pretty(report)?);
+    Ok(())
 }

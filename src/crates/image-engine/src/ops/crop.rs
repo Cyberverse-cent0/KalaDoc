@@ -34,7 +34,10 @@ pub fn crop(
     let (img_w, img_h) = (decoded.image.width(), decoded.image.height());
 
     // Bounds in u64 so x+width can't overflow u32 before comparison.
-    let (right, bottom) = (u64::from(x) + u64::from(width), u64::from(y) + u64::from(height));
+    let (right, bottom) = (
+        u64::from(x) + u64::from(width),
+        u64::from(y) + u64::from(height),
+    );
     if right > u64::from(img_w) || bottom > u64::from(img_h) {
         return Err(ImageError::InvalidInput(format!(
             "crop rectangle ({x}, {y}, {width}, {height}) is out of bounds \
@@ -42,9 +45,7 @@ pub fn crop(
         )));
     }
 
-    let cropped = decoded
-        .image
-        .crop_imm(x, y, width, height);
+    let cropped = decoded.image.crop_imm(x, y, width, height);
     encode(&cropped, decoded.format)
 }
 

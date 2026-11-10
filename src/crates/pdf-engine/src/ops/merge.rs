@@ -157,3 +157,125 @@ fn remap_object(object: &mut Object, offset: u32) -> PdfResult<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crates::pdf_engine::ops::encrypt::{PdfPermissions, encrypt};
+    use crate::crates::pdf_engine::ops::info::inspect;
+    use crate::crates::pdf_engine::ops::test_utils::{
+        page_count, pdf_with_pages, pdf_with_pages_and_title,
+    };
+    use lopdf::{Document, dictionary};
+
+    #[test]
+    fn rejects_empty_input_list() {
+        let err = merge(&[], &EngineLimits::default()).unwrap_err();
+        assert!(matches!(err, PdfError::InvalidInput(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn merges_pages_in_order() {
+        let a = pdf_with_pages(&["a1", "a2"]);
+        let b = pdf_with_pages(&["b1"]);
+        let c = pdf_with_pages(&["c1", "c2", "c3"]);
+        let out = merge(&[&a, &b, &c], &EngineLimits::default()).unwrap();
+        assert_eq!(page_count(&out), 6);
+
+        // Page order is preserved: extract text and check sequence.
+        // `extract_text` takes 1-based page numbers.
+        let doc = Document::load_mem(&out).unwrap();
+        let mut texts = Vec::new();
+        for n in 1..=6u32 {
+            let text = doc.extract_text(&[n]).unwrap();
+            texts.push(text.trim().to_string());
+        }
+        assert_eq!(texts[0], "a1");
+        assert_eq!(texts[2], "b1");
+        assert_eq!(texts[5], "c3");
+    }
+
+    #[test]
+    fn enforces_aggregate_page_limit() {
+        // Each input is under the limit; the sum is not.
+        let a = pdf_with_pages(&["a1", "a2"]);
+        let b = pdf_with_pages(&["b1", "b2"]);
+        let limits = EngineLimits {
+            max_pages: Some(3),
+            ..EngineLimits::default()
+        };
+        let err = merge(&[&a, &b], &limits).unwrap_err();
+        assert!(matches!(err, PdfError::LimitExceeded(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_encrypted_input() {
+        let plain = pdf_with_pages(&["ok"]);
+        let encrypted = encrypt(
+            &plain,
+            "pw",
+            None,
+            PdfPermissions::default(),
+            &EngineLimits::default(),
+        )
+        .unwrap();
+        let other = pdf_with_pages(&["fine"]);
+        let err = merge(&[&encrypted, &other], &EngineLimits::default()).unwrap_err();
+        assert!(matches!(err, PdfError::Encrypted), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_corrupt_input() {
+        let good = pdf_with_pages(&["ok"]);
+        let err = merge(&[b"garbage".as_slice(), &good], &EngineLimits::default()).unwrap_err();
+        assert!(matches!(err, PdfError::InvalidPdf(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn keeps_first_input_info_metadata() {
+        let a = pdf_with_pages_and_title(&["first"], "First Title");
+        let b = pdf_with_pages_and_title(&["second"], "Second Title");
+        let out = merge(&[&a, &b], &EngineLimits::default()).unwrap();
+
+        let info = inspect(&out, &EngineLimits::default()).unwrap();
+        assert_eq!(info.page_count, 2);
+        assert_eq!(info.title.as_deref(), Some("First Title"));
+        assert_eq!(info.author.as_deref(), Some("KalaDoc Tests"));
+        assert!(!info.encrypted);
+        assert_eq!(info.file_size_bytes, out.len() as u64);
+    }
+
+    #[test]
+    fn does_not_carry_over_outlines() {
+        // Build an input whose catalog has an /Outlines dictionary.
+        let base = pdf_with_pages(&["with bookmark"]);
+        let mut doc = Document::load_mem(&base).unwrap();
+        let outline_id = doc.add_object(dictionary! {
+            "Type" => "Outlines",
+            "Count" => 0,
+        });
+        let root = doc.trailer.get(b"Root").unwrap().as_reference().unwrap();
+        doc.get_dictionary_mut(root)
+            .unwrap()
+            .set("Outlines", outline_id);
+        let mut bookmarked = Vec::new();
+        doc.save_to(&mut bookmarked).unwrap();
+
+        // Sanity: the input really has an outline entry.
+        let check = Document::load_mem(&bookmarked).unwrap();
+        let root = check.trailer.get(b"Root").unwrap().as_reference().unwrap();
+        assert!(check.get_dictionary(root).unwrap().get(b"Outlines").is_ok());
+
+        let plain = pdf_with_pages(&["plain"]);
+        let out = merge(&[&bookmarked, &plain], &EngineLimits::default()).unwrap();
+        let merged = Document::load_mem(&out).unwrap();
+        let root = merged.trailer.get(b"Root").unwrap().as_reference().unwrap();
+        assert!(
+            merged
+                .get_dictionary(root)
+                .unwrap()
+                .get(b"Outlines")
+                .is_err()
+        );
+    }
+}

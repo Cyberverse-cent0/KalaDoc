@@ -27,6 +27,11 @@ pub struct ResourceLimits {
     pub max_video_upload_bytes: u64,
     /// Maximum page count for a single document; `None` = unlimited.
     pub max_pages: Option<u32>,
+    /// Maximum decoded pixel count (width × height) for a single
+    /// raster image — the decompression-bomb guard. `None` = unlimited.
+    /// Mirrors
+    /// [`EngineLimits::max_pixels`](crate::crates::core::engine::EngineLimits).
+    pub max_pixels: Option<u64>,
     /// Maximum total bytes an operation may produce across all outputs.
     pub max_operation_bytes: u64,
     /// Maximum number of output artifacts one operation may produce.
@@ -39,6 +44,9 @@ impl Default for ResourceLimits {
             max_upload_bytes: 100 * 1024 * 1024,            // 100 MiB
             max_video_upload_bytes: 2 * 1024 * 1024 * 1024, // 2 GiB
             max_pages: Some(10_000),
+            // 100 MP — generous for legitimate photos/scans, small
+            // enough to stop classic decompression bombs.
+            max_pixels: Some(100_000_000),
             max_operation_bytes: 256 * 1024 * 1024, // 256 MiB
             max_outputs: 64,
         }
@@ -103,6 +111,22 @@ impl ResourceLimits {
         Ok(())
     }
 
+    /// Check a raster image's decoded pixel count (width × height)
+    /// against [`Self::max_pixels`]. Always succeeds when `max_pixels`
+    /// is `None`. Callers should probe dimensions from the image header
+    /// *before* decoding — see the image engine's `pixel_dimensions`.
+    ///
+    /// # Errors
+    /// [`SecurityError::TooManyPixels`] when `pixels` exceeds the limit.
+    pub fn check_pixels(&self, pixels: u64) -> SecurityResult<()> {
+        if let Some(max) = self.max_pixels {
+            if pixels > max {
+                return Err(SecurityError::TooManyPixels { pixels, max });
+            }
+        }
+        Ok(())
+    }
+
     /// Check a document's page count against [`Self::max_pages`].
     /// Always succeeds when `max_pages` is `None`.
     ///
@@ -142,6 +166,7 @@ mod tests {
         assert_eq!(l.max_upload_bytes, 100 * 1024 * 1024);
         assert!(l.max_video_upload_bytes > l.max_upload_bytes);
         assert_eq!(l.max_pages, Some(10_000));
+        assert_eq!(l.max_pixels, Some(100_000_000));
         assert!(l.max_operation_bytes >= l.max_upload_bytes);
         assert!(l.max_outputs > 0);
     }
@@ -215,6 +240,23 @@ mod tests {
             l.check_operation_size(51),
             Err(SecurityError::OperationTooLarge { size: 51, max: 50 })
         ));
+    }
+
+    #[test]
+    fn check_pixels_boundaries() {
+        let mut l = ResourceLimits::default();
+        l.max_pixels = Some(100);
+        assert!(l.check_pixels(100).is_ok());
+        assert!(l.check_pixels(0).is_ok());
+        assert!(matches!(
+            l.check_pixels(101),
+            Err(SecurityError::TooManyPixels {
+                pixels: 101,
+                max: 100
+            })
+        ));
+        l.max_pixels = None;
+        assert!(l.check_pixels(u64::MAX).is_ok());
     }
 
     #[test]

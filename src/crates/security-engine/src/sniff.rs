@@ -157,6 +157,20 @@ impl SniffedFormat {
     pub fn is_audio(&self) -> bool {
         matches!(self, Self::Audio { .. })
     }
+
+    /// Conventional MIME type for the sniffed format.
+    pub fn mime(&self) -> &'static str {
+        match self {
+            Self::Pdf => "application/pdf",
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Zip => "application/zip",
+            Self::Gif => "image/gif",
+            Self::Video { container } => container.mime(),
+            Self::Audio { container } => container.mime(),
+            Self::Unknown => "application/octet-stream",
+        }
+    }
 }
 
 impl VideoContainer {
@@ -195,6 +209,23 @@ impl VideoContainer {
             Self::Ogg => "Ogg video",
         }
     }
+
+    /// Conventional MIME type for the container.
+    pub fn mime(&self) -> &'static str {
+        match self {
+            Self::Mp4 => "video/mp4",
+            Self::Matroska => "video/x-matroska",
+            Self::Webm => "video/webm",
+            Self::Avi => "video/x-msvideo",
+            Self::MpegTs => "video/mp2t",
+            Self::MpegPs | Self::MpegVideo => "video/mpeg",
+            Self::Flv => "video/x-flv",
+            Self::Asf => "video/x-ms-asf",
+            Self::Mxf => "application/mxf",
+            Self::F4v => "video/x-f4v",
+            Self::Ogg => "video/ogg",
+        }
+    }
 }
 
 impl AudioContainer {
@@ -227,6 +258,22 @@ impl AudioContainer {
             Self::Amr => "AMR audio",
             Self::Caf => "CAF audio",
             Self::Ac3 => "AC-3 audio",
+        }
+    }
+
+    /// Conventional MIME type for the container.
+    pub fn mime(&self) -> &'static str {
+        match self {
+            Self::Mp3 => "audio/mpeg",
+            Self::Wav => "audio/wav",
+            Self::Flac => "audio/flac",
+            Self::OggAudio => "audio/ogg",
+            Self::Aac => "audio/aac",
+            Self::Aiff => "audio/aiff",
+            Self::Au => "audio/basic",
+            Self::Amr => "audio/amr",
+            Self::Caf => "audio/x-caf",
+            Self::Ac3 => "audio/ac3",
         }
     }
 }

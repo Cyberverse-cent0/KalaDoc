@@ -9,8 +9,19 @@ use crate::crates::conversion_engine::{
     ConvertResult, Format,
 };
 
-/// Input formats LibreOffice converts well headlessly.
-const LO_INPUTS: &[Format] = &[Format::Docx, Format::Odt];
+/// Input formats LibreOffice converts well headlessly: office
+/// documents (Writer/Calc/Impress) plus raster images (Draw), all of
+/// which export cleanly to PDF.
+const LO_INPUTS: &[Format] = &[
+    Format::Docx,
+    Format::Odt,
+    Format::Xlsx,
+    Format::Xls,
+    Format::Pptx,
+    Format::Ppt,
+    Format::Png,
+    Format::Jpeg,
+];
 
 /// Output formats we advertise. `→ pdf` always; docx↔odt is a
 /// straightforward `--convert-to` and is included. PDF *import* is
@@ -180,6 +191,16 @@ mod tests {
         assert!(!b.supports(Format::Pdf, Format::Docx)); // weak import: not advertised
         assert!(!b.supports(Format::Markdown, Format::Pdf));
         assert!(!b.supports(Format::Txt, Format::Txt));
+        // Office spreadsheets/presentations and images → pdf only.
+        for &from in &[Format::Xlsx, Format::Xls, Format::Pptx, Format::Ppt] {
+            assert!(b.supports(from, Format::Pdf), "{from:?} -> pdf");
+            assert!(!b.supports(from, Format::Docx), "{from:?} -> docx");
+            assert!(!b.supports(from, Format::Odt), "{from:?} -> odt");
+        }
+        assert!(b.supports(Format::Png, Format::Pdf));
+        assert!(b.supports(Format::Jpeg, Format::Pdf));
+        assert!(!b.supports(Format::Png, Format::Jpeg));
+        assert!(!b.supports(Format::Epub, Format::Pdf)); // pandoc's job
     }
 
     #[test]
@@ -210,7 +231,7 @@ mod tests {
     #[test]
     fn detect_finds_soffice_stub() {
         let dir = std::env::temp_dir().join(format!(
-            "kaladoc-test-lo-{}-{:?}",
+            "kaladoc-test-lo-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

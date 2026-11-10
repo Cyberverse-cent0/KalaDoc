@@ -92,7 +92,7 @@
 //! are collected in `errors` rather than aborting the sweep.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
@@ -116,9 +116,7 @@ use crate::crates::document_engine::version::DocumentVersion;
 use crate::crates::security_engine::{SniffedFormat, sniff_format};
 use crate::crates::storage::local::config::StorageConfig;
 use crate::crates::storage::local::debug_when_full::FaultInjectingFs;
-use crate::crates::storage::{
-    CommitReceipt, STAGING_DIR_NAME, StreamLimits, StreamUpload, StreamingBackend,
-};
+use crate::crates::storage::{CommitReceipt, StreamLimits, StreamUpload, StreamingBackend};
 
 use super::documents::{DocumentService, NewArtifact};
 use super::error::ServiceError;
@@ -185,6 +183,7 @@ impl IngestRequest {
 }
 
 /// Result of a successful [`DocumentIngestionService::ingest`].
+#[derive(Debug)]
 pub struct IngestOutcome {
     /// The registered document (status `Active`, detected type).
     pub document: Document,
@@ -279,6 +278,11 @@ impl DocumentIngestionService {
         storage_config: StorageConfig,
         limits: StreamLimits,
     ) -> Self {
+        // A zero chunk cap would reject every chunk; floor it at 1.
+        let limits = StreamLimits {
+            max_chunk_bytes: limits.max_chunk_bytes.max(1),
+            ..limits
+        };
         Self {
             documents: DocumentService::new(pool),
             storage_config,
@@ -307,7 +311,11 @@ impl DocumentIngestionService {
     ///   store failures — always after best-effort rollback.
     /// - [`ServiceError::Io`] for reader failures.
     /// - [`ServiceError::Storage`] for backend/quota/fault failures.
-    pub async fn ingest<R>(&self, mut reader: R, request: IngestRequest) -> Result<IngestOutcome, ServiceError>
+    pub async fn ingest<R>(
+        &self,
+        mut reader: R,
+        request: IngestRequest,
+    ) -> Result<IngestOutcome, ServiceError>
     where
         R: AsyncRead + Unpin,
     {
@@ -325,12 +333,16 @@ impl DocumentIngestionService {
             .map(str::to_string);
 
         // -- 2. Peek at the head for format detection --
-        let mut prefix = Vec::with_capacity(SNIFF_BYTES.min(4096));
-        reader
-            .by_ref()
-            .take(SNIFF_BYTES as u64)
-            .read_to_end(&mut prefix)
-            .await?;
+        let mut prefix = vec![0u8; SNIFF_BYTES];
+        let mut filled = 0usize;
+        while filled < SNIFF_BYTES {
+            match reader.read(&mut prefix[filled..]).await {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) => return Err(ServiceError::Io(e)),
+            }
+        }
+        prefix.truncate(filled);
         if prefix.is_empty() {
             return Err(validation("content", "upload must not be empty"));
         }
@@ -356,10 +368,7 @@ impl DocumentIngestionService {
 
         // From here on the document row exists: every failure must
         // roll back (purge rows; delete the object if it was published).
-        let receipt = match self
-            .stage_upload(&object_name, prefix, reader)
-            .await
-        {
+        let receipt = match self.stage_upload(&object_name, prefix, reader).await {
             Ok(receipt) => receipt,
             Err(e) => {
                 // The writer guarantees nothing was published on Err,
@@ -372,7 +381,17 @@ impl DocumentIngestionService {
 
         // -- 4. Register rows; any failure rolls back fully ----------
         let outcome = self
-            .register(&doc, &request, owner_id, &file_name, &storage_uri, &receipt, detected_mime, sniffed, mime_type)
+            .register(
+                &doc,
+                &request,
+                owner_id,
+                &file_name,
+                &storage_uri,
+                &receipt,
+                detected_mime,
+                sniffed,
+                mime_type,
+            )
             .await;
         match outcome {
             Ok(outcome) => Ok(outcome),
@@ -409,7 +428,7 @@ impl DocumentIngestionService {
             let mut fs = FaultInjectingFs::new(cfg)?;
             Ok(fs.sweep_staging(staging_max_age)?)
         })
-        .await??;
+        .await?;
 
         // 2. Snapshot the document/artifact tables.
         let docs = self
@@ -435,6 +454,7 @@ impl DocumentIngestionService {
         }
 
         // 3. One blocking pass for all existence checks.
+        let mut missing_by_doc: HashMap<usize, usize> = HashMap::new();
         if !checks.is_empty() {
             let cfg = self.storage_config.clone();
             let names: Vec<String> = checks.iter().map(|(_, _, n)| n.clone()).collect();
@@ -446,9 +466,8 @@ impl DocumentIngestionService {
                 }
                 Ok::<_, ServiceError>(out)
             })
-            .await??;
+            .await?;
 
-            let mut missing_by_doc: HashMap<usize, usize> = HashMap::new();
             for ((doc_idx, artifact_id, object), exists) in checks.iter().zip(results) {
                 if !exists {
                     report.artifacts_missing_objects += 1;
@@ -459,41 +478,24 @@ impl DocumentIngestionService {
                     ));
                 }
             }
+        }
 
-            // 4. Purge inconsistent documents (rows only — their
-            //    surviving objects become unreferenced and are GC'd by
-            //    step 5 on a later pass once they age past grace).
-            for (i, doc) in docs.iter().enumerate() {
-                let has_missing = missing_by_doc.contains_key(&i);
-                let stale_empty = artifact_counts[i] == 0
-                    && older_than(&doc.created_at, options.incomplete_document_grace);
-                if !has_missing && !stale_empty {
-                    continue;
-                }
-                match self.purge_rows(&doc.id).await {
-                    Ok(true) => report.documents_purged += 1,
-                    Ok(false) => {}
-                    Err(e) => report.errors.push(format!(
-                        "failed to purge document {}: {e}",
-                        doc.id
-                    )),
-                }
+        // 4. Purge inconsistent documents (rows only — their surviving
+        //    objects become unreferenced and are GC'd by step 5 on a
+        //    later pass once they age past grace).
+        for (i, doc) in docs.iter().enumerate() {
+            let has_missing = missing_by_doc.contains_key(&i);
+            let stale_empty = artifact_counts[i] == 0
+                && older_than(&doc.created_at, options.incomplete_document_grace);
+            if !has_missing && !stale_empty {
+                continue;
             }
-        } else {
-            // No artifacts at all: still run the stale-empty check.
-            for doc in &docs {
-                if artifact_counts[docs.iter().position(|d| d.id == doc.id).unwrap_or(0)] == 0
-                    && older_than(&doc.created_at, options.incomplete_document_grace)
-                {
-                    match self.purge_rows(&doc.id).await {
-                        Ok(true) => report.documents_purged += 1,
-                        Ok(false) => {}
-                        Err(e) => report.errors.push(format!(
-                            "failed to purge document {}: {e}",
-                            doc.id
-                        )),
-                    }
-                }
+            match self.purge_rows(&doc.id).await {
+                Ok(true) => report.documents_purged += 1,
+                Ok(false) => {}
+                Err(e) => report
+                    .errors
+                    .push(format!("failed to purge document {}: {e}", doc.id)),
             }
         }
 
@@ -502,8 +504,10 @@ impl DocumentIngestionService {
         //    computed pre-purge, so objects of just-purged documents
         //    survive this pass and are collected on the next one.
         let root = self.storage_config.root_dir.clone();
-        let objects = spawn_blocking_joined(move || walk_objects(&root))
-            .await?;
+        let objects = spawn_blocking_joined(move || -> Result<Vec<DiskObject>, ServiceError> {
+            Ok(walk_objects(&root))
+        })
+        .await?;
         if !objects.is_empty() {
             let cfg = self.storage_config.clone();
             let grace = options.unreferenced_object_grace;
@@ -517,7 +521,7 @@ impl DocumentIngestionService {
                     let stale = object
                         .modified
                         .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|age| age > grace);
+                        .is_some_and(|age| age >= grace);
                     if !stale {
                         continue;
                     }
@@ -530,7 +534,7 @@ impl DocumentIngestionService {
                 }
                 Ok::<_, ServiceError>(removed)
             })
-            .await??;
+            .await?;
         }
 
         Ok(report)
@@ -562,6 +566,7 @@ impl DocumentIngestionService {
         let limits = self.limits;
         let name = object_name.to_string();
         let writer = tokio::task::spawn_blocking(move || -> Result<CommitReceipt, ServiceError> {
+            let mut rx = rx;
             let mut fs = FaultInjectingFs::new(config)?;
             fs = fs.with_stream_limits(limits);
             let mut upload = fs.begin_upload(&name)?;
@@ -573,7 +578,7 @@ impl DocumentIngestionService {
                 upload.write_chunk(piece)?;
             }
 
-            loop {
+            let receipt = loop {
                 match rx.blocking_recv() {
                     Some(Some(chunk)) => upload.write_chunk(&chunk)?,
                     Some(None) => break upload.commit()?,
@@ -584,7 +589,8 @@ impl DocumentIngestionService {
                         return Err(validation("stream", "upload cancelled by caller"));
                     }
                 }
-            }
+            };
+            Ok(receipt)
         });
 
         // Feed loop: read → send. A failed send means the writer died
@@ -644,7 +650,9 @@ impl DocumentIngestionService {
         declared_mime: Option<String>,
     ) -> Result<IngestOutcome, ServiceError> {
         let actor = request.actor_id.as_deref().unwrap_or(owner_id);
-        let artifact_mime = declared_mime.clone().unwrap_or_else(|| detected_mime.to_string());
+        let artifact_mime = declared_mime
+            .clone()
+            .unwrap_or_else(|| detected_mime.to_string());
 
         let artifact = self
             .documents
@@ -746,16 +754,26 @@ impl DocumentIngestionService {
     async fn compensate(&self, document_id: &DocumentId, object_name: &str) {
         let config = self.storage_config.clone();
         let name = object_name.to_string();
+        let doc_id_string = document_id.as_str().to_string();
         let object_result = tokio::task::spawn_blocking(move || -> Result<(), ServiceError> {
             let mut fs = FaultInjectingFs::new(config)?;
             fs.delete(&name)?;
+            // Remove the per-document directory too, but only when
+            // empty — `remove_dir` fails on non-empty dirs, which is
+            // exactly the guard we want (other artifacts' objects, or
+            // objects shared with copied documents, keep it alive).
+            let _ = std::fs::remove_dir(fs.root_dir().join("documents").join(&doc_id_string));
             Ok(())
         })
         .await;
-        if let Err(e) = object_result {
-            tracing::warn!(document = %document_id, error = %e, "ingest rollback: object delete task failed");
-        } else if let Ok(Err(e)) = object_result {
-            tracing::warn!(document = %document_id, error = %e, "ingest rollback: object delete failed");
+        match object_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(document = %document_id, error = %e, "ingest rollback: object delete failed");
+            }
+            Err(e) => {
+                tracing::warn!(document = %document_id, error = %e, "ingest rollback: object delete task failed");
+            }
         }
 
         if let Err(e) = self.purge_rows(document_id).await {
@@ -826,11 +844,18 @@ fn detect_content(head: &[u8]) -> (DocumentType, &'static str, SniffedFormat) {
         SniffedFormat::Jpeg => (DocumentType::Image, "image/jpeg", SniffedFormat::Jpeg),
         SniffedFormat::Gif => (DocumentType::Image, "image/gif", SniffedFormat::Gif),
         SniffedFormat::Zip => (DocumentType::Archive, "application/zip", SniffedFormat::Zip),
+        f @ (SniffedFormat::Video { .. } | SniffedFormat::Audio { .. }) => {
+            (DocumentType::Other, f.mime(), f)
+        }
         SniffedFormat::Unknown => {
             if looks_like_text(head) {
                 (DocumentType::Text, "text/plain", SniffedFormat::Unknown)
             } else {
-                (DocumentType::Other, "application/octet-stream", SniffedFormat::Unknown)
+                (
+                    DocumentType::Other,
+                    "application/octet-stream",
+                    SniffedFormat::Unknown,
+                )
             }
         }
     }
@@ -839,9 +864,9 @@ fn detect_content(head: &[u8]) -> (DocumentType, &'static str, SniffedFormat) {
 /// Conservative text check: no NUL and no C0 controls other than
 /// tab/LF/CR; bytes ≥ 0x80 are allowed (UTF-8 continuation/lead).
 fn looks_like_text(bytes: &[u8]) -> bool {
-    bytes.iter().all(|&b| {
-        b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7e).contains(&b) || b >= 0x80
-    })
+    bytes
+        .iter()
+        .all(|&b| b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7e).contains(&b) || b >= 0x80)
 }
 
 /// `local://documents/x/y` → `documents/x/y`; `None` for other schemes.
@@ -894,7 +919,8 @@ fn walk_objects(root: &Path) -> Vec<DiskObject> {
             if !file_path.is_file() {
                 continue;
             }
-            let Some(file_name) = file.file_name().to_str() else {
+            let file_name_os = file.file_name();
+            let Some(file_name) = file_name_os.to_str() else {
                 continue;
             };
             out.push(DiskObject {
@@ -926,12 +952,17 @@ fn older_than(timestamp: &str, grace: Duration) -> bool {
 /// Parses the store's `YYYY-MM-DDTHH:MM:SSZ` timestamps to epoch secs.
 fn rfc3339_epoch_secs(s: &str) -> Option<u64> {
     let b = s.as_bytes();
-    if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' || b[19] != b'Z' {
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
         return None;
     }
-    let num = |lo: usize, hi: usize| -> Option<i64> {
-        s.get(lo..hi)?.parse::<i64>().ok()
-    };
+    let num = |lo: usize, hi: usize| -> Option<i64> { s.get(lo..hi)?.parse::<i64>().ok() };
     let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
     let (hh, mm, ss) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
     if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
@@ -960,12 +991,13 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crates::document_engine::store::documents::NewDocument as StoreNewDocument;
     use crate::crates::document_engine::document::DocumentType as DT;
-    use crate::crates::storage::local::config::FaultInjectionConfig;
-    use crate::crates::storage::local::debug_when_full::FaultKind;
+    use crate::crates::document_engine::store::documents::NewDocument as StoreNewDocument;
+    use crate::crates::storage::STAGING_DIR_NAME;
+    use crate::crates::storage::local::config::{FaultInjectionConfig, FaultKind};
     use sha2::{Digest, Sha256};
     use std::io;
+    use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll};
@@ -1007,15 +1039,6 @@ mod tests {
             .await
             .expect("init document store");
         pool
-    }
-
-    fn service(root: &TempRoot) -> DocumentIngestionService {
-        DocumentIngestionService::new(test_pool_owned(), root.config())
-    }
-
-    // `service` needs an async pool; tests build it inline instead.
-    fn test_pool_owned() -> SqlitePool {
-        unreachable!()
     }
 
     /// In-memory `AsyncRead` over a byte slice (ready immediately).
@@ -1146,10 +1169,7 @@ mod tests {
 
         // Bytes are actually stored.
         let mut fs = FaultInjectingFs::new(root.config()).unwrap();
-        let object = format!(
-            "documents/{}/report.pdf",
-            outcome.document.id
-        );
+        let object = format!("documents/{}/report.pdf", outcome.document.id);
         assert_eq!(fs.read(&object).unwrap(), payload);
 
         // Metadata row exists with detected fields.
@@ -1162,10 +1182,7 @@ mod tests {
         .expect("metadata");
         assert_eq!(meta.title.as_deref(), Some("report"));
         assert_eq!(meta.custom_fields["detected_format"], "PDF");
-        assert_eq!(
-            meta.custom_fields["detected_mime_type"],
-            "application/pdf"
-        );
+        assert_eq!(meta.custom_fields["detected_mime_type"], "application/pdf");
 
         // Imported audit event recorded.
         let svc_docs = DocumentService::new(pool);
@@ -1173,9 +1190,11 @@ mod tests {
             .get_document_history(&outcome.document.id)
             .await
             .unwrap();
-        assert!(history
-            .iter()
-            .any(|e| e.event_type == DocumentAuditEventType::Imported));
+        assert!(
+            history
+                .iter()
+                .any(|e| e.event_type == DocumentAuditEventType::Imported)
+        );
 
         assert!(staging_files(&root).is_empty());
     }
@@ -1184,19 +1203,23 @@ mod tests {
     async fn format_detection_table() {
         let cases: Vec<(Vec<u8>, DT, &str)> = vec![
             (pdf_bytes(), DT::Pdf, "application/pdf"),
-            (
-                b"\x89PNG\r\n\x1a\nrest".to_vec(),
-                DT::Image,
-                "image/png",
-            ),
+            (b"\x89PNG\r\n\x1a\nrest".to_vec(), DT::Image, "image/png"),
             (
                 vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3],
                 DT::Image,
                 "image/jpeg",
             ),
             (b"GIF89a....".to_vec(), DT::Image, "image/gif"),
-            (b"PK\x03\x04\x14\x00".to_vec(), DT::Archive, "application/zip"),
-            (b"hello world\nplain text\n".to_vec(), DT::Text, "text/plain"),
+            (
+                b"PK\x03\x04\x14\x00".to_vec(),
+                DT::Archive,
+                "application/zip",
+            ),
+            (
+                b"hello world\nplain text\n".to_vec(),
+                DT::Text,
+                "text/plain",
+            ),
             (vec![0u8, 1, 2, 3, 4], DT::Other, "application/octet-stream"),
         ];
         for (i, (payload, expected_type, expected_mime)) in cases.into_iter().enumerate() {
@@ -1263,12 +1286,17 @@ mod tests {
             .ingest(SliceReader::new(b""), IngestRequest::new("user-1", "e.bin"))
             .await
             .expect_err("empty upload");
-        assert!(matches!(err, ServiceError::Store(StoreError::Validation { .. })));
-        assert!(DocumentService::new(pool)
-            .list_documents(None, None, true, 10)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(matches!(
+            err,
+            ServiceError::Store(StoreError::Validation { .. })
+        ));
+        assert!(
+            DocumentService::new(pool)
+                .list_documents(None, None, true, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1277,15 +1305,20 @@ mod tests {
         let pool = test_pool().await;
         let svc = DocumentIngestionService::new(pool, root.config());
         for name in ["../evil", "a/b", "a\\b", ".", "..", "x\x00y"] {
-            assert!(svc
-                .ingest(SliceReader::new(b"data"), IngestRequest::new("u", name))
-                .await
-                .is_err());
+            assert!(
+                svc.ingest(SliceReader::new(b"data"), IngestRequest::new("u", name))
+                    .await
+                    .is_err()
+            );
         }
-        assert!(svc
-            .ingest(SliceReader::new(b"data"), IngestRequest::new("  ", "ok.bin"))
+        assert!(
+            svc.ingest(
+                SliceReader::new(b"data"),
+                IngestRequest::new("  ", "ok.bin")
+            )
             .await
-            .is_err());
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1299,15 +1332,24 @@ mod tests {
         req.folder_id = Some(FolderId::new("folder-does-not-exist"));
         let payload = pdf_bytes();
 
-        let err = svc.ingest(SliceReader::new(&payload), req).await.expect_err("must fail");
-        assert!(matches!(err, ServiceError::Store(StoreError::NotFound { .. }) | ServiceError::Store(StoreError::Validation { .. })));
+        let err = svc
+            .ingest(SliceReader::new(&payload), req)
+            .await
+            .expect_err("must fail");
+        assert!(matches!(
+            err,
+            ServiceError::Store(StoreError::NotFound { .. })
+                | ServiceError::Store(StoreError::Validation { .. })
+        ));
 
         // Document purged, committed object deleted, staging clean.
-        assert!(DocumentService::new(pool)
-            .list_documents(None, None, true, 10)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            DocumentService::new(pool)
+                .list_documents(None, None, true, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let objects_dir = root.0.join("documents");
         let remaining: Vec<_> = std::fs::read_dir(&objects_dir)
             .map(|d| d.flatten().collect())
@@ -1337,11 +1379,13 @@ mod tests {
             .expect_err("commit fault must fail ingest");
         assert!(matches!(err, ServiceError::Storage(_)));
 
-        assert!(DocumentService::new(pool)
-            .list_documents(None, None, true, 10)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            DocumentService::new(pool)
+                .list_documents(None, None, true, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(staging_files(&root).is_empty());
     }
 
@@ -1352,7 +1396,11 @@ mod tests {
         let svc = DocumentIngestionService::new(pool.clone(), root.config());
 
         let (tx, rx) = tokio_mpsc::channel::<Vec<u8>>(16);
-        let reader = ChanReader { rx, cur: Vec::new(), pos: 0 };
+        let reader = ChanReader {
+            rx,
+            cur: Vec::new(),
+            pos: 0,
+        };
         let handle = tokio::spawn({
             let svc = svc.clone();
             async move {
@@ -1361,11 +1409,15 @@ mod tests {
             }
         });
 
-        // Feed a few chunks then walk away — simulates a dropped caller.
-        tx.send(b"chunk-one".to_vec()).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Feed enough bytes to clear the 512-byte sniff peek so the
+        // document row gets created, then stall — simulates a caller
+        // dropping the ingest mid-stream.
+        let mut first = vec![b'a'; SNIFF_BYTES + 100];
+        first[..5].copy_from_slice(b"%PDF-");
+        tx.send(first).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
         tx.send(b"chunk-two".to_vec()).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         handle.abort();
         let _ = handle.await;
 
@@ -1383,11 +1435,13 @@ mod tests {
             .unwrap();
         assert!(report.documents_purged >= 1, "report: {report:?}");
 
-        assert!(DocumentService::new(pool)
-            .list_documents(None, None, true, 10)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            DocumentService::new(pool)
+                .list_documents(None, None, true, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(staging_files(&root).is_empty());
     }
 
@@ -1416,13 +1470,19 @@ mod tests {
         // 3. A healthy ingested document — must survive.
         let payload = pdf_bytes();
         let good = svc
-            .ingest(SliceReader::new(&payload), IngestRequest::new("user-1", "good.pdf"))
+            .ingest(
+                SliceReader::new(&payload),
+                IngestRequest::new("user-1", "good.pdf"),
+            )
             .await
             .unwrap();
 
         // 4. Document whose artifact's object goes missing.
         let broken = svc
-            .ingest(SliceReader::new(&payload), IngestRequest::new("user-1", "broken.pdf"))
+            .ingest(
+                SliceReader::new(&payload),
+                IngestRequest::new("user-1", "broken.pdf"),
+            )
             .await
             .unwrap();
         let broken_object = format!("documents/{}/broken.pdf", broken.document.id);
@@ -1448,8 +1508,18 @@ mod tests {
         assert!(report.unreferenced_objects_removed >= 1);
 
         // Healthy doc + its object survive; broken doc is gone.
-        assert!(docs.get_document(&good.document.id).await.unwrap().is_some());
-        assert!(docs.get_document(&broken.document.id).await.unwrap().is_none());
+        assert!(
+            docs.get_document(&good.document.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            docs.get_document(&broken.document.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(object_path(&root, &format!("documents/{}/good.pdf", good.document.id)).exists());
         assert!(!ghost.exists());
     }
@@ -1504,7 +1574,10 @@ mod tests {
         let svc = DocumentIngestionService::new(pool.clone(), root.config());
         let docs = DocumentService::new(pool);
 
-        let folder = docs.create_folder("Invoices", None, "user-1").await.unwrap();
+        let folder = docs
+            .create_folder("Invoices", None, "user-1")
+            .await
+            .unwrap();
         let mut req = IngestRequest::new("user-1", "inv.pdf");
         req.folder_id = Some(folder.id.clone());
         req.tags = vec!["finance".into(), "2026".into()];
@@ -1512,7 +1585,10 @@ mod tests {
         req.title = Some("Invoice #42".into());
         req.mime_type = Some("application/pdf".into());
 
-        let outcome = svc.ingest(SliceReader::new(&pdf_bytes()), req).await.unwrap();
+        let outcome = svc
+            .ingest(SliceReader::new(&pdf_bytes()), req)
+            .await
+            .unwrap();
         assert_eq!(outcome.document.folder_id, Some(folder.id));
 
         let tags = docs.list_tags(&outcome.document.id).await.unwrap();
@@ -1526,6 +1602,103 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(meta.title.as_deref(), Some("Invoice #42"));
-        assert_eq!(meta.keywords, vec!["finance".to_string(), "2026".to_string()]);
+        assert_eq!(
+            meta.keywords,
+            vec!["finance".to_string(), "2026".to_string()]
+        );
+    }
+
+    /// Definition-of-done flow end to end: ingest a document, retrieve
+    /// it and its artifact/metadata through the service facade, create
+    /// a new version, list versions, then restore the earlier one.
+    #[tokio::test]
+    async fn ingest_retrieve_version_list_and_restore() {
+        let root = TempRoot::new();
+        let pool = test_pool().await;
+        let svc = DocumentIngestionService::new(pool.clone(), root.config());
+        let docs = DocumentService::new(pool);
+
+        // 1. Ingest registers the document, artifact, version 1 and
+        //    metadata in one pipeline.
+        let outcome = svc
+            .ingest(
+                SliceReader::new(&pdf_bytes()),
+                IngestRequest::new("user-1", "e2e.pdf"),
+            )
+            .await
+            .expect("ingest");
+        assert_eq!(outcome.version.version_number, 1);
+        assert!(outcome.version.is_current);
+
+        // 2. Retrieve through the facade.
+        let doc = docs
+            .get_document(&outcome.document.id)
+            .await
+            .unwrap()
+            .expect("document row");
+        assert_eq!(doc.id, outcome.document.id);
+
+        let artifacts = docs.list_artifacts(&doc.id).await.unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].id, outcome.artifact.id);
+        let resolved = docs
+            .download_artifact(&artifacts[0].id)
+            .await
+            .unwrap()
+            .expect("artifact row");
+        assert_eq!(resolved.storage_uri, outcome.storage_uri);
+
+        let meta = docs
+            .get_document_metadata(&doc.id)
+            .await
+            .unwrap()
+            .expect("metadata row");
+        assert_eq!(meta.custom_fields["detected_format"], "PDF");
+
+        // 3. A second artifact becomes version 2.
+        let art2 = docs
+            .upload_artifact(&NewArtifact {
+                id: None,
+                document_id: doc.id.clone(),
+                storage_uri: format!("local://documents/{}/e2e-v2.pdf", doc.id),
+                file_name: "e2e-v2.pdf".to_string(),
+                mime_type: Some("application/pdf".to_string()),
+                size_bytes: pdf_bytes().len() as u64,
+                checksum: None,
+            })
+            .await
+            .unwrap();
+        let v2 = docs
+            .create_version(&doc.id, Some(&art2.id), "user-1", Some("revision 2"))
+            .await
+            .unwrap();
+        assert_eq!(v2.version_number, 2);
+        assert!(v2.is_current);
+
+        // 4. Versions list newest-first with the current pointer on v2.
+        let versions = docs.list_versions(&doc.id).await.unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].version_number, 2);
+        assert!(versions[0].is_current);
+        assert_eq!(versions[1].version_number, 1);
+        assert!(!versions[1].is_current);
+
+        // 5. Restore version 1: the current pointer moves back.
+        let restored = docs.restore_version(&doc.id, 1).await.unwrap();
+        assert_eq!(restored.id, doc.id);
+        let versions = docs.list_versions(&doc.id).await.unwrap();
+        let v1 = versions
+            .iter()
+            .find(|v| v.version_number == 1)
+            .expect("v1 listed");
+        let v2 = versions
+            .iter()
+            .find(|v| v.version_number == 2)
+            .expect("v2 listed");
+        assert!(v1.is_current);
+        assert!(!v2.is_current);
+        // Both artifacts remain listed — restore moves a pointer, it
+        // does not delete bytes.
+        assert_eq!(docs.list_artifacts(&doc.id).await.unwrap().len(), 2);
     }
 }

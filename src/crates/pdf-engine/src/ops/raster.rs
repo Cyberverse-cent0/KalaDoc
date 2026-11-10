@@ -88,6 +88,76 @@ impl From<&PageImage> for PageImageReport {
     }
 }
 
+/// Output encoding for [`rasterize_render`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RasterFormat {
+    /// PNG (lossless).
+    Png,
+    /// JPEG (lossy; `jpeg_quality` applies).
+    Jpeg,
+    /// TIFF (lossless; produced directly by `pdftoppm -tiff`).
+    Tiff,
+}
+
+impl Default for RasterFormat {
+    fn default() -> Self {
+        Self::Png
+    }
+}
+
+/// Options for [`rasterize_render`]. All fields are optional except
+/// `format`, which defaults to PNG.
+#[derive(Debug, Clone)]
+pub struct RasterOptions {
+    /// Output encoding.
+    pub format: RasterFormat,
+    /// Grayscale output (`pdftoppm -gray`).
+    pub grayscale: bool,
+    /// Monochrome output (`pdftoppm -mono`). Takes precedence over
+    /// `grayscale` when both are set.
+    pub monochrome: bool,
+    /// Crop region in **output pixels** (`pdftoppm -x -y -W -H`,
+    /// top-left origin). Callers convert PDF points using the render
+    /// DPI before calling.
+    pub crop_px: Option<[u32; 4]>,
+    /// Scale the longer page side to at most this many pixels
+    /// (`pdftoppm -scale-to`).
+    pub scale_to: Option<u32>,
+    /// JPEG quality 1–100 (`pdftoppm -jpegopt quality=N`). Ignored
+    /// for non-JPEG formats.
+    pub jpeg_quality: Option<u8>,
+}
+
+impl Default for RasterOptions {
+    fn default() -> Self {
+        Self {
+            format: RasterFormat::Png,
+            grayscale: false,
+            monochrome: false,
+            crop_px: None,
+            scale_to: None,
+            jpeg_quality: None,
+        }
+    }
+}
+
+/// A rendered page in an explicit encoding — the multi-format
+/// counterpart of [`PageImage`].
+#[derive(Debug, Clone)]
+pub struct RenderedPage {
+    /// 1-based page number.
+    pub page: u32,
+    /// Pixel width (decoded from the output when the format allows).
+    pub width_px: u32,
+    /// Pixel height.
+    pub height_px: u32,
+    /// Encoding of `data`.
+    pub format: RasterFormat,
+    /// Encoded image bytes.
+    pub data: Vec<u8>,
+}
+
 /// Locate `tool` on `PATH`. Returns the full path of the first
 /// executable match, or [`PdfError::MissingTool`].
 ///
@@ -150,6 +220,32 @@ pub(crate) fn rasterize(
     dpi: u32,
     limits: &EngineLimits,
 ) -> PdfResult<Vec<PageImage>> {
+    let rendered = rasterize_render(input, pages, dpi, &RasterOptions::default(), limits)?;
+    Ok(rendered
+        .into_iter()
+        .map(|r| PageImage {
+            page: r.page,
+            width_px: r.width_px,
+            height_px: r.height_px,
+            png: r.data,
+        })
+        .collect())
+}
+
+/// Rasterize selected pages with explicit output options.
+///
+/// Same contract as [`rasterize`] plus [`RasterOptions`]: output
+/// encoding (PNG/JPEG/TIFF), grayscale/monochrome modes, pixel-space
+/// crop, `-scale-to` sizing and JPEG quality — all passed straight to
+/// `pdftoppm`. Encrypted documents are rejected; missing `pdftoppm` is
+/// [`PdfError::MissingTool`].
+pub(crate) fn rasterize_render(
+    input: &[u8],
+    pages: Option<&str>,
+    dpi: u32,
+    opts: &RasterOptions,
+    limits: &EngineLimits,
+) -> PdfResult<Vec<RenderedPage>> {
     let doc = load_pdf(input, limits)?;
     reject_encrypted(&doc)?;
     let page_count = doc.get_pages().len() as u32;
@@ -171,14 +267,42 @@ pub(crate) fn rasterize(
     std::fs::write(&input_path, input).map_err(PdfError::Io)?;
     let out_prefix = dir.path().join("page");
 
-    let status = Command::new(&tool)
-        .arg("-png")
-        .arg("-r")
-        .arg(dpi.to_string())
-        .arg("-f")
-        .arg(first.to_string())
-        .arg("-l")
-        .arg(last.to_string())
+    let mut cmd = Command::new(&tool);
+    cmd.arg(match opts.format {
+        RasterFormat::Png => "-png",
+        RasterFormat::Jpeg => "-jpeg",
+        RasterFormat::Tiff => "-tiff",
+    })
+    .arg("-r")
+    .arg(dpi.to_string())
+    .arg("-f")
+    .arg(first.to_string())
+    .arg("-l")
+    .arg(last.to_string());
+    if opts.monochrome {
+        cmd.arg("-mono");
+    } else if opts.grayscale {
+        cmd.arg("-gray");
+    }
+    if let Some(n) = opts.scale_to {
+        cmd.arg("-scale-to").arg(n.to_string());
+    }
+    if let Some([x, y, w, h]) = opts.crop_px {
+        cmd.arg("-x")
+            .arg(x.to_string())
+            .arg("-y")
+            .arg(y.to_string())
+            .arg("-W")
+            .arg(w.to_string())
+            .arg("-H")
+            .arg(h.to_string());
+    }
+    if opts.format == RasterFormat::Jpeg
+        && let Some(q) = opts.jpeg_quality
+    {
+        cmd.arg("-jpegopt").arg(format!("quality={q}"));
+    }
+    let status = cmd
         .arg(&input_path)
         .arg(&out_prefix)
         .stdin(std::process::Stdio::null())
@@ -196,9 +320,13 @@ pub(crate) fn rasterize(
         });
     }
 
-    // pdftoppm names outputs `<prefix>-<page>.png`, zero-padding the
-    // page number to the width of the last page. Collect by glob-scan
-    // of the tempdir and parse the trailing digits.
+    // pdftoppm names outputs `<prefix>-<page>.<ext>`; the extension
+    // depends on the format flag (.png/.jpg/.tif or .tiff).
+    let exts: &[&str] = match opts.format {
+        RasterFormat::Png => &["png"],
+        RasterFormat::Jpeg => &["jpg", "jpeg"],
+        RasterFormat::Tiff => &["tif", "tiff"],
+    };
     let wanted: std::collections::BTreeSet<u32> = selected.iter().copied().collect();
     let mut out = Vec::with_capacity(wanted.len());
     let mut total_bytes: u64 = 0;
@@ -206,7 +334,11 @@ pub(crate) fn rasterize(
         .map_err(PdfError::Io)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "png"))
+        .filter(|p| {
+            p.extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| exts.contains(&x.to_ascii_lowercase().as_str()))
+        })
         .collect();
     entries.sort();
 
@@ -230,23 +362,21 @@ pub(crate) fn rasterize(
                 "rendered output exceeds total budget {MAX_TOTAL_PNG_BYTES} bytes"
             )));
         }
-        let png = std::fs::read(&path).map_err(PdfError::Io)?;
-        let (width_px, height_px) = png_dimensions(&png).ok_or_else(|| {
-            PdfError::ExternalTool {
+        let data = std::fs::read(&path).map_err(PdfError::Io)?;
+        let (width_px, height_px) =
+            rendered_dimensions(opts.format, &data).ok_or_else(|| PdfError::ExternalTool {
                 tool: RENDER_TOOL.to_string(),
-                detail: format!("page {page} output is not a valid PNG"),
-            }
-        })?;
-        out.push(PageImage {
+                detail: format!("page {page} output could not be decoded for dimensions"),
+            })?;
+        out.push(RenderedPage {
             page,
             width_px,
             height_px,
-            png,
+            format: opts.format,
+            data,
         });
     }
 
-    // A requested page with no output file means pdftoppm skipped it —
-    // report rather than silently returning fewer pages.
     if out.len() != wanted.len() {
         let missing: Vec<u32> = wanted
             .iter()
@@ -259,6 +389,20 @@ pub(crate) fn rasterize(
         });
     }
     Ok(out)
+}
+
+/// Decode pixel dimensions from rendered output. PNG reads the IHDR
+/// directly; JPEG/TIFF go through the `image` crate.
+fn rendered_dimensions(format: RasterFormat, data: &[u8]) -> Option<(u32, u32)> {
+    match format {
+        RasterFormat::Png => png_dimensions(data),
+        RasterFormat::Jpeg => image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
+            .ok()
+            .map(|img| (img.width(), img.height())),
+        RasterFormat::Tiff => image::load_from_memory_with_format(data, image::ImageFormat::Tiff)
+            .ok()
+            .map(|img| (img.width(), img.height())),
+    }
 }
 
 /// Extract the page number from a `page-<n>.png` filename.
@@ -307,10 +451,7 @@ mod tests {
 
     #[test]
     fn png_page_number_parses_pdftoppm_names() {
-        assert_eq!(
-            png_page_number(Path::new("/tmp/x/page-12.png")),
-            Some(12)
-        );
+        assert_eq!(png_page_number(Path::new("/tmp/x/page-12.png")), Some(12));
         assert_eq!(png_page_number(Path::new("page-1.png")), Some(1));
         assert_eq!(png_page_number(Path::new("page.png")), None);
         assert_eq!(png_page_number(Path::new("page-x.png")), None);

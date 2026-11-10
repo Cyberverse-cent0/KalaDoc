@@ -17,6 +17,7 @@ use crate::crates::core::engine::{
     ProcessingEngine,
 };
 use crate::crates::image_engine::ImageEngine;
+use crate::crates::multimedia_engine::MediaEngine;
 use crate::crates::pdf_engine::PdfEngine;
 use crate::crates::pipeline_engine::PipelineEngine;
 use crate::crates::security_engine::SecurityEngine;
@@ -66,15 +67,17 @@ impl EngineRegistry {
     }
 
     /// A registry pre-populated with the built-in engines: `convert`,
-    /// `image`, `pdf`, `pipeline`, `security`, and `video`. Additional
+    /// `image`, `multimedia`, `pdf`, `pipeline`, `security`, and `video`.
+    /// Additional
     /// engines can be added with [`EngineRegistry::register`].
     pub fn builtin() -> Self {
         let mut registry = Self::new();
-        registry.register(Arc::new(PdfEngine::new()));
-        registry.register(Arc::new(SecurityEngine::new()));
         registry.register(Arc::new(ConversionEngine::new()));
         registry.register(Arc::new(ImageEngine::new()));
+        registry.register(Arc::new(MediaEngine::new()));
+        registry.register(Arc::new(PdfEngine::new()));
         registry.register(Arc::new(PipelineEngine::new()));
+        registry.register(Arc::new(SecurityEngine::new()));
         registry.register(Arc::new(VideoEngine::new()));
         registry
     }
@@ -332,8 +335,16 @@ mod tests {
     #[test]
     fn builtin_registers_all_builtin_engines() {
         let registry = EngineRegistry::builtin();
-        assert_eq!(registry.len(), 6);
-        for name in ["convert", "image", "pdf", "pipeline", "security", "video"] {
+        assert_eq!(registry.len(), 7);
+        for name in [
+            "convert",
+            "image",
+            "multimedia",
+            "pdf",
+            "pipeline",
+            "security",
+            "video",
+        ] {
             assert!(registry.get(name).is_some(), "missing engine {name}");
         }
 
@@ -341,7 +352,15 @@ mod tests {
         let names: Vec<&str> = infos.iter().map(|info| info.name.as_str()).collect();
         assert_eq!(
             names,
-            ["convert", "image", "pdf", "pipeline", "security", "video"]
+            [
+                "convert",
+                "image",
+                "multimedia",
+                "pdf",
+                "pipeline",
+                "security",
+                "video"
+            ]
         );
     }
 
@@ -378,10 +397,19 @@ mod tests {
     async fn builtin_engines_report_healthy() {
         let registry = EngineRegistry::builtin();
         let results = registry.health_all().await;
-        assert_eq!(results.len(), 6);
+        assert_eq!(results.len(), 7);
         for entry in &results {
-            assert_eq!(entry.status, EngineHealthStatus::Healthy);
-            assert!(entry.message.is_none());
+            // Engines may honestly report Degraded when an optional
+            // external tool (e.g. tesseract for pdf OCR) is absent —
+            // that is still a working engine, not an unavailable one.
+            // `message` is informational: Healthy engines may carry
+            // detail such as a detected tool version.
+            match entry.status {
+                EngineHealthStatus::Healthy | EngineHealthStatus::Degraded => {}
+                EngineHealthStatus::Unavailable => {
+                    panic!("{} is unavailable: {:?}", entry.name, entry.message)
+                }
+            }
         }
     }
 

@@ -388,7 +388,7 @@ impl StreamUpload for LocalUploadWriter<'_> {
         if self.finished {
             return Err(StorageError::Io {
                 path: self.staged_path.clone(),
-                source: io::Error::new(io::ErrorKind::Other, "upload already finished"),
+                source: io::Error::other("upload already finished"),
             });
         }
         let chunk_len = chunk.len() as u64;
@@ -416,7 +416,7 @@ impl StreamUpload for LocalUploadWriter<'_> {
 
         let file = self.file.as_mut().ok_or_else(|| StorageError::Io {
             path: self.staged_path.clone(),
-            source: io::Error::new(io::ErrorKind::Other, "upload file closed"),
+            source: io::Error::other("upload file closed"),
         })?;
         file.write_all(chunk).map_err(|source| StorageError::Io {
             path: self.staged_path.clone(),

@@ -1,5 +1,6 @@
 //! Document relationship persistence — directed links between documents.
 
+use serde::Serialize;
 use serde_json::json;
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 
@@ -16,6 +17,13 @@ use super::{StoreError, StoreResult, enum_parse, enum_str, gen_id, now_rfc3339};
 
 const REL_COLS: &str =
     "id, source_document_id, target_document_id, relationship_type, created_by, created_at";
+
+/// `DOC_COLS` qualified with the `d.` alias — the unqualified column
+/// list is ambiguous in the `related_documents` join, where
+/// `document_relationships_tbl` has same-named columns.
+const DOC_COLS_D: &str = "d.id, d.name, d.document_type, d.status, d.origin, d.source_uri, \
+     d.source_external_ref, d.source_imported_at, d.folder_id, d.owner_id, d.created_at, \
+     d.updated_at";
 
 fn relationship_from_row(row: &SqliteRow) -> StoreResult<DocumentRelationship> {
     Ok(DocumentRelationship {
@@ -178,7 +186,7 @@ pub async fn list_incoming_relationships(
 }
 
 /// A document related to another via a [`DocumentRelationship`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RelatedDocument {
     /// The other document in the relationship.
     pub document: Document,
@@ -197,16 +205,16 @@ pub async fn related_documents(
     document_id: &DocumentId,
 ) -> StoreResult<Vec<RelatedDocument>> {
     let rows = sqlx::query(&format!(
-        "SELECT d.*, r.relationship_type AS rel_type, 1 AS outgoing
+        "SELECT {DOC_COLS_D}, r.relationship_type AS rel_type, 1 AS outgoing, d.created_at AS doc_created_at
          FROM document_relationships_tbl r
          JOIN documents_tbl d ON d.id = r.target_document_id
          WHERE r.source_document_id = ?
          UNION ALL
-         SELECT d.*, r.relationship_type AS rel_type, 0 AS outgoing
+         SELECT {DOC_COLS_D}, r.relationship_type AS rel_type, 0 AS outgoing, d.created_at AS doc_created_at
          FROM document_relationships_tbl r
          JOIN documents_tbl d ON d.id = r.source_document_id
          WHERE r.target_document_id = ?
-         ORDER BY outgoing DESC, created_at"
+         ORDER BY outgoing DESC, doc_created_at"
     ))
     .bind(document_id.as_str())
     .bind(document_id.as_str())

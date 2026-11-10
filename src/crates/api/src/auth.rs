@@ -1,118 +1,144 @@
-//! Bearer-token authentication for protected routes.
+//! Bearer-token authentication middleware.
 //!
-//! [`AuthenticatedSession`] is an axum [`FromRequestParts`]
-//! extractor: it pulls the `Authorization: Bearer <token>` header,
-//! hashes nothing itself, and delegates validation to
-//! [`session::validate_session`](crate::crates::application::Organization::session::validate_session)
-//! — the same code path `kaladoc auth` uses. Unknown, expired,
-//! revoked, or absolutely-aged-out tokens are indistinguishable and
-//! all produce [`ApiError::Unauthorized`] (`401`).
+//! [`require_auth`] runs on every protected route: it extracts the
+//! `Authorization: Bearer <token>` header and resolves it two ways —
 //!
-//! On success the extractor yields the resolved [`Session`] (plus its
-//! `user_id` for convenience) so handlers can attribute actions to a
-//! user without re-querying.
+//! 1. **Static API keys** — if the token matches a configured
+//!    [`ApiKey`](crate::config::ApiKey) (`api.api_keys` /
+//!    `KALADOC_API_KEYS`, `name:key` pairs), the request is
+//!    authenticated as `apikey:<name>` with no session.
+//! 2. **Session tokens** — otherwise the token is validated against
+//!    `sessions_tbl` via
+//!    [`session::validate_session`](crate::crates::application::Organization::session::validate_session).
+//!
+//! The resolved [`AuthUser`] is stored in request extensions for
+//! handlers. Missing/malformed/invalid credentials get a `401` in the
+//! standard error envelope; database failures get a `500`.
 
-use axum::extract::FromRequestParts;
-use axum::http::header::AUTHORIZATION;
-use axum::http::request::Parts;
+use std::sync::Arc;
 
-use crate::crates::application::Organization::session::{Session, SessionError, validate_session};
+use axum::extract::{Request, State};
+use axum::http::header;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 
-use super::AppState;
-use super::error::ApiError;
+use crate::crates::application::Organization::session;
+use crate::crates::observability::RequestId;
 
-/// A request authenticated by a valid session token.
+use super::ApiError;
+use super::state::ApiState;
+
+/// The authenticated principal, inserted into request extensions by
+/// [`require_auth`].
 ///
-/// Insert this as a handler parameter (anywhere after `State` and
-/// before the body extractor) to require authentication:
-///
-/// ```ignore
-/// async fn handler(auth: AuthenticatedSession, State(state): State<AppState>) -> ...
-/// ```
+/// `owner_id` is the default owner scope handlers use for
+/// owner-scoped listings/uploads; `actor_id` is what audit and job
+/// payloads record as the acting identity. For session tokens both are
+/// the numeric user id; for static API keys both are `apikey:<name>`.
 #[derive(Debug, Clone)]
-pub struct AuthenticatedSession {
-    /// The validated session row (`token_hash`, timestamps, ...).
-    /// The raw token is never retained.
-    pub session: Session,
-    /// Convenience copy of `session.user_id`.
-    pub user_id: i64,
+pub struct AuthUser {
+    /// Owner-scope id (session user id, or `apikey:<name>`).
+    pub owner_id: String,
+    /// Actor id recorded in audit/job payloads.
+    pub actor_id: String,
+    /// Session row id for session-token auth; `None` for API keys.
+    pub session_id: Option<i64>,
 }
 
-impl FromRequestParts<AppState> for AuthenticatedSession {
-    type Rejection = ApiError;
+impl AuthUser {
+    /// Session-authenticated principal.
+    fn session(user_id: i64, session_id: i64) -> Self {
+        Self {
+            owner_id: user_id.to_string(),
+            actor_id: user_id.to_string(),
+            session_id: Some(session_id),
+        }
+    }
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let token = bearer_token(&parts.headers).ok_or(ApiError::Unauthorized)?;
-        match validate_session(&state.pool, &token, &state.session_config).await {
-            Ok(Some(session)) => Ok(Self {
-                user_id: session.user_id,
-                session,
-            }),
-            // Unknown / expired / revoked / absolutely aged out —
-            // deliberately indistinguishable to the client.
-            Ok(None) => Err(ApiError::Unauthorized),
-            Err(e) => Err(ApiError::from_session(e)),
+    /// API-key-authenticated principal; `name` is the key's configured
+    /// name (the `apikey:<name>` actor).
+    fn api_key(name: &str) -> Self {
+        let actor = format!("apikey:{name}");
+        Self {
+            owner_id: actor.clone(),
+            actor_id: actor,
+            session_id: None,
         }
     }
 }
 
-/// Extracts the token from `Authorization: Bearer <token>`.
+/// `Authorization: Bearer <token>` gate for protected routes.
 ///
-/// Only the `Bearer` scheme is accepted (case-insensitive scheme,
-/// per RFC 7235); extra whitespace around the token is trimmed.
-/// Returns `None` for a missing header, a different scheme, or an
-/// empty token.
-fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
-    let value = headers.get(AUTHORIZATION)?.to_str().ok()?;
+/// Static API keys are checked first (constant-time compare, no I/O);
+/// anything else falls through to session validation. An unknown key
+/// is not distinguished from an unknown session token — both `401`.
+pub async fn require_auth(
+    State(state): State<Arc<ApiState>>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let token = bearer_token(request.headers()).ok_or_else(|| {
+        ApiError::unauthorized("missing or malformed Authorization: Bearer <token> header")
+            .with_request_id(request_id_from(request.headers()))
+    })?;
+
+    if let Some(name) = api_key_name(&state, token) {
+        request.extensions_mut().insert(AuthUser::api_key(name));
+        return Ok(next.run(request).await.into_response());
+    }
+
+    let session = session::validate_session(state.services.pool(), token, &state.session_config)
+        .await
+        .map_err(|e| ApiError::internal(format!("session validation failed: {e}")))?
+        .ok_or_else(|| {
+            ApiError::unauthorized("invalid or expired session token")
+                .with_request_id(request_id_from(request.headers()))
+        })?;
+
+    request
+        .extensions_mut()
+        .insert(AuthUser::session(session.user_id, session.id));
+    Ok(next.run(request).await.into_response())
+}
+
+/// Returns the configured key name when `token` matches a static API
+/// key, else `None`. Comparisons are length-checked then constant-time
+/// over the bytes so the key list isn't a timing oracle.
+fn api_key_name<'a>(state: &'a ApiState, token: &str) -> Option<&'a str> {
+    state
+        .api_keys
+        .iter()
+        .find(|k| ct_eq(k.key.as_bytes(), token.as_bytes()))
+        .map(|k| k.name.as_str())
+}
+
+/// Constant-time byte-string equality (no early exit on mismatch).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+/// Extracts the token from `Authorization: Bearer …` (case-insensitive
+/// scheme). Returns `None` when the header is absent or malformed.
+fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = value.split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("bearer") {
         return None;
     }
     let token = token.trim();
-    if token.is_empty() {
-        return None;
-    }
-    Some(token.to_string())
+    (!token.is_empty()).then_some(token)
 }
 
-impl ApiError {
-    /// Maps a session-store failure to a 500 — DB outages are not the
-    /// client's fault, but the detail stays generic (no internals leak).
-    fn from_session(e: SessionError) -> Self {
-        tracing::warn!(error = %e, "session validation failed");
-        ApiError::Internal("session store unavailable".to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::http::HeaderValue;
-
-    fn headers_with(value: &str) -> axum::http::HeaderMap {
-        let mut h = axum::http::HeaderMap::new();
-        h.insert(AUTHORIZATION, HeaderValue::from_str(value).unwrap());
-        h
-    }
-
-    #[test]
-    fn bearer_token_parsing() {
-        assert_eq!(
-            bearer_token(&headers_with("Bearer abc123")).as_deref(),
-            Some("abc123")
-        );
-        // Scheme is case-insensitive; token whitespace is trimmed.
-        assert_eq!(
-            bearer_token(&headers_with("bearer   tok  ")).as_deref(),
-            Some("tok")
-        );
-        // Wrong scheme / missing header / empty token → None.
-        assert!(bearer_token(&headers_with("Basic abc")).is_none());
-        assert!(bearer_token(&headers_with("Bearer")).is_none());
-        assert!(bearer_token(&headers_with("Bearer   ")).is_none());
-        assert!(bearer_token(&axum::http::HeaderMap::new()).is_none());
-    }
+/// Propagates a well-formed `x-request-id` header into error bodies;
+/// anything else yields a fresh id.
+fn request_id_from(headers: &axum::http::HeaderMap) -> RequestId {
+    headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(RequestId::parse)
+        .unwrap_or_default()
 }

@@ -38,4 +38,19 @@ pub enum ImageError {
     /// value.
     #[error("resource limit exceeded: {0}")]
     LimitExceeded(String),
+
+    /// Filesystem I/O outside the codec itself failed (temp files,
+    /// external-tool scratch space).
+    #[error("io error")]
+    Io(#[source] std::io::Error),
+
+    /// A required external tool (e.g. `tesseract`) is not on `PATH` or
+    /// exited non-zero. `detail` says which case occurred.
+    #[error("external tool `{tool}` failed: {detail}")]
+    ExternalTool {
+        /// Tool name.
+        tool: String,
+        /// Failure detail ("not found on PATH", exit status, ...).
+        detail: String,
+    },
 }

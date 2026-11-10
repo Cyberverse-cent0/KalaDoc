@@ -50,12 +50,34 @@ pub async fn run(ctx: &Context, args: &JobsArgs) -> Result<i32, CliError> {
 /// Runs the engine's poll loop forever. The JoinHandle only resolves if
 /// the task panics — Ctrl+C terminates the process normally.
 async fn worker(ctx: &Context) -> Result<i32, CliError> {
+    spawn_worker(ctx).await?;
+    Ok(0)
+}
+
+/// Builds the job engine (database, schedule table, built-in handlers,
+/// scheduler tick handler, interrupted-job recovery) and spawns its
+/// poll loop as a detached task. Returns the engine handle; dropping
+/// it does not stop the worker — the spawned task holds its own
+/// reference. Shared by `kaladoc jobs worker` and `kaladoc serve
+/// --worker`.
+pub(crate) async fn spawn_worker(ctx: &Context) -> Result<Arc<JobEngine>, CliError> {
     let db_config = ctx.db_config()?;
     let pool = init_db::init_db_with(&db_config).await?;
+
+    // Recurring-job support: the schedule table must exist and at least
+    // one tick job must be queued so the engine keeps driving `tick`.
+    crate::crates::scheduler::create_schedule_table(&pool).await?;
+    crate::crates::scheduler::enqueue_tick(&pool, None, None).await?;
 
     let app_config = ctx.config()?;
     let mut engine = JobEngine::new(pool, app_config.to_job_config());
     crate::crates::application::job_handlers::register_builtin(&mut engine);
+    engine.register(
+        crate::crates::scheduler::SCHEDULER_TICK_KIND,
+        Arc::new(crate::crates::scheduler::SchedulerTickHandler::new(
+            crate::crates::scheduler::SchedulerConfig::default(),
+        )),
+    );
 
     // Reclaim jobs a previous crashed worker left in `running` before
     // this worker starts claiming new ones.
@@ -72,7 +94,7 @@ async fn worker(ctx: &Context) -> Result<i32, CliError> {
         .spawn()
         .await
         .map_err(|e| CliError::Internal(format!("job worker task failed: {e}")))?;
-    Ok(0)
+    Ok(engine)
 }
 
 // ---------------------------------------------------------------------------

@@ -14,7 +14,8 @@ use crate::crates::core::engine::{
 };
 
 use super::backend::{BackendAvailability, ConversionBackend};
-use super::backends::external::ExternalBackendSet;
+use super::backends::epub::EpubBackend;
+use super::backends::external;
 use super::backends::rust::RustBackend;
 use super::error::{ConvertError, ConvertResult};
 use super::model::{ConvertOutput, ConvertRequest, Format};
@@ -28,17 +29,7 @@ pub const MAX_INPUT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_INPUT_BYTES_LABEL: &str = "256 MiB";
 
 /// All [`Format`] variants, for exhaustive capability/health scans.
-/// Kept local because `Format` lives in `model.rs` (owned elsewhere).
-const ALL_FORMATS: [Format; 8] = [
-    Format::Pdf,
-    Format::Txt,
-    Format::Markdown,
-    Format::Html,
-    Format::Png,
-    Format::Jpeg,
-    Format::Docx,
-    Format::Odt,
-];
+const ALL_FORMATS: [Format; 17] = Format::ALL;
 
 /// Format-conversion engine.
 ///
@@ -60,7 +51,11 @@ impl ConversionEngine {
     /// Builds the production engine: detected external backends first
     /// (preferred for fidelity), then the Rust fallback.
     pub fn new() -> Self {
-        let mut backends = ExternalBackendSet::detect();
+        let mut backends = external::detect();
+        // Pure-Rust EPUB→PDF sits between external tools (pandoc can
+        // do epub→pdf only when a PDF engine like LaTeX is installed)
+        // and the generic Rust fallback.
+        backends.push(Arc::new(EpubBackend::new()));
         backends.push(Arc::new(RustBackend::new()));
         Self { backends }
     }
@@ -100,6 +95,13 @@ impl ConversionEngine {
                 limit: MAX_INPUT_BYTES_LABEL.to_string(),
                 actual,
             });
+        }
+
+        // `url` input is not document bytes — it is the target URL as
+        // a UTF-8 string. Handle it before backend dispatch: fetch the
+        // page, then run the normal `html` → `pdf` path.
+        if req.input_format == Format::Url {
+            return self.convert_url(req);
         }
 
         // Partition supporting backends by availability, preserving
@@ -157,6 +159,60 @@ impl ConversionEngine {
         )
     }
 
+    /// `url` → `pdf`: fetch the URL (http/https only, bounded) and
+    /// delegate to the regular `html` → `pdf` dispatch so whatever
+    /// backend handles HTML input produces the PDF.
+    ///
+    /// The fetch is skipped entirely when no *available* backend can
+    /// perform `html` → `pdf` — the request fails fast with
+    /// [`ConvertError::UnsupportedConversion`] instead of pulling a
+    /// page that cannot be converted anyway.
+    fn convert_url(&self, req: &ConvertRequest) -> ConvertResult<ConvertOutput> {
+        if req.output_format != Format::Pdf {
+            return Err(ConvertError::UnsupportedConversion {
+                from: Format::Url,
+                to: req.output_format,
+            });
+        }
+
+        let html_to_pdf_available = self.backends.iter().any(|backend| {
+            matches!(
+                backend.availability(),
+                BackendAvailability::Available { .. }
+            ) && backend.supports(Format::Html, Format::Pdf)
+        });
+        if !html_to_pdf_available {
+            return Err(ConvertError::UnsupportedConversion {
+                from: Format::Url,
+                to: Format::Pdf,
+            });
+        }
+
+        let url = std::str::from_utf8(&req.input).map_err(|_| ConvertError::InvalidInput {
+            reason: "url input is not valid UTF-8".to_string(),
+        })?;
+        let html = super::url::fetch_url(url)?;
+
+        let inner = ConvertRequest {
+            input_format: Format::Html,
+            output_format: Format::Pdf,
+            input: html,
+            options: req.options.clone(),
+        };
+        match self.convert(&inner) {
+            // If dispatch still cannot cover html → pdf (e.g. backend
+            // availability changed between the pre-check and now),
+            // report it against the caller's actual request.
+            Err(ConvertError::UnsupportedConversion { .. }) => {
+                Err(ConvertError::UnsupportedConversion {
+                    from: Format::Url,
+                    to: Format::Pdf,
+                })
+            }
+            other => other,
+        }
+    }
+
     /// Post-conversion sanity checks on a backend's output.
     fn validate_output(
         req: &ConvertRequest,
@@ -201,6 +257,10 @@ impl ProcessingEngine for ConversionEngine {
         // would be dishonest.
         let mut inputs = BTreeSet::new();
         let mut outputs = BTreeSet::new();
+        // `url` → `pdf` is engine-level (fetch + html→pdf delegation),
+        // not a backend pair — advertise it only when an available
+        // backend can actually turn the fetched HTML into a PDF.
+        let mut html_to_pdf = false;
         for backend in &self.backends {
             if !matches!(
                 backend.availability(),
@@ -213,9 +273,15 @@ impl ProcessingEngine for ConversionEngine {
                     if backend.supports(from, to) {
                         inputs.insert(from.as_str().to_string());
                         outputs.insert(to.as_str().to_string());
+                        if from == Format::Html && to == Format::Pdf {
+                            html_to_pdf = true;
+                        }
                     }
                 }
             }
+        }
+        if html_to_pdf {
+            inputs.insert(Format::Url.as_str().to_string());
         }
 
         EngineCapabilities {
@@ -223,9 +289,12 @@ impl ProcessingEngine for ConversionEngine {
             input_formats: inputs.into_iter().collect(),
             output_formats: outputs.into_iter().collect(),
             // Per-backend limits (external tools bound their own work);
-            // the engine-level cap is enforced in `convert` and
-            // surfaced via ConvertError::TooLarge.
-            limits: EngineLimits::default(),
+            // the engine-level input cap is enforced in `convert` and
+            // surfaced via ConvertError::TooLarge, so advertise it.
+            limits: EngineLimits {
+                max_input_bytes: Some(MAX_INPUT_BYTES),
+                ..EngineLimits::default()
+            },
         }
     }
 
@@ -281,15 +350,28 @@ mod tests {
     use super::*;
     use crate::crates::conversion_engine::model::ConvertOptions;
 
+    /// Clone-able stand-in for a backend's default (non-scripted)
+    /// outcome, so `convert` can mint a fresh error each call.
+    #[derive(Clone, Copy)]
+    enum Outcome {
+        Ok,
+        BackendFailed,
+        InvalidInput,
+        TooLarge,
+        Timeout,
+        Io,
+    }
+
     /// Configurable fake backend for dispatch/fallback tests.
     struct MockBackend {
         name: &'static str,
         availability: BackendAvailability,
         /// Supported (from, to) pairs.
         pairs: Vec<(Format, Format)>,
-        /// Scripted results, consumed in order; falls back to `default`.
-        results: std::sync::Mutex<Vec<ConvertResult<ConvertOutput>>>,
-        default: ConvertResult<ConvertOutput>,
+        /// Scripted results, consumed front-to-back.
+        scripted: std::sync::Mutex<std::collections::VecDeque<ConvertResult<ConvertOutput>>>,
+        /// Default outcome when the script is exhausted.
+        outcome: Outcome,
         calls: std::sync::Mutex<u32>,
     }
 
@@ -299,13 +381,8 @@ mod tests {
                 name,
                 availability: BackendAvailability::Available { version: None },
                 pairs,
-                results: std::sync::Mutex::new(Vec::new()),
-                default: Ok(ConvertOutput {
-                    bytes: vec![1, 2, 3],
-                    output_format: Format::Pdf,
-                    backend: name.to_string(),
-                    warnings: Vec::new(),
-                }),
+                scripted: std::sync::Mutex::new(std::collections::VecDeque::new()),
+                outcome: Outcome::Ok,
                 calls: std::sync::Mutex::new(0),
             }
         }
@@ -318,13 +395,8 @@ mod tests {
             b
         }
 
-        fn failing(mut self, err: ConvertError) -> Self {
-            self.default = Err(err);
-            self
-        }
-
-        fn scripted(mut self, results: Vec<ConvertResult<ConvertOutput>>) -> Self {
-            *self.results.lock().unwrap() = results;
+        fn with_outcome(mut self, outcome: Outcome) -> Self {
+            self.outcome = outcome;
             self
         }
 
@@ -348,52 +420,35 @@ mod tests {
 
         fn convert(&self, req: &ConvertRequest) -> ConvertResult<ConvertOutput> {
             *self.calls.lock().unwrap() += 1;
-            if let Some(res) = self.results.lock().unwrap().pop() {
+            if let Some(res) = self.scripted.lock().unwrap().pop_front() {
                 return res;
             }
-            // `default` is Clone-able data; rebuild the result each call.
-            match &self.default {
-                Ok(out) => Ok(ConvertOutput {
-                    bytes: out.bytes.clone(),
-                    output_format: out.output_format,
-                    backend: out.backend.clone(),
-                    warnings: out.warnings.clone(),
+            match self.outcome {
+                Outcome::Ok => Ok(ConvertOutput {
+                    bytes: vec![1, 2, 3],
+                    output_format: req.output_format,
+                    backend: self.name.to_string(),
+                    warnings: Vec::new(),
                 }),
-                Err(_) => Err(match &self.default {
-                    Err(ConvertError::BackendFailed { backend, message }) => {
-                        ConvertError::BackendFailed {
-                            backend: backend.clone(),
-                            message: message.clone(),
-                        }
-                    }
-                    Err(ConvertError::InvalidInput { reason }) => ConvertError::InvalidInput {
-                        reason: reason.clone(),
-                    },
-                    Err(ConvertError::TooLarge { limit, actual }) => ConvertError::TooLarge {
-                        limit: limit.clone(),
-                        actual: *actual,
-                    },
-                    Err(ConvertError::Timeout { backend, seconds }) => ConvertError::Timeout {
-                        backend: backend.clone(),
-                        seconds: *seconds,
-                    },
-                    Err(ConvertError::UnsupportedConversion { from, to }) => {
-                        ConvertError::UnsupportedConversion {
-                            from: *from,
-                            to: *to,
-                        }
-                    }
-                    Err(ConvertError::BackendUnavailable { backend, reason }) => {
-                        ConvertError::BackendUnavailable {
-                            backend: backend.clone(),
-                            reason: reason.clone(),
-                        }
-                    }
-                    Err(ConvertError::Io(e)) => {
-                        ConvertError::Io(std::io::Error::new(e.kind(), e.to_string()))
-                    }
-                    Ok(_) => unreachable!(),
+                Outcome::BackendFailed => Err(ConvertError::BackendFailed {
+                    backend: self.name.to_string(),
+                    message: "boom".to_string(),
                 }),
+                Outcome::InvalidInput => Err(ConvertError::InvalidInput {
+                    reason: "unparseable".to_string(),
+                }),
+                Outcome::TooLarge => Err(ConvertError::TooLarge {
+                    limit: "1 MiB".to_string(),
+                    actual: 2 * 1024 * 1024,
+                }),
+                Outcome::Timeout => Err(ConvertError::Timeout {
+                    backend: self.name.to_string(),
+                    seconds: 5,
+                }),
+                Outcome::Io => Err(ConvertError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "disk",
+                ))),
             }
         }
     }
@@ -405,15 +460,6 @@ mod tests {
             input: input.to_vec(),
             options: ConvertOptions::default(),
         }
-    }
-
-    fn pdf_out(backend: &str) -> ConvertResult<ConvertOutput> {
-        Ok(ConvertOutput {
-            bytes: vec![0x25, 0x50, 0x44, 0x46],
-            output_format: Format::Pdf,
-            backend: backend.to_string(),
-            warnings: Vec::new(),
-        })
     }
 
     #[test]
@@ -458,12 +504,8 @@ mod tests {
     #[test]
     fn falls_back_to_next_backend_on_backend_failed() {
         let failing = Arc::new(
-            MockBackend::available("failing", vec![(Format::Markdown, Format::Pdf)]).failing(
-                ConvertError::BackendFailed {
-                    backend: "failing".to_string(),
-                    message: "boom".to_string(),
-                },
-            ),
+            MockBackend::available("failing", vec![(Format::Markdown, Format::Pdf)])
+                .with_outcome(Outcome::BackendFailed),
         );
         let ok = Arc::new(MockBackend::available(
             "ok",
@@ -482,11 +524,8 @@ mod tests {
     #[test]
     fn falls_back_on_invalid_input_too() {
         let bad = Arc::new(
-            MockBackend::available("bad", vec![(Format::Markdown, Format::Pdf)]).failing(
-                ConvertError::InvalidInput {
-                    reason: "unparseable".to_string(),
-                },
-            ),
+            MockBackend::available("bad", vec![(Format::Markdown, Format::Pdf)])
+                .with_outcome(Outcome::InvalidInput),
         );
         let ok = Arc::new(MockBackend::available(
             "ok",
@@ -502,12 +541,8 @@ mod tests {
     #[test]
     fn does_not_fall_back_on_too_large() {
         let failing = Arc::new(
-            MockBackend::available("failing", vec![(Format::Markdown, Format::Pdf)]).failing(
-                ConvertError::TooLarge {
-                    limit: "1 MiB".to_string(),
-                    actual: 2 * 1024 * 1024,
-                },
-            ),
+            MockBackend::available("failing", vec![(Format::Markdown, Format::Pdf)])
+                .with_outcome(Outcome::TooLarge),
         );
         let ok = Arc::new(MockBackend::available(
             "ok",
@@ -524,16 +559,10 @@ mod tests {
 
     #[test]
     fn does_not_fall_back_on_timeout_or_io() {
-        for err in [
-            ConvertError::Timeout {
-                backend: "b".to_string(),
-                seconds: 5,
-            },
-            ConvertError::Io(std::io::Error::new(std::io::ErrorKind::Other, "disk")),
-        ] {
+        for outcome in [Outcome::Timeout, Outcome::Io] {
             let failing = Arc::new(
                 MockBackend::available("failing", vec![(Format::Markdown, Format::Pdf)])
-                    .failing(err),
+                    .with_outcome(outcome),
             );
             let ok = Arc::new(MockBackend::available(
                 "ok",
@@ -629,12 +658,14 @@ mod tests {
     #[test]
     fn empty_backend_output_is_backend_failed() {
         let bad = Arc::new(MockBackend {
-            results: std::sync::Mutex::new(vec![Ok(ConvertOutput {
-                bytes: Vec::new(),
-                output_format: Format::Pdf,
-                backend: "bad".to_string(),
-                warnings: Vec::new(),
-            })]),
+            scripted: std::sync::Mutex::new(std::collections::VecDeque::from([Ok(
+                ConvertOutput {
+                    bytes: Vec::new(),
+                    output_format: Format::Pdf,
+                    backend: "bad".to_string(),
+                    warnings: Vec::new(),
+                },
+            )])),
             ..MockBackend::available("bad", vec![(Format::Markdown, Format::Pdf)])
         });
         let engine = ConversionEngine::with_backends(vec![bad]);
@@ -648,12 +679,14 @@ mod tests {
     #[test]
     fn output_format_mismatch_is_backend_failed() {
         let bad = Arc::new(MockBackend {
-            results: std::sync::Mutex::new(vec![Ok(ConvertOutput {
-                bytes: vec![1],
-                output_format: Format::Html, // requested Pdf
-                backend: "bad".to_string(),
-                warnings: Vec::new(),
-            })]),
+            scripted: std::sync::Mutex::new(std::collections::VecDeque::from([Ok(
+                ConvertOutput {
+                    bytes: vec![1],
+                    output_format: Format::Html, // requested Pdf
+                    backend: "bad".to_string(),
+                    warnings: Vec::new(),
+                },
+            )])),
             ..MockBackend::available("bad", vec![(Format::Markdown, Format::Pdf)])
         });
         let engine = ConversionEngine::with_backends(vec![bad]);

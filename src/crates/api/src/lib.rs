@@ -1,393 +1,300 @@
-//! HTTP API layer — a thin `axum` adapter over the application
-//! services, the job engine, and the engine registry.
+//! HTTP API layer — thin axum adapter over the application services.
 //!
-//! # Position in the architecture
-//!
-//! ```text
-//!   HTTP client ──▶ api::router(AppState) ──▶ services / job_engine / engines
-//! ```
-//!
-//! This crate owns **no** business logic: validation that matters
-//! (payload contracts, file-name safety, storage confinement) stays
-//! in the `security_engine`, the job handlers, and the document
-//! store. The API's job is to translate HTTP requests into service
-//! calls and service results back into status codes and JSON.
+//! The API layer sits **above** the job engine and application services
+//! (see `.doc/Architecture.md`): it authenticates requests against
+//! Organization sessions, validates uploads through
+//! `security_engine::validate_upload`, delegates persistence to
+//! [`AppServices`] (which owns the document store and the streaming
+//! ingestion pipeline used by the `document.ingest` job handler), and
+//! enqueues follow-up jobs through `job_engine`. No business rules live
+//! here — authorization scoping, quotas, and document invariants stay
+//! in the layers below.
 //!
 //! # Endpoints
 //!
-//! | Method & path        | Auth | Purpose                                            |
-//! |----------------------|------|----------------------------------------------------|
-//! | `GET /health`        | no   | Aggregated engine health ([`handlers::health`])    |
-//! | `POST /documents`    | yes  | Enqueue a `document.ingest` job                    |
-//! | `GET /jobs`          | yes  | List jobs, optional `?status=`/`?limit=` filter    |
-//! | `GET /jobs/{id}`     | yes  | Fetch one job by id                                |
+//! | Method & path                              | Auth | Purpose                                   |
+//! |--------------------------------------------|------|-------------------------------------------|
+//! | `GET /health`                              | no   | Aggregated engine health                  |
+//! | `GET /openapi.json`                         | no   | OpenAPI 3.x description of this API       |
+//! | `GET /engines`                             | yes  | Engine registry + per-engine health       |
+//! | `GET /engines/{name}/operations`           | yes  | Per-engine capability detail              |
+//! | `GET /storage`                             | yes  | Storage backend status                    |
+//! | `POST /documents`                          | yes  | Upload bytes → validate → ingest          |
+//! | `GET /documents`                           | yes  | List (`?q=` search, owner/folder filters) |
+//! | `GET /documents/{id}`                      | yes  | Document metadata + artifacts             |
+//! | `PATCH /documents/{id}`                    | yes  | Rename / retype / move to folder          |
+//! | `DELETE /documents/{id}`                   | yes  | Trash (soft delete)                       |
+//! | `POST /documents/{id}/restore`             | yes  | Restore a trashed document                |
+//! | `GET /documents/{id}/versions`             | yes  | Version list                              |
+//! | `POST /documents/{id}/versions`            | yes  | Create a new version (`write`)            |
+//! | `POST /documents/{id}/versions/{n}/restore`| yes  | Restore version pointer                   |
+//! | `POST /documents/{id}/copy`                | yes  | Duplicate document (`read` on source)     |
+//! | `POST /documents/{id}/archive`             | yes  | Archive (`write`)                         |
+//! | `POST /documents/{id}/unarchive`           | yes  | Unarchive (`write`)                       |
+//! | `POST /documents/{id}/purge`               | yes  | Permanently delete a trashed doc (`manage`)|
+//! | `GET/POST/DELETE /documents/{id}/permissions` | yes | Permission grants (`manage` to mutate) |
+//! | `GET /documents/{id}/permissions/subject/{s}` | yes | Grants held by a subject             |
+//! | `GET/POST/DELETE /documents/{id}/relationships` | yes | Document links (`write` to mutate)   |
+//! | `GET /documents/{id}/related`              | yes  | Deduplicated related documents           |
+//! | `PATCH/DELETE /folders/{id}`               | yes  | Rename/move/delete folder (owner only)   |
+//! | `GET /documents/{id}/tags`                 | yes  | Assigned tags                             |
+//! | `PUT /documents/{id}/tags`                 | yes  | Assign a tag (`{"name": ...}`)            |
+//! | `DELETE /documents/{id}/tags/{name}`       | yes  | Remove a tag assignment                   |
+//! | `GET /documents/{id}/history`              | yes  | Audit event history                       |
+//! | `GET /documents/{id}/artifacts/{aid}/download` | yes | Download artifact bytes               |
+//! | `POST /documents/{id}/process`             | yes  | Enqueue processing job (`metadata_extract`, `index`, `thumbnail`, or any pdf op via `op` + `params`) |
+//! | `POST /documents/{id}/ops/{op}`            | yes  | Generic engine op: `image.*` runs synchronously (output → new artifact), `pdf.*`/bare pdf ops and `pipeline.run` enqueue jobs |
+//! | `GET/PATCH/DELETE /documents/{id}/settings`| yes  | Per-document settings blob + `is_locked`  |
+//! | `GET/PATCH/DELETE /documents/{id}/metadata`| yes  | Descriptive metadata row                   |
+//! | `PUT/DELETE /documents/{id}/metadata/fields/{key}` | yes | Metadata custom-field set/remove   |
+//! | `GET /pipelines`                          | yes  | List built-in pipeline definitions        |
+//! | `GET /pipelines/{name}`                   | yes  | One built-in pipeline definition (404 unknown) |
+//! | `POST /pipelines/run`                       | yes  | Enqueue a `pipeline.run` job (built-in name or full PipelineDefinition) |
+//! | `GET /folders`                             | yes  | List folders                              |
+//! | `POST /folders`                            | yes  | Create folder                             |
+//! | `GET /jobs`                                | yes  | List jobs (`?status=` filter)             |
+//! | `GET /jobs/{id}`                           | yes  | Job status from the durable queue         |
+//! | `POST /jobs/{id}/cancel`                   | yes  | Cancel a pending/running job              |
+//! | `POST /jobs/{id}/retry`                    | yes  | Requeue a failed job                      |
+//! | `POST /jobs/batch`                         | yes  | Enqueue a batch of jobs (shared `batch_id`) |
+//! | `GET /jobs/batch/{id}`                     | yes  | Batch progress + member jobs              |
+//! | `POST /jobs/batch/{id}/cancel`             | yes  | Cancel all non-terminal jobs in a batch   |
+//! | `GET/POST/DELETE /schedules`               | yes  | Recurring job schedules (global)          |
+//! | `POST /schedules/tick`                     | yes  | Run one scheduler tick now                |
 //!
-//! "Auth" means a valid `Authorization: Bearer <token>` session
-//! token (see [`auth::AuthenticatedSession`]); missing, malformed,
-//! expired, or revoked tokens all yield `401`.
+//! Authenticated routes require `Authorization: Bearer <credential>`;
+//! the credential is either an Organization session token (validated
+//! against `sessions_tbl` on every request) or a static API key from
+//! `api.api_keys` / `KALADOC_API_KEYS` (`name:key` pairs — see
+//! [`auth`]). API-key callers act as `apikey:<name>`.
 //!
-//! # Wiring
+//! Route groups can be switched off with `api.disabled_groups` /
+//! `KALADOC_API_DISABLE` (comma list of `documents`, `folders`,
+//! `jobs`, `pipelines`, `engines`, `storage`, `schedules`); disabled
+//! groups answer `404` — see [`flags`].
 //!
-//! The caller owns the database: [`AppState`] takes an already-open
-//! [`SqlitePool`] — this module never runs migrations. Build the
-//! router with [`router`], then serve it however you like, e.g.:
+//! # Authorization
+//!
+//! Every `/documents/{id}/…` route enforces document-level access
+//! (see [`crate::crates::application::services::access`]): the caller
+//! must own the document or hold a sufficient `document_permissions_tbl`
+//! grant (`read` for GETs, `write` for mutations, `manage` for
+//! permission management and purge). Denials are `403`; unknown ids
+//! are `404`. `GET /documents` and `GET /folders` are always scoped to
+//! the caller — the `owner_id` query parameter is accepted but
+//! ignored. There is no admin role: API-key actors
+//! (`apikey:<name>`) follow the same owner/permission rules as session
+//! users. In-process callers (CLI) bypass this layer by design.
+//!
+//! # Errors
+//!
+//! Every error response uses the stable JSON shape from the CLI spec
+//! §5.3: `{"error": {"code", "message", "request_id", "retryable"}}`.
+//! See [`error::ApiError`].
+//!
+//! # Running
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! use kaladoc::crates::api::{AppState, router};
-//! use kaladoc::crates::application::Organization::init_db;
-//! let config = init_db::load_config()?;
-//! let pool = init_db::open_db(&config).await?;
-//! let state = AppState::from_config(pool, &kaladoc::config::AppConfig::load_lenient()?);
-//! let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
-//! axum::serve(listener, router(state)).await?;
+//! let config = kaladoc::config::AppConfig::load()?;
+//! let state = std::sync::Arc::new(kaladoc::crates::api::ApiState::init(&config).await?);
+//! let addr: std::net::SocketAddr = config.api.addr.parse()?;
+//! kaladoc::crates::api::serve(state, addr).await?;
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! # Notes / known scaffold limitations
-//!
-//! - `POST /documents` enqueues a `document.ingest` job; the job
-//!   handler requires the `document_id` to reference an **existing**
-//!   document row (document creation is a separate concern — see the
-//!   `document_engine` store / `DocumentService`).
-//! - `GET /jobs/{id}` currently scans `list_jobs` — fine for a
-//!   scaffold, but a dedicated `get_job` store query is the proper
-//!   follow-up.
-//! - Job endpoints are authenticated because job payloads can carry
-//!   user data; only `/health` is public.
 
-mod auth;
-mod dto;
-mod error;
-mod handlers;
+pub mod auth;
+pub mod error;
+pub mod flags;
+pub mod handlers;
+pub mod openapi;
+pub mod state;
 
-pub use auth::AuthenticatedSession;
-pub use dto::{CreateDocumentRequest, JobResponse, JobsQuery};
-pub use error::ApiError;
+#[cfg(test)]
+mod tests;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::Router;
-use axum::routing::{get, post};
-use sqlx::SqlitePool;
+use axum::routing::{delete, get, post, put};
+use axum::{Json, Router, middleware};
+use serde_json::Value;
 
-use crate::config::AppConfig;
-use crate::crates::application::Organization::init_db::SessionConfig;
-use crate::crates::engine_registry::EngineRegistry;
-use crate::crates::job_engine::JobEngineConfig;
+pub use error::ApiError;
+pub use state::ApiState;
 
-/// Shared state for every route — cloned cheaply into each request.
+/// Builds the application router.
 ///
-/// Holds exactly what the handlers need and nothing more:
-///
-/// - `pool` — the SQLite pool owning `users_tbl`, `sessions_tbl`,
-///   `jobs_tbl`, and the document store. Provided by the caller; this
-///   crate never opens or migrates it.
-/// - `session_config` — session TTL/renewal policy used by the auth
-///   extractor when validating bearer tokens.
-/// - `job_config` — engine tunables; only `default_max_attempts` is
-///   consumed today (job *execution* lives in the separately spawned
-///   [`job_engine::JobEngine`], not here).
-/// - `engines` — the [`EngineRegistry`] probed by `/health`. Built
-///   from [`EngineRegistry::builtin`] by default; tests may inject a
-///   custom registry via [`AppState::with_engines`].
-#[derive(Clone)]
-pub struct AppState {
-    /// Shared SQLite pool (users, sessions, jobs, documents).
-    pub pool: SqlitePool,
-    /// Session validation policy for bearer tokens.
-    pub session_config: SessionConfig,
-    /// Job engine tunables (retry budget, backoff, staleness).
-    pub job_config: JobEngineConfig,
-    /// Engine registry behind `GET /health`.
-    engines: Arc<EngineRegistry>,
-}
+/// `GET /health` and `GET /openapi.json` are public; everything else
+/// sits behind the Bearer session middleware in [`auth`]. Handlers
+/// extract [`state::ApiState`] via `State<Arc<ApiState>>`.
+pub fn router(state: Arc<ApiState>) -> Router {
+    let protected = Router::new()
+        .route("/engines", get(handlers::engines))
+        .route(
+            "/engines/{name}/operations",
+            get(handlers::engine_operations),
+        )
+        .route("/storage", get(handlers::storage_status))
+        .route(
+            "/documents",
+            post(handlers::create_document).get(handlers::list_documents),
+        )
+        .route(
+            "/documents/{id}",
+            get(handlers::get_document)
+                .patch(handlers::update_document)
+                .delete(handlers::delete_document),
+        )
+        .route("/documents/{id}/restore", post(handlers::restore_document))
+        .route(
+            "/documents/{id}/versions",
+            get(handlers::list_versions).post(handlers::create_document_version),
+        )
+        .route(
+            "/documents/{id}/versions/{version}/restore",
+            post(handlers::restore_version),
+        )
+        .route("/documents/{id}/copy", post(handlers::copy_document))
+        .route("/documents/{id}/archive", post(handlers::archive_document))
+        .route(
+            "/documents/{id}/unarchive",
+            post(handlers::unarchive_document),
+        )
+        .route("/documents/{id}/purge", post(handlers::purge_document))
+        .route(
+            "/documents/{id}/permissions",
+            get(handlers::list_document_permissions).post(handlers::grant_document_permission),
+        )
+        .route(
+            "/documents/{id}/permissions/subject/{subject}",
+            get(handlers::list_subject_permissions),
+        )
+        .route(
+            "/documents/{id}/permissions/{subject}",
+            delete(handlers::revoke_document_permission),
+        )
+        .route(
+            "/documents/{id}/relationships",
+            get(handlers::list_document_relationships).post(handlers::create_document_relationship),
+        )
+        .route(
+            "/documents/{id}/relationships/{rel_id}",
+            delete(handlers::delete_document_relationship),
+        )
+        .route("/documents/{id}/related", get(handlers::related_documents))
+        .route(
+            "/documents/{id}/tags",
+            get(handlers::list_tags).put(handlers::add_tag),
+        )
+        .route("/documents/{id}/tags/{name}", delete(handlers::remove_tag))
+        .route("/documents/{id}/history", get(handlers::document_history))
+        .route(
+            "/documents/{id}/artifacts/{artifact_id}/download",
+            get(handlers::download_artifact),
+        )
+        .route("/documents/{id}/process", post(handlers::process_document))
+        .route("/documents/{id}/ops/{op}", post(handlers::run_document_op))
+        .route(
+            "/documents/{id}/settings",
+            get(handlers::get_settings)
+                .patch(handlers::patch_settings)
+                .delete(handlers::delete_settings),
+        )
+        .route(
+            "/documents/{id}/metadata",
+            get(handlers::get_metadata)
+                .patch(handlers::patch_metadata)
+                .delete(handlers::delete_metadata),
+        )
+        .route(
+            "/documents/{id}/metadata/fields/{key}",
+            put(handlers::set_metadata_field).delete(handlers::remove_metadata_field),
+        )
+        .route("/pipelines", get(handlers::list_pipelines))
+        .route("/pipelines/{name}", get(handlers::get_pipeline))
+        .route("/pipelines/run", post(handlers::run_pipeline))
+        .route(
+            "/folders",
+            get(handlers::list_folders).post(handlers::create_folder),
+        )
+        .route(
+            "/folders/{id}",
+            axum::routing::patch(handlers::update_folder).delete(handlers::delete_folder),
+        )
+        .route("/jobs", get(handlers::list_jobs_route))
+        .route("/jobs/{id}", get(handlers::get_job))
+        .route("/jobs/{id}/cancel", post(handlers::cancel_job_route))
+        .route("/jobs/{id}/retry", post(handlers::retry_job_route))
+        .route("/jobs/batch", post(handlers::create_job_batch))
+        .route("/jobs/batch/{id}", get(handlers::get_job_batch))
+        .route("/jobs/batch/{id}/cancel", post(handlers::cancel_job_batch))
+        .route(
+            "/schedules",
+            get(handlers::list_schedules).post(handlers::create_schedule),
+        )
+        .route("/schedules/{name}", delete(handlers::delete_schedule))
+        .route("/schedules/tick", post(handlers::tick_schedules))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ))
+        // Outermost: disabled route groups 404 before auth runs.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            flags::require_enabled,
+        ));
 
-impl AppState {
-    /// Builds state around an already-open pool. Engine health uses
-    /// the built-in registry (`pdf`, `security`, `convert`).
-    pub fn new(
-        pool: SqlitePool,
-        session_config: SessionConfig,
-        job_config: JobEngineConfig,
-    ) -> Self {
-        Self {
-            pool,
-            session_config,
-            job_config,
-            engines: Arc::new(EngineRegistry::builtin()),
-        }
-    }
-
-    /// Convenience constructor deriving session and job settings from
-    /// an [`AppConfig`]. The pool still comes from the caller.
-    pub fn from_config(pool: SqlitePool, config: &AppConfig) -> Self {
-        let db = config.to_db_config();
-        Self::new(pool, db.session, config.to_job_config())
-    }
-
-    /// Replaces the engine registry used by `/health` — primarily for
-    /// tests that want deterministic component results.
-    pub fn with_engines(mut self, engines: EngineRegistry) -> Self {
-        self.engines = Arc::new(engines);
-        self
-    }
-
-    /// The registry behind `/health`.
-    pub fn engines(&self) -> &EngineRegistry {
-        &self.engines
-    }
-}
-
-/// Builds the application router with all routes wired to `state`.
-///
-/// Returns a [`Router<()>`] — ready for `axum::serve`, `tower`
-/// testing via `ServiceExt::oneshot`, or nesting under a larger app.
-pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(handlers::health))
-        .route("/documents", post(handlers::create_document))
-        .route("/jobs", get(handlers::list_jobs))
-        .route("/jobs/{id}", get(handlers::get_job))
+        .route("/openapi.json", get(handlers::openapi))
+        .merge(protected)
+        .fallback(fallback)
         .with_state(state)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::crates::application::Organization::auth_user::{NewUser, create_user};
-    use crate::crates::application::Organization::init_db::{
-        create_sessions_table, create_users_table,
-    };
-    use crate::crates::application::Organization::session::create_session;
-    use crate::crates::job_engine::{create_jobs_table, list_jobs as store_list_jobs};
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode, header};
-    use serde_json::{Value, json};
-    use sqlx::sqlite::SqlitePoolOptions;
-    use tower::ServiceExt;
+/// JSON 404 for unmatched routes — same error envelope as everything else.
+async fn fallback() -> ApiError {
+    ApiError::not_found("route", "unknown")
+}
 
-    fn test_session_config() -> SessionConfig {
-        SessionConfig {
-            ttl: std::time::Duration::from_secs(3600),
-            absolute_ttl: std::time::Duration::ZERO,
-            renew_on_use: true,
-            touch_interval: std::time::Duration::ZERO,
-            cleanup_interval: std::time::Duration::from_secs(60),
-        }
-    }
-
-    /// In-memory pool (single connection) with users, sessions, and
-    /// jobs tables — everything the scaffolded routes touch.
-    async fn test_state() -> AppState {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        create_users_table(&pool).await.unwrap();
-        create_sessions_table(&pool).await.unwrap();
-        create_jobs_table(&pool).await.unwrap();
-        AppState::new(pool, test_session_config(), JobEngineConfig::default())
-    }
-
-    /// Creates a user + session; returns the raw bearer token.
-    async fn seed_session(state: &AppState) -> String {
-        let user_id = create_user(
-            &state.pool,
-            &NewUser {
-                first_name: "Api".into(),
-                last_name: "Tester".into(),
-                user_name: "api_tester".into(),
-                email: "api@example.com".into(),
-                password: "correct horse battery".into(),
-            },
-        )
+/// Binds `addr` and serves the API until shutdown (Ctrl-C / SIGTERM).
+///
+/// # Errors
+/// [`std::io::Error`] from binding or the accept loop.
+pub async fn serve(state: Arc<ApiState>, addr: SocketAddr) -> std::io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!(%addr, "api server listening");
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal())
         .await
-        .unwrap();
-        let (_session, token) = create_session(&state.pool, user_id, &state.session_config)
-            .await
-            .unwrap();
-        token
-    }
+}
 
-    /// Sends one request through the router; returns (status, parsed
-    /// JSON body or `Value::Null` for empty/non-JSON bodies).
-    async fn send(
-        app: &Router,
-        method: &str,
-        uri: &str,
-        token: Option<&str>,
-        body: Option<Value>,
-    ) -> (StatusCode, Value) {
-        let mut builder = Request::builder().method(method).uri(uri);
-        if let Some(t) = token {
-            builder = builder.header(header::AUTHORIZATION, format!("Bearer {t}"));
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
         }
-        let req = match body {
-            Some(b) => builder
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(b.to_string()))
-                .unwrap(),
-            None => builder.body(Body::empty()).unwrap(),
-        };
-        let resp = app.clone().oneshot(req).await.unwrap();
-        let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let value = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-        };
-        (status, value)
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
+    tracing::info!("api server shutting down");
+}
 
-    #[tokio::test]
-    async fn health_returns_200_with_aggregated_components() {
-        let app = router(test_state().await);
-        let (status, body) = send(&app, "GET", "/health", None, None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body["status"].is_string());
-        let components = body["components"].as_array().expect("components array");
-        assert!(!components.is_empty());
-        for c in components {
-            assert!(c["name"].is_string());
-            assert!(c["status"].is_string());
-        }
-    }
-
-    #[tokio::test]
-    async fn create_document_requires_auth() {
-        let state = test_state().await;
-        let app = router(state.clone());
-        let body = json!({"document_id": "doc-1", "content": "hello"});
-
-        // No Authorization header → 401.
-        let (status, _) = send(&app, "POST", "/documents", None, Some(body.clone())).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-        // Bogus token → 401.
-        let (status, _) = send(&app, "POST", "/documents", Some("bogus"), Some(body)).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-        // Nothing was enqueued.
-        let jobs = store_list_jobs(&state.pool, None, 10).await.unwrap();
-        assert!(jobs.is_empty());
-    }
-
-    #[tokio::test]
-    async fn create_document_enqueues_ingest_job() {
-        let state = test_state().await;
-        let token = seed_session(&state).await;
-        let app = router(state.clone());
-
-        let body = json!({
-            "document_id": "doc-42",
-            "content": "hello world",
-            "file_name": "note.txt",
-            "mime_type": "text/plain",
-        });
-        let (status, resp) = send(&app, "POST", "/documents", Some(&token), Some(body)).await;
-        assert_eq!(status, StatusCode::ACCEPTED);
-        assert_eq!(resp["kind"], "document.ingest");
-        assert_eq!(resp["status"], "pending");
-        let job_id = resp["id"].as_i64().unwrap();
-
-        // The row is really in jobs_tbl with the documented payload.
-        let jobs = store_list_jobs(&state.pool, None, 10).await.unwrap();
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].id, job_id);
-        assert_eq!(jobs[0].payload["document_id"], "doc-42");
-        assert_eq!(jobs[0].payload["content"], "hello world");
-        assert_eq!(jobs[0].payload["file_name"], "note.txt");
-
-        // And it shows up via the jobs endpoints.
-        let (status, list) = send(&app, "GET", "/jobs?status=pending", Some(&token), None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(list.as_array().unwrap().len(), 1);
-
-        let (status, one) = send(&app, "GET", &format!("/jobs/{job_id}"), Some(&token), None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(one["id"], job_id);
-
-        let (status, _) = send(&app, "GET", "/jobs/999999", Some(&token), None).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn create_document_rejects_bad_payloads() {
-        let state = test_state().await;
-        let token = seed_session(&state).await;
-        let app = router(state.clone());
-
-        // Missing document_id.
-        let (status, _) = send(
-            &app,
-            "POST",
-            "/documents",
-            Some(&token),
-            Some(json!({"content": "x"})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
-        // Neither content_b64 nor content.
-        let (status, _) = send(
-            &app,
-            "POST",
-            "/documents",
-            Some(&token),
-            Some(json!({"document_id": "d", "file_name": "f"})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
-        // Both content fields set.
-        let (status, _) = send(
-            &app,
-            "POST",
-            "/documents",
-            Some(&token),
-            Some(json!({"document_id": "d", "content": "x", "content_b64": "eA=="})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
-        // Invalid base64.
-        let (status, _) = send(
-            &app,
-            "POST",
-            "/documents",
-            Some(&token),
-            Some(json!({"document_id": "d", "content_b64": "!!!"})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
-        let jobs = store_list_jobs(&state.pool, None, 10).await.unwrap();
-        assert!(jobs.is_empty());
-    }
-
-    #[tokio::test]
-    async fn jobs_endpoints_require_auth_and_reject_bad_status() {
-        let state = test_state().await;
-        let token = seed_session(&state).await;
-        let app = router(state);
-
-        // Unauthenticated list → 401.
-        let (status, _) = send(&app, "GET", "/jobs", None, None).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-        // Unknown status filter → 400.
-        let (status, _) = send(&app, "GET", "/jobs?status=bogus", Some(&token), None).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
-        // Empty list → 200 [].
-        let (status, body) = send(&app, "GET", "/jobs", Some(&token), None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body.as_array().unwrap().len(), 0);
-    }
+/// Serialize a value into an [`axum::Json`] response body, falling back
+/// to `null` rather than failing a response that is already assembled.
+pub(crate) fn json_body<T: serde::Serialize>(value: &T) -> Json<Value> {
+    Json(serde_json::to_value(value).unwrap_or(Value::Null))
 }

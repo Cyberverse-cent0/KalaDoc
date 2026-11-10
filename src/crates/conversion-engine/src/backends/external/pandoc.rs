@@ -17,6 +17,7 @@ const PANDOC_READABLE: &[Format] = &[
     Format::Html,
     Format::Docx,
     Format::Odt,
+    Format::Epub,
 ];
 
 /// Pandoc writer names pandoc can always produce without a PDF engine.
@@ -27,6 +28,7 @@ fn pandoc_format(format: Format) -> Option<&'static str> {
         Format::Html => Some("html"),
         Format::Docx => Some("docx"),
         Format::Odt => Some("odt"),
+        Format::Epub => Some("epub"),
         _ => None,
     }
 }
@@ -141,6 +143,20 @@ impl ConversionBackend for PandocBackend {
             Err(why) => warnings.push(why),
         }
 
+        // pandoc's EPUB writer refuses to run without a title in the
+        // metadata; supply one (params.title wins, else a placeholder).
+        if req.output_format == Format::Epub {
+            let title = req
+                .options
+                .params
+                .get("title")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("Untitled document");
+            args.push("--metadata".to_string());
+            args.push(format!("title={title}"));
+        }
+
         let output = util::run_tool(&self.program, &args, util::COMMAND_TIMEOUT, "pandoc")?;
         if !output.status.success() {
             return Err(ConvertError::BackendFailed {
@@ -223,29 +239,47 @@ mod tests {
         }
     }
 
+    /// Text-ish outputs pandoc always writes (no pdf engine needed).
+    const TEXT_OUTPUTS: &[Format] = &[Format::Txt, Format::Markdown, Format::Html];
+
     #[test]
     fn supports_matrix_without_pdf_engine() {
         let b = backend(false);
         for &from in PANDOC_READABLE {
-            for &to in PANDOC_READABLE {
+            for &to in TEXT_OUTPUTS {
                 assert!(b.supports(from, to), "{from:?} -> {to:?}");
             }
             assert!(!b.supports(from, Format::Pdf), "{from:?} -> pdf");
             assert!(!b.supports(from, Format::Png));
             assert!(!b.supports(from, Format::Jpeg));
+            // pandoc also writes docx/odt/epub without a pdf engine.
+            assert!(b.supports(from, Format::Docx), "{from:?} -> docx");
+            assert!(b.supports(from, Format::Odt), "{from:?} -> odt");
+            assert!(b.supports(from, Format::Epub), "{from:?} -> epub");
         }
+        // pandoc cannot *read* pdf/images as input at all.
         assert!(!b.supports(Format::Pdf, Format::Txt));
         assert!(!b.supports(Format::Png, Format::Markdown));
+        assert!(!b.supports(Format::Jpeg, Format::Html));
+        // pandoc reads and writes office formats and epub too.
+        assert!(b.supports(Format::Docx, Format::Odt));
+        assert!(b.supports(Format::Odt, Format::Docx));
+        assert!(b.supports(Format::Epub, Format::Html));
+        assert!(b.supports(Format::Markdown, Format::Epub));
     }
 
     #[test]
     fn supports_matrix_with_pdf_engine() {
         let b = backend(true);
         for &from in PANDOC_READABLE {
+            for &to in TEXT_OUTPUTS {
+                assert!(b.supports(from, to), "{from:?} -> {to:?}");
+            }
             assert!(b.supports(from, Format::Pdf), "{from:?} -> pdf");
         }
         assert!(!b.supports(Format::Pdf, Format::Pdf));
         assert!(!b.supports(Format::Png, Format::Png));
+        assert!(!b.supports(Format::Pdf, Format::Png));
     }
 
     #[test]
@@ -289,7 +323,7 @@ mod tests {
     #[test]
     fn detect_finds_pandoc_on_fake_path() {
         let dir = std::env::temp_dir().join(format!(
-            "kaladoc-test-pd-{}-{:?}",
+            "kaladoc-test-pd-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

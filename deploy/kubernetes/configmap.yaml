@@ -1,0 +1,24 @@
+# Non-secret configuration for KalaDoc.
+# Secrets (APP_SECRET_KEY, APP_DB_USER, APP_DB_PASSWORD) live in the
+# `kaladoc-secrets` Secret — see secret.example.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kaladoc-config
+  namespace: kaladoc
+data:
+  # Container-friendly defaults (override per environment as needed).
+  KALADOC_API_ADDR: "0.0.0.0:8080"
+  DB_PATH: "/data/kaladoc.db"
+  KALADOC_STORAGE_DIR: "/data/storage"
+  KALADOC_LOG_LEVEL: "info"
+  RUST_LOG: "info"
+  # Optional storage quota in bytes (uncomment to enable):
+  # KALADOC_STORAGE_MAX_BYTES: "10737418240"
+  #
+  # S3 backend (uncomment + fill in when using remote storage):
+  # KALADOC_S3_ENDPOINT: "https://s3.us-east-1.amazonaws.com"
+  # KALADOC_S3_BUCKET: "kaladoc"
+  # KALADOC_S3_REGION: "us-east-1"
+  # KALADOC_S3_PREFIX: ""
+  # KALADOC_S3_ACCESS_KEY / KALADOC_S3_SECRET_KEY belong in the Secret.

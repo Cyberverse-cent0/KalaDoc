@@ -62,3 +62,71 @@ pub fn extract_text(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crates::pdf_engine::error::PdfError;
+    use crate::crates::pdf_engine::ops::encrypt::{PdfPermissions, encrypt};
+    use crate::crates::pdf_engine::ops::test_utils::pdf_with_pages;
+
+    #[test]
+    fn extracts_known_text_per_page() {
+        let pdf = pdf_with_pages(&["Hello World", "Second page text"]);
+        let out = extract_text(&pdf, None, &EngineLimits::default()).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].page, 1);
+        assert_eq!(out[1].page, 2);
+        assert!(out[0].text.contains("Hello World"), "got {:?}", out[0].text);
+        assert!(
+            out[1].text.contains("Second page text"),
+            "got {:?}",
+            out[1].text
+        );
+    }
+
+    #[test]
+    fn honors_page_subset() {
+        let pdf = pdf_with_pages(&["first", "second", "third"]);
+        let out = extract_text(&pdf, Some("2,3"), &EngineLimits::default()).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].page, 2);
+        assert_eq!(out[1].page, 3);
+        assert!(out[0].text.contains("second"));
+    }
+
+    #[test]
+    fn rejects_invalid_range_and_bad_input() {
+        let pdf = pdf_with_pages(&["x"]);
+        for spec in ["", "0", "2", "1-2"] {
+            let err = extract_text(&pdf, Some(spec), &EngineLimits::default()).unwrap_err();
+            assert!(
+                matches!(err, PdfError::InvalidPageRange(_)),
+                "spec {spec:?} got {err:?}"
+            );
+        }
+        assert!(extract_text(b"junk", None, &EngineLimits::default()).is_err());
+    }
+
+    #[test]
+    fn enforces_limits_and_rejects_encrypted() {
+        let pdf = pdf_with_pages(&["p1", "p2"]);
+        let limits = EngineLimits {
+            max_pages: Some(1),
+            ..EngineLimits::default()
+        };
+        let err = extract_text(&pdf, None, &limits).unwrap_err();
+        assert!(matches!(err, PdfError::LimitExceeded(_)), "got {err:?}");
+
+        let encrypted = encrypt(
+            &pdf,
+            "pw",
+            None,
+            PdfPermissions::default(),
+            &EngineLimits::default(),
+        )
+        .unwrap();
+        let err = extract_text(&encrypted, None, &EngineLimits::default()).unwrap_err();
+        assert!(matches!(err, PdfError::Encrypted), "got {err:?}");
+    }
+}

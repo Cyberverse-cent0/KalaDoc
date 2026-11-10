@@ -18,19 +18,6 @@ use poppler::PopplerBackend;
 
 use crate::crates::conversion_engine::ConversionBackend;
 
-/// Namespace for external-backend detection, matching the call site
-/// in `engine.rs` (`ExternalBackendSet::detect()`).
-pub struct ExternalBackendSet;
-
-impl ExternalBackendSet {
-    /// Probe `PATH` for every supported external tool and return the
-    /// backends that are usable in this environment. Equivalent to
-    /// [`detect`]. Each backend caches its availability at probe time.
-    pub fn detect() -> Vec<Arc<dyn ConversionBackend>> {
-        detect()
-    }
-}
-
 /// Probe `PATH` for every supported external tool and return the
 /// backends that are usable in this environment.
 ///
@@ -69,7 +56,7 @@ mod tests {
     /// body` stubs (made executable on unix).
     fn fake_path_dir(tag: &str, stubs: &[(&str, &str)]) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "kaladoc-test-detect-{tag}-{}-{:?}",
+            "kaladoc-test-detect-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::crates::application::Organization::init_db;
 use crate::crates::application::Organization::session;
 
+use super::super::envfile;
 use super::{CliError, Context};
 
 #[derive(Debug, Serialize)]
@@ -19,6 +20,11 @@ struct InitReport {
 }
 
 pub async fn run(ctx: &Context) -> Result<i32, CliError> {
+    // First-run convenience: materialize `.env` with random secrets for
+    // any required keys not already provided by the environment or an
+    // existing `.env`. No-op when everything is already configured.
+    let env_report = envfile::ensure_env_file(&envfile::default_env_path())?;
+
     let db_config = ctx.db_config()?;
     let pool = init_db::init_db_with(&db_config).await?;
 
@@ -40,6 +46,12 @@ pub async fn run(ctx: &Context) -> Result<i32, CliError> {
     );
     if removed > 0 {
         println!("removed {removed} expired session(s)");
+    }
+    if env_report.modified {
+        println!(
+            "generated secrets in {} — keep this file private",
+            env_report.path.display()
+        );
     }
 
     pool.close().await;

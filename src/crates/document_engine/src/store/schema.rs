@@ -13,6 +13,7 @@ pub async fn init_document_store(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     create_tags_tables(pool).await?;
     create_permissions_table(pool).await?;
     create_metadata_table(pool).await?;
+    create_settings_table(pool).await?;
     create_relationships_table(pool).await?;
     create_audit_table(pool).await?;
     Ok(())
@@ -208,6 +209,22 @@ async fn create_metadata_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+async fn create_settings_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS document_settings_tbl (
+            document_id TEXT PRIMARY KEY REFERENCES documents_tbl(id) ON DELETE CASCADE,
+            settings    TEXT NOT NULL DEFAULT '{}',
+            is_locked   INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        "#,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn create_relationships_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     pool.execute(
         r#"
@@ -263,84 +280,151 @@ async fn create_audit_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::{Row, SqlitePool};
 
-    async fn test_pool() -> SqlitePool {
-        let pool = SqlitePoolOptions::new()
+    async fn memory_pool() -> SqlitePool {
+        SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
-            .expect("in-memory sqlite pool");
-        init_document_store(&pool).await.expect("init store");
-        pool
+            .expect("in-memory sqlite pool")
     }
 
-    /// Every table the document store owns must exist after init —
-    /// this is the contract the repository modules in this directory
-    /// are written against.
-    #[tokio::test]
-    async fn init_creates_all_tables() {
-        let pool = test_pool().await;
-        for table in [
-            "folders_tbl",
-            "documents_tbl",
-            "artifacts_tbl",
-            "revisions_tbl",
-            "versions_tbl",
-            "tags_tbl",
-            "tag_assignments_tbl",
-            "document_permissions_tbl",
-            "document_metadata_tbl",
-            "document_relationships_tbl",
-            "document_audit_tbl",
-        ] {
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
-            )
-            .bind(table)
-            .fetch_one(&pool)
+    async fn object_names(pool: &SqlitePool, kind: &str) -> Vec<String> {
+        sqlx::query("SELECT name FROM sqlite_master WHERE type = ? ORDER BY name")
+            .bind(kind)
+            .fetch_all(pool)
             .await
-            .unwrap();
-            assert!(exists, "missing table {table}");
-        }
+            .expect("query sqlite_master")
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect()
     }
 
-    /// Indexes backing the hot lookup paths: owner/folder/status on
-    /// documents, per-document children, subject-side permission and
-    /// relationship lookups, and the current-version pointer.
-    #[tokio::test]
-    async fn init_creates_expected_indexes() {
-        let pool = test_pool().await;
-        for index in [
-            "idx_folders_parent",
-            "idx_folders_owner",
-            "idx_documents_owner",
-            "idx_documents_folder",
-            "idx_documents_status",
-            "idx_artifacts_document",
-            "idx_revisions_document",
-            "idx_versions_current",
-            "idx_tag_assignments_tag",
-            "idx_doc_permissions_subject",
-            "idx_doc_relationships_source",
-            "idx_doc_relationships_target",
-            "idx_document_audit_doc",
-        ] {
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)",
-            )
-            .bind(index)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            assert!(exists, "missing index {index}");
-        }
-    }
+    const EXPECTED_TABLES: &[&str] = &[
+        "artifacts_tbl",
+        "document_audit_tbl",
+        "document_metadata_tbl",
+        "document_permissions_tbl",
+        "document_relationships_tbl",
+        "document_settings_tbl",
+        "documents_tbl",
+        "folders_tbl",
+        "revisions_tbl",
+        "tag_assignments_tbl",
+        "tags_tbl",
+        "versions_tbl",
+    ];
 
-    /// `init_document_store` is called on every startup; running it
-    /// twice on the same pool must be a no-op, not an error.
+    const EXPECTED_INDEXES: &[&str] = &[
+        "idx_artifacts_document",
+        "idx_doc_permissions_subject",
+        "idx_doc_relationships_source",
+        "idx_doc_relationships_target",
+        "idx_document_audit_doc",
+        "idx_documents_folder",
+        "idx_documents_owner",
+        "idx_documents_status",
+        "idx_folders_owner",
+        "idx_folders_parent",
+        "idx_revisions_document",
+        "idx_tag_assignments_tag",
+        "idx_versions_current",
+    ];
+
     #[tokio::test]
-    async fn init_is_idempotent() {
-        let pool = test_pool().await;
+    async fn init_document_store_is_idempotent() {
+        let pool = memory_pool().await;
+        init_document_store(&pool).await.expect("first init");
         init_document_store(&pool).await.expect("second init");
+        init_document_store(&pool).await.expect("third init");
+    }
+
+    #[tokio::test]
+    async fn init_document_store_creates_all_tables() {
+        let pool = memory_pool().await;
+        init_document_store(&pool).await.expect("init");
+
+        let tables = object_names(&pool, "table").await;
+        for expected in EXPECTED_TABLES {
+            assert!(
+                tables.iter().any(|t| t == expected),
+                "missing table {expected}; have {tables:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn init_document_store_creates_all_indexes() {
+        let pool = memory_pool().await;
+        init_document_store(&pool).await.expect("init");
+
+        let indexes = object_names(&pool, "index").await;
+        for expected in EXPECTED_INDEXES {
+            assert!(
+                indexes.iter().any(|i| i == expected),
+                "missing index {expected}; have {indexes:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn init_document_store_enables_foreign_keys() {
+        let pool = memory_pool().await;
+        init_document_store(&pool).await.expect("init");
+        // The store relies on ON DELETE CASCADE / SET NULL semantics;
+        // sqlx enables `PRAGMA foreign_keys` by default.
+        let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .expect("pragma");
+        assert_eq!(fk, 1);
+    }
+
+    #[tokio::test]
+    async fn init_document_store_adds_missing_tables_to_existing_db() {
+        let pool = memory_pool().await;
+
+        // Simulate an older database that only has the folders table.
+        pool.execute(
+            "CREATE TABLE folders_tbl (
+                id         TEXT PRIMARY KEY,
+                name       TEXT NOT NULL,
+                parent_id  TEXT,
+                owner_id   TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+        )
+        .await
+        .expect("create legacy folders_tbl");
+
+        init_document_store(&pool)
+            .await
+            .expect("init over legacy db");
+
+        let tables = object_names(&pool, "table").await;
+        for expected in EXPECTED_TABLES {
+            assert!(
+                tables.iter().any(|t| t == expected),
+                "missing table {expected} after migration"
+            );
+        }
+        let indexes = object_names(&pool, "index").await;
+        for expected in EXPECTED_INDEXES {
+            assert!(
+                indexes.iter().any(|i| i == expected),
+                "missing index {expected} after migration"
+            );
+        }
+
+        // The pre-existing table was left untouched (IF NOT EXISTS).
+        let cols: Vec<String> = sqlx::query("PRAGMA table_info(folders_tbl)")
+            .fetch_all(&pool)
+            .await
+            .expect("table_info")
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        assert!(!cols.contains(&"updated_at".to_string()));
     }
 }

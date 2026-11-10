@@ -18,6 +18,7 @@ pub mod metadata;
 pub mod permissions;
 pub mod relationships;
 pub mod schema;
+pub mod settings;
 pub mod tags;
 pub mod versions;
 

@@ -36,7 +36,8 @@ pub fn validate(input: &[u8], limits: &EngineLimits) -> PdfResult<ValidationRepo
     let doc = load_pdf(input, limits)?;
     let mut issues = Vec::new();
 
-    if doc_is_encrypted(&doc) {
+    let encrypted = doc_is_encrypted(&doc);
+    if encrypted {
         issues.push("document is encrypted; only surface structure was inspected".to_string());
     }
 
@@ -55,7 +56,13 @@ pub fn validate(input: &[u8], limits: &EngineLimits) -> PdfResult<ValidationRepo
     }
 
     let pages = doc.get_pages();
-    if pages.is_empty() {
+    // A password-protected document loads with its trailer but no
+    // objects, so an empty page map there means "unreadable", not
+    // "zero pages" — do not report a page count we cannot know.
+    // (`was_encrypted` is set when lopdf decrypted the document itself,
+    // e.g. an empty user password; then the page tree is authoritative.)
+    let page_tree_unavailable = encrypted && !doc.was_encrypted();
+    if pages.is_empty() && !page_tree_unavailable {
         issues.push("document has no pages".to_string());
     }
 
@@ -86,4 +93,112 @@ pub fn validate(input: &[u8], limits: &EngineLimits) -> PdfResult<ValidationRepo
         ok: issues.is_empty(),
         issues,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crates::pdf_engine::ops::encrypt::{PdfPermissions, encrypt};
+    use crate::crates::pdf_engine::ops::test_utils::pdf_with_pages;
+    use lopdf::{Document, Object, dictionary};
+
+    #[test]
+    fn well_formed_document_reports_ok() {
+        let pdf = pdf_with_pages(&["clean", "pages"]);
+        let report = validate(&pdf, &EngineLimits::default()).unwrap();
+        assert!(report.ok, "issues: {:?}", report.issues);
+        assert!(report.issues.is_empty());
+    }
+
+    #[test]
+    fn reports_document_without_pages() {
+        let mut doc = Document::with_version("1.4");
+        let pages_id = doc.new_object_id();
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => Vec::<Object>::new(),
+                "Count" => 0,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        let mut pdf = Vec::new();
+        doc.save_to(&mut pdf).unwrap();
+
+        let report = validate(&pdf, &EngineLimits::default()).unwrap();
+        assert!(!report.ok);
+        assert!(
+            report.issues.iter().any(|i| i.contains("no pages")),
+            "issues: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn encrypted_document_is_reported_not_rejected() {
+        let plain = pdf_with_pages(&["secret"]);
+        let encrypted = encrypt(
+            &plain,
+            "pw",
+            None,
+            PdfPermissions::default(),
+            &EngineLimits::default(),
+        )
+        .unwrap();
+        let report = validate(&encrypted, &EngineLimits::default()).unwrap();
+        assert!(!report.ok);
+        // The encrypted issue is reported; lopdf cannot load the page
+        // tree without the password, so no "no pages" issue appears.
+        assert!(
+            report.issues.iter().any(|i| i.contains("encrypted")),
+            "issues: {:?}",
+            report.issues
+        );
+        assert!(
+            !report.issues.iter().any(|i| i.contains("no pages")),
+            "issues: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn damaged_xref_reports_issues_or_load_error() {
+        // Corrupt the xref table: lopdf should either recover (reporting
+        // the repair) or reject the file outright — never panic.
+        let mut pdf = pdf_with_pages(&["fragile"]);
+        // Overwrite a chunk inside the file body with zeros; objects and
+        // xref entries near the tail become inconsistent.
+        let mid = pdf.len() / 2;
+        let end = (mid + 64).min(pdf.len());
+        for b in &mut pdf[mid..end] {
+            *b = b' ';
+        }
+        match validate(&pdf, &EngineLimits::default()) {
+            Ok(report) => {
+                assert!(!report.ok, "corrupted file reported ok");
+                assert!(!report.issues.is_empty());
+            }
+            Err(err) => {
+                // Load-level rejection is also acceptable behavior.
+                assert!(
+                    matches!(
+                        err,
+                        crate::crates::pdf_engine::error::PdfError::InvalidPdf(_)
+                            | crate::crates::pdf_engine::error::PdfError::InvalidInput(_)
+                    ),
+                    "unexpected error: {err:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_unloadable_input() {
+        assert!(validate(b"junk", &EngineLimits::default()).is_err());
+    }
 }

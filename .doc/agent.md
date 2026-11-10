@@ -5,17 +5,37 @@ Guidelines for humans and AI agents contributing to KalaDoc.
 ## Project overview
 
 KalaDoc is a Rust (edition 2024) application for document ingest, storage,
-and processing. It currently has **zero external dependencies** — prefer
-`std` and justify any new crate in the PR description.
+and processing. It is a **single crate**: `src/crates/*` are modules wired
+through `src/lib.rs` (via `#[path]` attributes), not workspace members —
+they have no `Cargo.toml` of their own. External dependencies are used
+where they earn their place (sqlx, axum, lopdf, tokio, ...); justify new
+crates in the PR description.
 
 ## Repository layout
 
 ```
-Cargo.toml / Cargo.lock   # single-crate manifest (will become a workspace)
-src/main.rs               # binary entry point
-src/crates/               # reusable library modules (intended `crate::` paths)
+Cargo.toml / Cargo.lock   # single-crate manifest
+src/main.rs               # binary entry point (kaladoc CLI)
+src/lib.rs                # library root — declares all modules
+src/config/               # AppConfig: defaults → kaladoc.toml → env
+src/core/                 # shared row types (AuthUser)
+src/crates/               # reusable library modules
+  core/                   #   ProcessingEngine contract
   shared_public/          #   platform detection — no internal deps
-  storage/                #   storage engine — depends on shared_public only
+  storage/                #   storage backends (local FS, remote S3)
+  document_engine/        #   document domain + SQL store
+  job_engine/             #   durable job queue
+  scheduler/              #   recurring jobs via the queue
+  engine-registry/        #   ProcessingEngine registry
+  security-engine/        #   upload validation / sniffing
+  pdf-engine/             #   PDF ops (100+)
+  image-engine/           #   image ops
+  multimedia-engine/      #   ffmpeg/ffprobe media ops
+  conversion-engine/      #   format conversion backends
+  pipeline-engine/        #   multi-step pipelines
+  api/                    #   axum HTTP API
+  application/            #   services, job handlers, CLI adapter
+  observability/          #   logging / health / request IDs
 src/deployments/          # deployment/packaging helpers (own binaries)
 .doc/                     # project documentation (this directory)
 target/                   # build output (gitignored)
@@ -23,15 +43,12 @@ target/                   # build output (gitignored)
 
 ## Current state
 
-`main.rs` is a stub and does not declare the modules under `src/crates/`
-or `src/deployments/` yet — those files compile standalone but are not yet
-wired into the crate. When wiring them up:
-
-- Add `mod crates;` / `mod deployments;` (or convert to a workspace with a
-  `lib.rs`) rather than editing import paths.
-- `src/deployments/require.rs` contains its own `fn main()` — it must become
-  a separate `[[bin]]` target or its `main` must be renamed before it can
-  live inside the library crate.
+All modules are wired into the library via `lib.rs` and compile/test
+cleanly. `main.rs` dispatches the clap command tree under
+`crates/application/cli_mcp_server/cli/` (`version`, `doctor`, `init`,
+`config`, `auth`, `user`, `jobs`, `engine`, `doc`, `pdf`, `serve`).
+`src/bin/kaladoc-release.rs` is an additional auto-discovered binary for
+release packaging.
 
 ## Conventions
 
@@ -54,7 +71,7 @@ wired into the crate. When wiring them up:
 
 ```bash
 cargo build          # builds the binary
-cargo test           # runs tests (none yet — add as you go)
+cargo test           # runs the test suite — keep it green
 cargo clippy         # lints
 cargo fmt            # formatting — run before committing
 ```
