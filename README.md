@@ -51,6 +51,7 @@ KalaDoc follows a modular architecture with clearly defined responsibilities.
 | PDF Engine | PDF manipulation (100+ operations: merge, split, sign, OCR, ...) |
 | Image Engine | Image processing operations |
 | Multimedia Engine | Audio/video processing via managed `ffmpeg`/`ffprobe` processes |
+| Video Engine | ffmpeg/ffprobe-backed video and audio processing (`kaladoc video`, `/media/*` REST endpoints, `video.*` jobs) |
 | Conversion Engine | Document format conversion through pluggable backends |
 | Pipeline Engine | Multi-step document processing pipelines |
 | API | HTTP API (axum) exposing documents, jobs, engines, and pipelines |
@@ -120,7 +121,7 @@ The technology stack is intentionally modular so that infrastructure and process
 - Cargo.
 - Git.
 - Platform-specific dependencies required by the enabled engines.
-- `ffmpeg` and `ffprobe` binaries on `PATH` (required by the video engine — detected, never bundled).
+- `ffmpeg` and `ffprobe` binaries on `PATH` (required by the video engine — detected at runtime, never bundled; see `.doc/video_engine.md`).
 
 ### Clone the repository
 
@@ -330,9 +331,8 @@ Active development areas include:
 
 - Hardening engine coverage and additional document formats.
 - Wiring the remote S3 storage backend into the application services.
-- MCP server integration (the CLI adapter reserves the surface).
 - Broader pipeline authoring and scheduling UX.
-- Video processing via the ffmpeg-backed video engine.
+- Video processing via the ffmpeg-backed video engine — ~80 `kaladoc video` subcommands covering probe/inspect, transcode/remux/encode, geometry and compositing, audio mixing/FX, subtitles and chapters, frames/slideshows, analysis/loudness/quality, HLS/DASH packaging, plus runtime capability discovery — exposed as `video.*` background jobs and `/media/*` REST endpoints (see `.doc/video_engine.md`).
 
 Features should be considered available only when implemented and verified in the codebase.
 

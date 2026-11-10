@@ -228,20 +228,24 @@ User accounts and sessions over SQLite (`sqlx`):
   verification, and deletion.
 - `session` issues opaque bearer tokens (only `SHA-256(token)` is
   stored), validates them with sliding expiry capped by an optional
-  absolute TTL, throttles `last_seen_at` writes via `touch_interval`,
-  supports per-token, per-id, and per-user revocation plus
-  `list_active_sessions`, deletes expired rows via
-  `cleanup_expired_sessions`, and `spawn_cleanup_task` repeats that on
-  the configured interval.
+  absolute TTL, throttles `last_seen_at` writes via `touch_interval`
+  (validation is read-only when nothing changed), supports per-token,
+  per-id, and per-user revocation plus `list_active_sessions`, deletes
+  expired rows via `cleanup_expired_sessions`, and `spawn_cleanup_task`
+  repeats that on the configured interval.
 
 ### `video_engine`
 Video/audio processing engine (`crates/video-engine`) implementing
 `ProcessingEngine` as `name = "video"`, `kind = EngineKind::Video`.
 All operations shell out to external `ffmpeg`/`ffprobe` binaries on
-`PATH` — never bundled — and are exposed via the CLI
-(`kaladoc video probe|thumbnail|trim|transcode|concat|extract-audio`)
-and job kinds (`video.probe`, `video.thumbnail`, `video.transcode`,
-`video.trim`, ...). Registered in `EngineRegistry::builtin()`
+`PATH` — never bundled — and are exposed via the `kaladoc video`
+CLI (~80 subcommands covering probe/trim/transcode/remux, geometry,
+tempo, audio processing, frames/slideshows, subtitles, filters,
+overlays, stream ops, analysis/loudness/quality, HLS/DASH packaging,
+and runtime capability discovery) and the `video.*` job kinds.
+Runtime capability discovery (`media_capabilities`,
+`ffmpeg -encoders`-backed encode presets) advertises only what the
+host ffmpeg build supports. Registered in `EngineRegistry::builtin()`
 alongside the other engines. See `.doc/video_engine.md`.
 
 ### `deployments`

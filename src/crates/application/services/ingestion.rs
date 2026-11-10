@@ -113,7 +113,9 @@ use crate::crates::document_engine::store::documents::NewDocument;
 use crate::crates::document_engine::store::metadata::upsert_document_metadata;
 use crate::crates::document_engine::store::{StoreError, now_rfc3339};
 use crate::crates::document_engine::version::DocumentVersion;
-use crate::crates::security_engine::{SniffedFormat, sniff_format};
+use crate::crates::security_engine::{
+    AudioContainer, SniffedFormat, VideoContainer, sniff_format,
+};
 use crate::crates::storage::local::config::StorageConfig;
 use crate::crates::storage::local::debug_when_full::FaultInjectingFs;
 use crate::crates::storage::{CommitReceipt, StreamLimits, StreamUpload, StreamingBackend};
@@ -844,9 +846,18 @@ fn detect_content(head: &[u8]) -> (DocumentType, &'static str, SniffedFormat) {
         SniffedFormat::Jpeg => (DocumentType::Image, "image/jpeg", SniffedFormat::Jpeg),
         SniffedFormat::Gif => (DocumentType::Image, "image/gif", SniffedFormat::Gif),
         SniffedFormat::Zip => (DocumentType::Archive, "application/zip", SniffedFormat::Zip),
-        f @ (SniffedFormat::Video { .. } | SniffedFormat::Audio { .. }) => {
-            (DocumentType::Other, f.mime(), f)
-        }
+        // `DocumentType` has no media variant; video/audio uploads are
+        // classified `Other` and identified precisely by MIME type.
+        SniffedFormat::Video { container } => (
+            DocumentType::Other,
+            video_mime(container),
+            SniffedFormat::Video { container },
+        ),
+        SniffedFormat::Audio { container } => (
+            DocumentType::Other,
+            audio_mime(container),
+            SniffedFormat::Audio { container },
+        ),
         SniffedFormat::Unknown => {
             if looks_like_text(head) {
                 (DocumentType::Text, "text/plain", SniffedFormat::Unknown)
@@ -858,6 +869,41 @@ fn detect_content(head: &[u8]) -> (DocumentType, &'static str, SniffedFormat) {
                 )
             }
         }
+    }
+}
+
+/// Conventional MIME type for a detected [`VideoContainer`].
+/// Mirrors the dispatch in `job_handlers::mime_for_format`.
+fn video_mime(container: VideoContainer) -> &'static str {
+    match container {
+        VideoContainer::Mp4 => "video/mp4",
+        VideoContainer::Matroska => "video/x-matroska",
+        VideoContainer::Webm => "video/webm",
+        VideoContainer::Avi => "video/x-msvideo",
+        VideoContainer::MpegTs => "video/mp2t",
+        VideoContainer::MpegPs | VideoContainer::MpegVideo => "video/mpeg",
+        VideoContainer::Flv => "video/x-flv",
+        VideoContainer::Asf => "video/x-ms-wmv",
+        VideoContainer::Mxf => "application/mxf",
+        VideoContainer::F4v => "video/x-f4v",
+        VideoContainer::Ogg => "video/ogg",
+    }
+}
+
+/// Conventional MIME type for a detected [`AudioContainer`].
+/// Mirrors the dispatch in `job_handlers::mime_for_format`.
+fn audio_mime(container: AudioContainer) -> &'static str {
+    match container {
+        AudioContainer::Mp3 => "audio/mpeg",
+        AudioContainer::Wav => "audio/wav",
+        AudioContainer::Flac => "audio/flac",
+        AudioContainer::OggAudio => "audio/ogg",
+        AudioContainer::Aac => "audio/aac",
+        AudioContainer::Aiff => "audio/aiff",
+        AudioContainer::Au => "audio/basic",
+        AudioContainer::Amr => "audio/amr",
+        AudioContainer::Caf => "audio/x-caf",
+        AudioContainer::Ac3 => "audio/ac3",
     }
 }
 

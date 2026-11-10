@@ -46,6 +46,28 @@
 //! | `video.loudness`        | `{path, max_bytes?}`                                          | Measure loudness; writes `<path>.loudness.json` |
 //! | `video.scene_frames`    | `{path, threshold?, max_bytes?}`                              | Scene-change keyframes; writes files under `<path>.scenes/` |
 //! | `video.merge_av`        | `{video_path, audio_path, target_ext?, max_bytes?}`           | Merge audio into video; writes `<video_path>.merged<ext>` |
+//! | `video.validate`        | `{path, max_bytes?}`                                          | Full validation report; writes `<path>.validate.json` |
+//! | `video.chapters_list`   | `{path, max_bytes?}`                                          | List embedded chapters; writes `<path>.chapters.json` |
+//! | `video.chapters_set`    | `{path, chapters:[{start_ms,end_ms,title?}], max_bytes?}`     | Replace chapter table; writes `<path>.chapters<ext>` |
+//! | `video.chapters_shift`  | `{path, offset_ms, max_bytes?}`                               | Shift all chapters; writes `<path>.chapters_shift<ext>` |
+//! | `video.chapters_remove` | `{path, max_bytes?}`                                          | Drop all chapters; writes `<path>.chapters_remove<ext>` |
+//! | `video.hdr_detect`      | `{path, max_bytes?}`                                          | HDR probe; writes `<path>.hdr.json` |
+//! | `video.hdr_tone_map`    | `{path, desat?, peak?, max_bytes?}`                           | HDR→SDR tone map; writes `<path>.tonemap<ext>` |
+//! | `video.segment_split`   | `{path, mode?, duration_secs?, threshold?, parts?, format?, max_bytes?}` | Split into segments (`duration`/`scenes`/`equal`); writes files under `<path>.segments/` |
+//! | `video.segment_extract` | `{path, start_ms, end_ms, format?, max_bytes?}`               | Cut `[start_ms,end_ms)`; writes `<path>.extract.<format>` |
+//! | `video.waveform`        | `{path, width?, height?, color?, scale?, max_bytes?}`         | Audio waveform PNG; writes `<path>.waveform.png` |
+//! | `video.spectrogram`     | `{path, width?, height?, color?, scale?, max_bytes?}`         | Spectrogram PNG; writes `<path>.spectrogram.png` |
+//! | `video.vectorscope`     | `{path, width?, height?, color?, scale?, max_bytes?}`         | Stereo vectorscope PNG; writes `<path>.vectorscope.png` |
+//! | `video.sync_report`     | `{path, max_bytes?}`                                          | A/V start-time report; writes `<path>.sync.json` |
+//! | `video.sync_fix`        | `{path, audio_offset_ms?, video_offset_ms?, max_bytes?}`      | Manual A/V shift; writes `<path>.syncfix<ext>` |
+//! | `video.sync_auto`       | `{path, max_bytes?}`                                          | Automatic A/V align; writes `<path>.syncauto<ext>` |
+//! | `video.stabilize`       | `{path, shakiness?, smoothing?, algo?, auto?, max_bytes?}`    | Deshake/vidstab stabilize; writes `<path>.stabilize<ext>` |
+//! | `video.preview_gif`     | `{path, max_duration_secs?, fps?, width?, max_bytes?}`        | Animated GIF preview; writes `<path>.preview.gif` |
+//! | `video.preview_webp`    | `{path, max_duration_secs?, fps?, width?, max_bytes?}`        | Animated WebP preview; writes `<path>.preview.webp` |
+//! | `video.proxy_generate`  | `{path, kind?, target_height?, crf?, preset?, max_bytes?}`    | Proxy/mezzanine/archival derive; writes `<path>.<kind>.<ext>` |
+//! | `video.stream_select`   | `{path, keep_video?, audio_ordinals?, subtitle_ordinals?, drop_attachments?, target_ext?, max_bytes?}` | Map/select streams; writes `<path>.select<ext>` |
+//! | `video.stream_cover_art`| `{path, cover_path, max_bytes?}`                              | Attach cover art (audio containers); writes `<path>.cover<ext>` |
+//! | `video.filters_apply`   | `{path, preset?, video_filter?, audio_filter?, max_bytes?}`   | Apply named preset or raw `-vf`/`-af`; writes `<path>.filters<ext>` |
 //! | `storage.gc_staging`    | `{retention_secs?}`                                           | Delete abandoned entries under `<storage_root>/staging/` and `<storage_root>/.staging/` older than the retention window |
 //! | `storage.scan_inbox`    | `{owner_id, recurse?, max_files?}`                            | Ingest files dropped in `<storage_root>/inbox/` and move them to `inbox/.processed/` (see [`StorageScanInboxHandler`]) |
 //! | `document.auto_rename`  | `{document_id}`                                               | Rename a document to `{title}-{id8}.{ext}` from extracted PDF metadata, once (see [`DocumentAutoRenameHandler`]) |
@@ -622,6 +644,72 @@ pub const PDF_OPS: &[&str] = &[
     "unlock_fields",
 ];
 
+/// Job kind for [`VideoValidateHandler`].
+pub const VIDEO_VALIDATE_KIND: &str = "video.validate";
+
+/// Job kind for [`VideoChaptersListHandler`].
+pub const VIDEO_CHAPTERS_LIST_KIND: &str = "video.chapters_list";
+
+/// Job kind for [`VideoChaptersSetHandler`].
+pub const VIDEO_CHAPTERS_SET_KIND: &str = "video.chapters_set";
+
+/// Job kind for [`VideoChaptersShiftHandler`].
+pub const VIDEO_CHAPTERS_SHIFT_KIND: &str = "video.chapters_shift";
+
+/// Job kind for [`VideoChaptersRemoveHandler`].
+pub const VIDEO_CHAPTERS_REMOVE_KIND: &str = "video.chapters_remove";
+
+/// Job kind for [`VideoHdrDetectHandler`].
+pub const VIDEO_HDR_DETECT_KIND: &str = "video.hdr_detect";
+
+/// Job kind for [`VideoHdrToneMapHandler`].
+pub const VIDEO_HDR_TONE_MAP_KIND: &str = "video.hdr_tone_map";
+
+/// Job kind for [`VideoSegmentSplitHandler`].
+pub const VIDEO_SEGMENT_SPLIT_KIND: &str = "video.segment_split";
+
+/// Job kind for [`VideoSegmentExtractHandler`].
+pub const VIDEO_SEGMENT_EXTRACT_KIND: &str = "video.segment_extract";
+
+/// Job kind for [`VideoWaveformHandler`].
+pub const VIDEO_WAVEFORM_KIND: &str = "video.waveform";
+
+/// Job kind for [`VideoSpectrogramHandler`].
+pub const VIDEO_SPECTROGRAM_KIND: &str = "video.spectrogram";
+
+/// Job kind for [`VideoVectorscopeHandler`].
+pub const VIDEO_VECTORSCOPE_KIND: &str = "video.vectorscope";
+
+/// Job kind for [`VideoSyncReportHandler`].
+pub const VIDEO_SYNC_REPORT_KIND: &str = "video.sync_report";
+
+/// Job kind for [`VideoSyncFixHandler`].
+pub const VIDEO_SYNC_FIX_KIND: &str = "video.sync_fix";
+
+/// Job kind for [`VideoSyncAutoHandler`].
+pub const VIDEO_SYNC_AUTO_KIND: &str = "video.sync_auto";
+
+/// Job kind for [`VideoStabilizeHandler`].
+pub const VIDEO_STABILIZE_KIND: &str = "video.stabilize";
+
+/// Job kind for [`VideoPreviewGifHandler`].
+pub const VIDEO_PREVIEW_GIF_KIND: &str = "video.preview_gif";
+
+/// Job kind for [`VideoPreviewWebpHandler`].
+pub const VIDEO_PREVIEW_WEBP_KIND: &str = "video.preview_webp";
+
+/// Job kind for [`VideoProxyGenerateHandler`].
+pub const VIDEO_PROXY_GENERATE_KIND: &str = "video.proxy_generate";
+
+/// Job kind for [`VideoStreamSelectHandler`].
+pub const VIDEO_STREAM_SELECT_KIND: &str = "video.stream_select";
+
+/// Job kind for [`VideoStreamCoverArtHandler`].
+pub const VIDEO_STREAM_COVER_ART_KIND: &str = "video.stream_cover_art";
+
+/// Job kind for [`VideoFiltersApplyHandler`].
+pub const VIDEO_FILTERS_APPLY_KIND: &str = "video.filters_apply";
+
 /// Default `max_bytes` for `pdf.inspect` (100 MiB).
 const DEFAULT_INSPECT_MAX_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -747,6 +835,43 @@ pub fn register_builtin(engine: &mut JobEngine) {
     engine.register(VIDEO_LOUDNESS_KIND, Arc::new(VideoLoudnessHandler));
     engine.register(VIDEO_SCENE_FRAMES_KIND, Arc::new(VideoSceneFramesHandler));
     engine.register(VIDEO_MERGE_AV_KIND, Arc::new(VideoMergeAvHandler));
+    engine.register(VIDEO_VALIDATE_KIND, Arc::new(VideoValidateHandler));
+    engine.register(VIDEO_CHAPTERS_LIST_KIND, Arc::new(VideoChaptersListHandler));
+    engine.register(VIDEO_CHAPTERS_SET_KIND, Arc::new(VideoChaptersSetHandler));
+    engine.register(
+        VIDEO_CHAPTERS_SHIFT_KIND,
+        Arc::new(VideoChaptersShiftHandler),
+    );
+    engine.register(
+        VIDEO_CHAPTERS_REMOVE_KIND,
+        Arc::new(VideoChaptersRemoveHandler),
+    );
+    engine.register(VIDEO_HDR_DETECT_KIND, Arc::new(VideoHdrDetectHandler));
+    engine.register(VIDEO_HDR_TONE_MAP_KIND, Arc::new(VideoHdrToneMapHandler));
+    engine.register(VIDEO_SEGMENT_SPLIT_KIND, Arc::new(VideoSegmentSplitHandler));
+    engine.register(
+        VIDEO_SEGMENT_EXTRACT_KIND,
+        Arc::new(VideoSegmentExtractHandler),
+    );
+    engine.register(VIDEO_WAVEFORM_KIND, Arc::new(VideoWaveformHandler));
+    engine.register(VIDEO_SPECTROGRAM_KIND, Arc::new(VideoSpectrogramHandler));
+    engine.register(VIDEO_VECTORSCOPE_KIND, Arc::new(VideoVectorscopeHandler));
+    engine.register(VIDEO_SYNC_REPORT_KIND, Arc::new(VideoSyncReportHandler));
+    engine.register(VIDEO_SYNC_FIX_KIND, Arc::new(VideoSyncFixHandler));
+    engine.register(VIDEO_SYNC_AUTO_KIND, Arc::new(VideoSyncAutoHandler));
+    engine.register(VIDEO_STABILIZE_KIND, Arc::new(VideoStabilizeHandler));
+    engine.register(VIDEO_PREVIEW_GIF_KIND, Arc::new(VideoPreviewGifHandler));
+    engine.register(VIDEO_PREVIEW_WEBP_KIND, Arc::new(VideoPreviewWebpHandler));
+    engine.register(
+        VIDEO_PROXY_GENERATE_KIND,
+        Arc::new(VideoProxyGenerateHandler),
+    );
+    engine.register(VIDEO_STREAM_SELECT_KIND, Arc::new(VideoStreamSelectHandler));
+    engine.register(
+        VIDEO_STREAM_COVER_ART_KIND,
+        Arc::new(VideoStreamCoverArtHandler),
+    );
+    engine.register(VIDEO_FILTERS_APPLY_KIND, Arc::new(VideoFiltersApplyHandler));
     engine.register(STORAGE_GC_STAGING_KIND, Arc::new(StorageGcStagingHandler));
     match DocumentMetadataExtractHandler::from_app_config() {
         Ok(handler) => engine.register(DOCUMENT_METADATA_EXTRACT_KIND, Arc::new(handler)),
@@ -1583,6 +1708,72 @@ struct VideoSceneFramesHandler;
 /// `video.merge_av` — merge an audio file into a video.
 struct VideoMergeAvHandler;
 
+/// `video.validate` — full media validation report.
+struct VideoValidateHandler;
+
+/// `video.chapters_list` — list embedded chapters as JSON.
+struct VideoChaptersListHandler;
+
+/// `video.chapters_set` — replace the chapter table.
+struct VideoChaptersSetHandler;
+
+/// `video.chapters_shift` — shift every chapter by `offset_ms`.
+struct VideoChaptersShiftHandler;
+
+/// `video.chapters_remove` — drop every embedded chapter.
+struct VideoChaptersRemoveHandler;
+
+/// `video.hdr_detect` — HDR characteristics report.
+struct VideoHdrDetectHandler;
+
+/// `video.hdr_tone_map` — HDR→SDR tone mapping.
+struct VideoHdrToneMapHandler;
+
+/// `video.segment_split` — split into `seg-NNN.<format>` files.
+struct VideoSegmentSplitHandler;
+
+/// `video.segment_extract` — cut a `[start_ms, end_ms)` range.
+struct VideoSegmentExtractHandler;
+
+/// `video.waveform` — audio waveform PNG.
+struct VideoWaveformHandler;
+
+/// `video.spectrogram` — audio spectrogram PNG.
+struct VideoSpectrogramHandler;
+
+/// `video.vectorscope` — stereo vectorscope PNG.
+struct VideoVectorscopeHandler;
+
+/// `video.sync_report` — A/V start-time report.
+struct VideoSyncReportHandler;
+
+/// `video.sync_fix` — manual A/V stream shift.
+struct VideoSyncFixHandler;
+
+/// `video.sync_auto` — automatic A/V alignment.
+struct VideoSyncAutoHandler;
+
+/// `video.stabilize` — deshake/vidstab stabilization.
+struct VideoStabilizeHandler;
+
+/// `video.preview_gif` — animated GIF preview.
+struct VideoPreviewGifHandler;
+
+/// `video.preview_webp` — animated WebP preview.
+struct VideoPreviewWebpHandler;
+
+/// `video.proxy_generate` — proxy/mezzanine/archival derivative.
+struct VideoProxyGenerateHandler;
+
+/// `video.stream_select` — map/select streams into `target_ext`.
+struct VideoStreamSelectHandler;
+
+/// `video.stream_cover_art` — attach cover art to an audio file.
+struct VideoStreamCoverArtHandler;
+
+/// `video.filters_apply` — named preset or raw `-vf`/`-af` filters.
+struct VideoFiltersApplyHandler;
+
 /// Parsed `video.extract_frames` payload.
 #[derive(Debug, Deserialize)]
 struct VideoExtractFramesPayload {
@@ -1885,6 +2076,282 @@ struct VideoMergeAvPayload {
     max_bytes: u64,
 }
 
+/// One chapter entry in a `video.chapters_set` payload, in
+/// milliseconds (the engine's editing currency).
+#[derive(Debug, Deserialize)]
+struct VideoChapterEdit {
+    /// Chapter start time in milliseconds.
+    start_ms: i64,
+    /// Chapter end time in milliseconds.
+    end_ms: i64,
+    /// Chapter title (`None`/empty → untitled chapter).
+    #[serde(default)]
+    title: Option<String>,
+}
+
+/// Parsed `video.chapters_set` payload.
+#[derive(Debug, Deserialize)]
+struct VideoChaptersSetPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Replacement chapter table. Must be non-empty, sorted by
+    /// `start_ms`, non-overlapping — the engine validates.
+    chapters: Vec<VideoChapterEdit>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.chapters_shift` payload.
+#[derive(Debug, Deserialize)]
+struct VideoChaptersShiftPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Offset applied to every chapter bound, in milliseconds.
+    /// Positive shifts later.
+    offset_ms: i64,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.hdr_tone_map` payload.
+#[derive(Debug, Deserialize)]
+struct VideoHdrToneMapPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Desaturation strength for the Hable curve (`None` → ffmpeg
+    /// default).
+    #[serde(default)]
+    desat: Option<f64>,
+    /// Signal peak override in nits (`None` → stream/container
+    /// metadata or ffmpeg default).
+    #[serde(default)]
+    peak: Option<u32>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.segment_split` payload.
+#[derive(Debug, Deserialize)]
+struct VideoSegmentSplitPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Split strategy: `"duration"` (default), `"scenes"`, or
+    /// `"equal"`.
+    #[serde(default)]
+    mode: Option<String>,
+    /// Segment length in seconds — required for `mode = "duration"`.
+    #[serde(default)]
+    duration_secs: Option<f64>,
+    /// Scene-change score threshold 0.0–1.0 for `mode = "scenes"`
+    /// (`None` → 0.4).
+    #[serde(default)]
+    threshold: Option<f64>,
+    /// Number of equal parts for `mode = "equal"` (required then;
+    /// engine accepts 2–100).
+    #[serde(default)]
+    parts: Option<u32>,
+    /// Output container (`"mp4"`, `"mkv"`, `"webm"`, or `"avi"`).
+    /// Defaults to the input's extension when it is one of those,
+    /// else `"mp4"`.
+    #[serde(default)]
+    format: Option<String>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.segment_extract` payload.
+#[derive(Debug, Deserialize)]
+struct VideoSegmentExtractPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Range start in milliseconds.
+    start_ms: u64,
+    /// Range end in milliseconds (exclusive).
+    end_ms: u64,
+    /// Output container — same allowlist/default as
+    /// [`VideoSegmentSplitPayload::format`].
+    #[serde(default)]
+    format: Option<String>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed payload shared by `video.waveform`, `video.spectrogram`,
+/// and `video.vectorscope` (the kind is fixed per job kind).
+#[derive(Debug, Deserialize)]
+struct VideoWaveformPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Canvas width in pixels (`None` → 800).
+    #[serde(default)]
+    width: Option<u32>,
+    /// Canvas height in pixels (`None` → 400).
+    #[serde(default)]
+    height: Option<u32>,
+    /// Optional color override (per-kind filter option).
+    #[serde(default)]
+    color: Option<String>,
+    /// Optional scale/display override (per-kind filter option).
+    #[serde(default)]
+    scale: Option<String>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.sync_fix` payload.
+#[derive(Debug, Deserialize)]
+struct VideoSyncFixPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Audio shift in milliseconds: positive = audio starts later,
+    /// negative = earlier (`None` → 0).
+    #[serde(default)]
+    audio_offset_ms: Option<i64>,
+    /// Video shift in milliseconds: positive = video starts later,
+    /// negative = earlier (`None` → 0).
+    #[serde(default)]
+    video_offset_ms: Option<i64>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.stabilize` payload.
+#[derive(Debug, Deserialize)]
+struct VideoStabilizePayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Shakiness 1–10 (`None` → engine default 5).
+    #[serde(default)]
+    shakiness: Option<f64>,
+    /// Smoothing 1–100 (`None` → engine default 15).
+    #[serde(default)]
+    smoothing: Option<f64>,
+    /// Backend: `"vidstab"` (default) or `"deshake"`. Ignored when
+    /// `auto` is `true`.
+    #[serde(default)]
+    algo: Option<String>,
+    /// `true` → [`VideoEngine::stabilize_auto`] picks the best
+    /// available backend.
+    #[serde(default)]
+    auto: bool,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed payload shared by `video.preview_gif` and
+/// `video.preview_webp` (the format is fixed per job kind).
+#[derive(Debug, Deserialize)]
+struct VideoPreviewPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Seconds of source to animate (`None` → 5).
+    #[serde(default)]
+    max_duration_secs: Option<f64>,
+    /// Output frame rate (`None` → 10).
+    #[serde(default)]
+    fps: Option<f64>,
+    /// Output width in pixels (`None` → 320).
+    #[serde(default)]
+    width: Option<u32>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.proxy_generate` payload.
+#[derive(Debug, Deserialize)]
+struct VideoProxyGeneratePayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Derivative flavour: `"proxy"` (default), `"mezzanine"`, or
+    /// `"archival"`.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Max output height for `kind = "proxy"` (`None` → 720).
+    #[serde(default)]
+    target_height: Option<u32>,
+    /// H.264 CRF for `kind = "proxy"` (`None` → 23).
+    #[serde(default)]
+    crf: Option<u32>,
+    /// x264 preset name for `kind = "proxy"` (`None` → `veryfast`).
+    #[serde(default)]
+    preset: Option<String>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.stream_select` payload.
+#[derive(Debug, Deserialize)]
+struct VideoStreamSelectPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Keep the video stream (`None`/`true` → keep; `false` →
+    /// video-less output).
+    #[serde(default)]
+    keep_video: Option<bool>,
+    /// 0-based audio stream ordinals to keep (`None` → all).
+    #[serde(default)]
+    audio_ordinals: Option<Vec<u32>>,
+    /// 0-based subtitle stream ordinals to keep (`None` → all).
+    #[serde(default)]
+    subtitle_ordinals: Option<Vec<u32>>,
+    /// Drop attached pictures/data streams (`None` → `false`).
+    #[serde(default)]
+    drop_attachments: Option<bool>,
+    /// Bare output extension (`None` → the input's extension, or
+    /// `"mp4"` when it has none/unsafe).
+    #[serde(default)]
+    target_ext: Option<String>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.stream_cover_art` payload.
+#[derive(Debug, Deserialize)]
+struct VideoStreamCoverArtPayload {
+    /// Media path relative to the storage root (see
+    /// [`VideoPathPayload`]).
+    path: String,
+    /// Cover image path relative to the storage root — confined and
+    /// size-checked like `path`.
+    cover_path: String,
+    /// Size cap applied to **each** input before reading (bytes).
+    /// Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
+/// Parsed `video.filters_apply` payload.
+#[derive(Debug, Deserialize)]
+struct VideoFiltersApplyPayload {
+    /// Path relative to the storage root (see [`VideoPathPayload`]).
+    path: String,
+    /// Named preset from [`VideoEngine::filter_presets`] (e.g.
+    /// `"grayscale"`, `"denoise"`). Supplies `video_filter`/
+    /// `audio_filter` defaults; explicit fields override per-chain.
+    #[serde(default)]
+    preset: Option<String>,
+    /// Raw ffmpeg `-vf` chain.
+    #[serde(default)]
+    video_filter: Option<String>,
+    /// Raw ffmpeg `-af` chain.
+    #[serde(default)]
+    audio_filter: Option<String>,
+    /// Size cap applied before reading (bytes). Defaults to 4 GiB.
+    #[serde(default = "default_video_max_bytes")]
+    max_bytes: u64,
+}
+
 /// Implements [`JobHandler`] for every extended `video.*` handler:
 /// parse the payload, resolve the storage root, run the named
 /// operation. Identical contract to the four hand-written impls above.
@@ -1976,6 +2443,100 @@ impl_video_handler!(
     scene_frames_video_at
 );
 impl_video_handler!(VideoMergeAvHandler, VideoMergeAvPayload, merge_av_video_at);
+impl_video_handler!(VideoValidateHandler, VideoPathPayload, validate_video_at);
+impl_video_handler!(
+    VideoChaptersListHandler,
+    VideoPathPayload,
+    chapters_list_video_at
+);
+impl_video_handler!(
+    VideoChaptersSetHandler,
+    VideoChaptersSetPayload,
+    chapters_set_video_at
+);
+impl_video_handler!(
+    VideoChaptersShiftHandler,
+    VideoChaptersShiftPayload,
+    chapters_shift_video_at
+);
+impl_video_handler!(
+    VideoChaptersRemoveHandler,
+    VideoPathPayload,
+    chapters_remove_video_at
+);
+impl_video_handler!(VideoHdrDetectHandler, VideoPathPayload, hdr_detect_video_at);
+impl_video_handler!(
+    VideoHdrToneMapHandler,
+    VideoHdrToneMapPayload,
+    hdr_tone_map_video_at
+);
+impl_video_handler!(
+    VideoSegmentSplitHandler,
+    VideoSegmentSplitPayload,
+    segment_split_video_at
+);
+impl_video_handler!(
+    VideoSegmentExtractHandler,
+    VideoSegmentExtractPayload,
+    segment_extract_video_at
+);
+impl_video_handler!(
+    VideoWaveformHandler,
+    VideoWaveformPayload,
+    waveform_video_at
+);
+impl_video_handler!(
+    VideoSpectrogramHandler,
+    VideoWaveformPayload,
+    spectrogram_video_at
+);
+impl_video_handler!(
+    VideoVectorscopeHandler,
+    VideoWaveformPayload,
+    vectorscope_video_at
+);
+impl_video_handler!(
+    VideoSyncReportHandler,
+    VideoPathPayload,
+    sync_report_video_at
+);
+impl_video_handler!(VideoSyncFixHandler, VideoSyncFixPayload, sync_fix_video_at);
+impl_video_handler!(VideoSyncAutoHandler, VideoPathPayload, sync_auto_video_at);
+impl_video_handler!(
+    VideoStabilizeHandler,
+    VideoStabilizePayload,
+    stabilize_video_at
+);
+impl_video_handler!(
+    VideoPreviewGifHandler,
+    VideoPreviewPayload,
+    preview_gif_video_at
+);
+impl_video_handler!(
+    VideoPreviewWebpHandler,
+    VideoPreviewPayload,
+    preview_webp_video_at
+);
+impl_video_handler!(
+    VideoProxyGenerateHandler,
+    VideoProxyGeneratePayload,
+    proxy_generate_video_at
+);
+impl_video_handler!(
+    VideoStreamSelectHandler,
+    VideoStreamSelectPayload,
+    stream_select_video_at
+);
+impl_video_handler!(
+    VideoStreamCoverArtHandler,
+    VideoStreamCoverArtPayload,
+    stream_cover_art_video_at
+);
+impl_video_handler!(
+    VideoFiltersApplyHandler,
+    VideoFiltersApplyPayload,
+    filters_apply_video_at
+);
 
 /// `.<ext>` of `file` (leading dot included), or `""` when the file
 /// has no extension — used to build `<path>.<op><ext>` output names.
@@ -2143,11 +2704,7 @@ fn metadata_set_video_at(root: &Path, payload: &VideoMetadataSetPayload) -> Resu
 /// `"mp4"` when the input has none/unsafe.
 fn metadata_strip_video_at(root: &Path, payload: &VideoPathPayload) -> Result<(), JobError> {
     let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
-    let ext = file
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| sanitize_target_ext(e).unwrap_or_else(|_| "mp4".to_string()))
-        .unwrap_or_else(|| "mp4".to_string());
+    let ext = derived_container_ext(&file);
     let out = path_with_suffix(&file, &format!(".stripped.{ext}"));
     let bytes = crate::crates::video_engine::VideoEngine::new()
         .strip_metadata(&data, &ext, &video_limits(payload.max_bytes))
@@ -2495,6 +3052,684 @@ fn merge_av_video_at(root: &Path, payload: &VideoMergeAvPayload) -> Result<(), J
         .merge_av(&video, &audio, &ext, &video_limits(payload.max_bytes))
         .map_err(|e| video_err("video merge_av failed", e))?;
     write_output_atomic(&out, &bytes)
+}
+
+// ---------------------------------------------------------------------------
+// Additional video.* handlers (validate / chapters / hdr / segments /
+// waveform / sync / stabilize / preview / proxy / stream select / filters)
+// ---------------------------------------------------------------------------
+//
+// Same confinement + atomic-output model as the handlers above.
+// Report ops write pretty JSON (`<path>.<report>.json`); single-file
+// transforms reuse [`video_transform_at`]; multi-file segment splits
+// go through [`write_media_output`] like `video.extract_frames`.
+
+/// `video.validate` implementation: run the full validation pipeline
+/// and write the pretty-JSON [`ValidationReport`] to
+/// `<path>.validate.json`.
+fn validate_video_at(root: &Path, payload: &VideoPathPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let report = crate::crates::video_engine::VideoEngine::new()
+        .validate_media(&data, &video_limits(payload.max_bytes))
+        .map_err(|e| video_err(&format!("video validate failed for {:?}", payload.path), e))?;
+    let json = serde_json::to_string_pretty(&report)?;
+    write_output_atomic(&path_with_suffix(&file, ".validate.json"), json.as_bytes())
+}
+
+/// `video.chapters_list` implementation: list embedded chapters and
+/// write `{"chapters": [...]}` (millisecond bounds) to
+/// `<path>.chapters.json`. [`ChapterEdit`](crate::crates::video_engine::ChapterEdit)
+/// is not `Serialize`, so the report is built field-by-field.
+fn chapters_list_video_at(root: &Path, payload: &VideoPathPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let chapters = crate::crates::video_engine::VideoEngine::new()
+        .chapters_list(&data)
+        .map_err(|e| {
+            video_err(
+                &format!("video chapters_list failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    let list: Vec<serde_json::Value> = chapters
+        .iter()
+        .map(|c| {
+            json!({
+                "id": c.id,
+                "start_ms": c.start_ms,
+                "end_ms": c.end_ms,
+                "title": c.title,
+            })
+        })
+        .collect();
+    let json = serde_json::to_string_pretty(&json!({ "chapters": list }))?;
+    write_output_atomic(&path_with_suffix(&file, ".chapters.json"), json.as_bytes())
+}
+
+/// Extension suffix (`mp4`/`mkv`/...) for outputs whose container the
+/// engine derives from the probed input format (chapters, cover art):
+/// the input's own extension when present and safe, else `"mp4"` —
+/// same fallback as `video.metadata_strip`.
+fn derived_container_ext(file: &Path) -> String {
+    file.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| sanitize_target_ext(e).unwrap_or_else(|_| "mp4".to_string()))
+        .unwrap_or_else(|| "mp4".to_string())
+}
+
+/// `video.chapters_set` implementation: replace the chapter table and
+/// write the remuxed file to `<path>.chapters<ext>`.
+fn chapters_set_video_at(root: &Path, payload: &VideoChaptersSetPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let owned: Vec<(i64, i64, String)> = payload
+        .chapters
+        .iter()
+        .map(|c| (c.start_ms, c.end_ms, c.title.clone().unwrap_or_default()))
+        .collect();
+    let chapters: Vec<(i64, i64, &str)> =
+        owned.iter().map(|(s, e, t)| (*s, *e, t.as_str())).collect();
+    let ext = derived_container_ext(&file);
+    let out = path_with_suffix(&file, &format!(".chapters.{ext}"));
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .chapters_set(&data, &chapters, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(
+                &format!("video chapters_set failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_output_atomic(&out, &bytes)
+}
+
+/// `video.chapters_shift` implementation: shift every chapter by
+/// `offset_ms` and write `<path>.chapters_shift<ext>`.
+fn chapters_shift_video_at(
+    root: &Path,
+    payload: &VideoChaptersShiftPayload,
+) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let ext = derived_container_ext(&file);
+    let out = path_with_suffix(&file, &format!(".chapters_shift.{ext}"));
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .chapters_shift(&data, payload.offset_ms, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(
+                &format!("video chapters_shift failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_output_atomic(&out, &bytes)
+}
+
+/// `video.chapters_remove` implementation: drop the chapter table and
+/// write `<path>.chapters_remove<ext>`.
+fn chapters_remove_video_at(root: &Path, payload: &VideoPathPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let ext = derived_container_ext(&file);
+    let out = path_with_suffix(&file, &format!(".chapters_remove.{ext}"));
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .chapters_remove(&data, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(
+                &format!("video chapters_remove failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_output_atomic(&out, &bytes)
+}
+
+/// `video.hdr_detect` implementation: probe the primary video stream's
+/// HDR signalling and write the pretty-JSON [`HdrInfo`] report to
+/// `<path>.hdr.json`. [`HdrInfo`](crate::crates::video_engine::HdrInfo)
+/// is not `Serialize`, so the report is built field-by-field.
+fn hdr_detect_video_at(root: &Path, payload: &VideoPathPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let info = crate::crates::video_engine::VideoEngine::new()
+        .hdr_detect(&data)
+        .map_err(|e| {
+            video_err(
+                &format!("video hdr_detect failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    let json = serde_json::to_string_pretty(&json!({
+        "is_hdr": info.is_hdr,
+        "color_transfer": info.color_transfer,
+        "color_primaries": info.color_primaries,
+        "color_space": info.color_space,
+        "bit_depth": info.bit_depth,
+        "pix_fmt": info.pix_fmt,
+    }))?;
+    write_output_atomic(&path_with_suffix(&file, ".hdr.json"), json.as_bytes())
+}
+
+/// `video.hdr_tone_map` implementation: tone-map HDR `path` to SDR
+/// per `desat`/`peak` and write `<path>.tonemap<ext>`.
+fn hdr_tone_map_video_at(root: &Path, payload: &VideoHdrToneMapPayload) -> Result<(), JobError> {
+    let params = crate::crates::video_engine::HdrToneMapParams {
+        desat: payload.desat,
+        peak: payload.peak,
+    };
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_HDR_TONE_MAP_KIND,
+        ".tonemap",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new().hdr_tone_map(data, &params, limits)
+        },
+    )
+}
+
+/// Container extensions accepted by the `video.segment_*` kinds —
+/// mirrors the engine's segment allowlist (`mp4`/`mkv`/`webm`/`avi`).
+const SEGMENT_FORMATS: &[&str] = &["mp4", "mkv", "webm", "avi"];
+
+/// Resolves the `format` field of the `video.segment_*` payloads:
+/// an explicit value is sanitized and checked against
+/// [`SEGMENT_FORMATS`]; `None` falls back to the input's extension
+/// when it is an allowed container, else `"mp4"`.
+fn segment_format(format: Option<&str>, file: &Path) -> Result<String, JobError> {
+    match format {
+        Some(f) => {
+            let ext = sanitize_ext_field("format", f)?;
+            if SEGMENT_FORMATS.contains(&ext.as_str()) {
+                Ok(ext)
+            } else {
+                Err(JobError::Failed(format!(
+                    "payload.format is not a supported segment container: {f:?} \
+                     (expected mp4|mkv|webm|avi)"
+                )))
+            }
+        }
+        None => {
+            let ext = file
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            if SEGMENT_FORMATS.contains(&ext.as_str()) {
+                Ok(ext)
+            } else {
+                Ok("mp4".to_string())
+            }
+        }
+    }
+}
+
+/// `video.segment_split` implementation: split `path` per `mode`
+/// (`"duration"` default → `duration_secs`, `"scenes"` → `threshold`,
+/// `"equal"` → `parts`) and write `seg-NNN.<format>` files plus a
+/// `manifest.json` under `<path>.segments/`.
+fn segment_split_video_at(root: &Path, payload: &VideoSegmentSplitPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let format = segment_format(payload.format.as_deref(), &file)?;
+    let limits = video_limits(payload.max_bytes);
+    let engine = crate::crates::video_engine::VideoEngine::new();
+    let mode = payload.mode.as_deref().unwrap_or("duration");
+    let result = match mode.trim().to_ascii_lowercase().as_str() {
+        "duration" => {
+            let secs = payload.duration_secs.ok_or_else(|| {
+                JobError::Failed(
+                    "payload.duration_secs is required for mode \"duration\"".to_string(),
+                )
+            })?;
+            engine.split_by_duration(&data, secs, &format, &limits)
+        }
+        "scenes" => {
+            engine.split_by_scenes(&data, payload.threshold.unwrap_or(0.4), &format, &limits)
+        }
+        "equal" => {
+            let parts = payload.parts.ok_or_else(|| {
+                JobError::Failed("payload.parts is required for mode \"equal\"".to_string())
+            })?;
+            engine.split_equal(&data, parts, &format, &limits)
+        }
+        other => {
+            return Err(JobError::Failed(format!(
+                "payload.mode is not a valid split mode: {other:?} \
+                 (expected duration|scenes|equal)"
+            )));
+        }
+    }
+    .map_err(|e| {
+        video_err(
+            &format!("video segment_split failed for {:?}", payload.path),
+            e,
+        )
+    })?;
+
+    let mut files = Vec::with_capacity(result.segments.len() + 1);
+    let mut manifest = Vec::with_capacity(result.segments.len());
+    for seg in result.segments {
+        let name = format!("seg-{:03}.{format}", seg.index);
+        manifest.push(json!({
+            "index": seg.index,
+            "start_ms": seg.start_ms,
+            "end_ms": seg.end_ms,
+            "name": name,
+        }));
+        files.push(crate::crates::video_engine::MediaFile {
+            name,
+            bytes: seg.bytes,
+        });
+    }
+    files.push(crate::crates::video_engine::MediaFile {
+        name: "manifest.json".to_string(),
+        bytes: serde_json::to_vec_pretty(&json!({ "segments": manifest }))?,
+    });
+    write_media_output(
+        &path_with_suffix(&file, ".segments"),
+        &crate::crates::video_engine::MediaOutput { files },
+    )
+}
+
+/// `video.segment_extract` implementation: cut `[start_ms, end_ms)`
+/// of `path` into `format` and write `<path>.extract.<format>`.
+fn segment_extract_video_at(
+    root: &Path,
+    payload: &VideoSegmentExtractPayload,
+) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let format = segment_format(payload.format.as_deref(), &file)?;
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .extract_segment(
+            &data,
+            payload.start_ms,
+            payload.end_ms,
+            &format,
+            &video_limits(payload.max_bytes),
+        )
+        .map_err(|e| {
+            video_err(
+                &format!("video segment_extract failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_output_atomic(
+        &path_with_suffix(&file, &format!(".extract.{format}")),
+        &bytes,
+    )
+}
+
+/// Canvas size cap for the `video.waveform`-family kinds — bounds the
+/// ffmpeg `s=WxH` filter argument so a hostile payload can't request
+/// an absurd raster.
+const MAX_WAVEFORM_DIMENSION: u32 = 16_384;
+
+/// Shared body for `video.waveform`/`video.spectrogram`/
+/// `video.vectorscope`: render `kind` as a PNG still and write it to
+/// `<path>.<suffix>.png`.
+fn waveform_image_at(
+    root: &Path,
+    payload: &VideoWaveformPayload,
+    kind: crate::crates::video_engine::WaveformKind,
+    suffix: &str,
+) -> Result<(), JobError> {
+    let width = payload.width.unwrap_or(800);
+    let height = payload.height.unwrap_or(400);
+    if width == 0
+        || height == 0
+        || width > MAX_WAVEFORM_DIMENSION
+        || height > MAX_WAVEFORM_DIMENSION
+    {
+        return Err(JobError::Failed(format!(
+            "payload width/height must be in 1..={MAX_WAVEFORM_DIMENSION}, got {width}x{height}"
+        )));
+    }
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let params = crate::crates::video_engine::WaveformParams {
+        kind,
+        width,
+        height,
+        color: payload.color.clone(),
+        scale: payload.scale.clone(),
+    };
+    let png = crate::crates::video_engine::VideoEngine::new()
+        .audio_waveform_image(&data, &params)
+        .map_err(|e| video_err(&format!("video {suffix} failed for {:?}", payload.path), e))?;
+    write_output_atomic(&path_with_suffix(&file, &format!("{suffix}.png")), &png)
+}
+
+/// `video.waveform` implementation: amplitude waveform PNG at
+/// `<path>.waveform.png`.
+fn waveform_video_at(root: &Path, payload: &VideoWaveformPayload) -> Result<(), JobError> {
+    waveform_image_at(
+        root,
+        payload,
+        crate::crates::video_engine::WaveformKind::Waveform,
+        "waveform",
+    )
+}
+
+/// `video.spectrogram` implementation: frequency-vs-time spectrogram
+/// PNG at `<path>.spectrogram.png`.
+fn spectrogram_video_at(root: &Path, payload: &VideoWaveformPayload) -> Result<(), JobError> {
+    waveform_image_at(
+        root,
+        payload,
+        crate::crates::video_engine::WaveformKind::Spectrogram,
+        "spectrogram",
+    )
+}
+
+/// `video.vectorscope` implementation: stereo Lissajous vectorscope
+/// PNG at `<path>.vectorscope.png`.
+fn vectorscope_video_at(root: &Path, payload: &VideoWaveformPayload) -> Result<(), JobError> {
+    waveform_image_at(
+        root,
+        payload,
+        crate::crates::video_engine::WaveformKind::Vectorscope,
+        "vectorscope",
+    )
+}
+
+/// `video.sync_report` implementation: measure A/V stream start times
+/// and write the pretty-JSON [`SyncReport`] to `<path>.sync.json`.
+/// [`SyncReport`](crate::crates::video_engine::SyncReport) is not
+/// `Serialize`, so the report is built field-by-field.
+fn sync_report_video_at(root: &Path, payload: &VideoPathPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let report = crate::crates::video_engine::VideoEngine::new()
+        .av_sync_report(&data)
+        .map_err(|e| {
+            video_err(
+                &format!("video sync_report failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    let json = serde_json::to_string_pretty(&json!({
+        "audio_start_ms": report.audio_start_ms,
+        "video_start_ms": report.video_start_ms,
+        "applied_audio_shift_ms": report.applied_audio_shift_ms,
+        "applied_video_shift_ms": report.applied_video_shift_ms,
+    }))?;
+    write_output_atomic(&path_with_suffix(&file, ".sync.json"), json.as_bytes())
+}
+
+/// `video.sync_fix` implementation: apply manual audio/video stream
+/// shifts (`*_offset_ms`, default 0) and write `<path>.syncfix<ext>`.
+fn sync_fix_video_at(root: &Path, payload: &VideoSyncFixPayload) -> Result<(), JobError> {
+    let params = crate::crates::video_engine::SyncParams {
+        audio_offset_ms: payload.audio_offset_ms.unwrap_or(0),
+        video_offset_ms: payload.video_offset_ms.unwrap_or(0),
+    };
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_SYNC_FIX_KIND,
+        ".syncfix",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new().av_sync_fix(data, &params, limits)
+        },
+    )
+}
+
+/// `video.sync_auto` implementation: automatically align A/V start
+/// times and write `<path>.syncauto<ext>`.
+fn sync_auto_video_at(root: &Path, payload: &VideoPathPayload) -> Result<(), JobError> {
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_SYNC_AUTO_KIND,
+        ".syncauto",
+        |data, limits| crate::crates::video_engine::VideoEngine::new().av_sync_auto(data, limits),
+    )
+}
+
+/// Parses the `video.stabilize` `algo` field (`"vidstab"` default,
+/// `"deshake"`).
+fn parse_stabilize_algo(
+    algo: Option<&str>,
+) -> Result<crate::crates::video_engine::StabilizeAlgo, JobError> {
+    use crate::crates::video_engine::StabilizeAlgo;
+    match algo.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("vidstab") => Ok(StabilizeAlgo::Vidstab),
+        Some("deshake") => Ok(StabilizeAlgo::Deshake),
+        Some(other) => Err(JobError::Failed(format!(
+            "payload.algo is not a valid stabilize backend: {other:?} \
+             (expected vidstab|deshake)"
+        ))),
+    }
+}
+
+/// `video.stabilize` implementation: stabilize per `shakiness`/
+/// `smoothing`/`algo` (or the best available backend when `auto`) and
+/// write `<path>.stabilize<ext>`.
+fn stabilize_video_at(root: &Path, payload: &VideoStabilizePayload) -> Result<(), JobError> {
+    let algo = parse_stabilize_algo(payload.algo.as_deref())?;
+    let params = crate::crates::video_engine::StabilizeParams {
+        shakiness: payload.shakiness.unwrap_or(5.0),
+        smoothing: payload.smoothing.unwrap_or(15.0),
+        algo,
+    };
+    let auto = payload.auto;
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_STABILIZE_KIND,
+        ".stabilize",
+        |data, limits| {
+            let engine = crate::crates::video_engine::VideoEngine::new();
+            if auto {
+                engine.stabilize_auto(data, &params, limits)
+            } else {
+                engine.stabilize_video(data, &params, limits)
+            }
+        },
+    )
+}
+
+/// Shared body for `video.preview_gif`/`video.preview_webp`:
+/// [`PreviewParams`] defaults mirror the engine's (`5s`, `10 fps`,
+/// `320 px` wide); the output name is fixed per format.
+fn preview_video_at(
+    root: &Path,
+    payload: &VideoPreviewPayload,
+    format: crate::crates::video_engine::PreviewFormat,
+    out_name: &str,
+) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let params = crate::crates::video_engine::PreviewParams {
+        max_duration_secs: payload.max_duration_secs.unwrap_or(5.0),
+        fps: payload.fps.unwrap_or(10.0),
+        width: payload.width.unwrap_or(320),
+        format,
+    };
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .video_preview(&data, &params, &video_limits(payload.max_bytes))
+        .map_err(|e| video_err(&format!("video preview failed for {:?}", payload.path), e))?;
+    write_output_atomic(&path_with_suffix(&file, out_name), &bytes)
+}
+
+/// `video.preview_gif` implementation: animated GIF preview at
+/// `<path>.preview.gif`.
+fn preview_gif_video_at(root: &Path, payload: &VideoPreviewPayload) -> Result<(), JobError> {
+    preview_video_at(
+        root,
+        payload,
+        crate::crates::video_engine::PreviewFormat::Gif,
+        ".preview.gif",
+    )
+}
+
+/// `video.preview_webp` implementation: animated WebP preview at
+/// `<path>.preview.webp`.
+fn preview_webp_video_at(root: &Path, payload: &VideoPreviewPayload) -> Result<(), JobError> {
+    preview_video_at(
+        root,
+        payload,
+        crate::crates::video_engine::PreviewFormat::WebpAnimated,
+        ".preview.webp",
+    )
+}
+
+/// Parses the `video.proxy_generate` `kind` field.
+fn parse_proxy_kind(
+    kind: Option<&str>,
+) -> Result<crate::crates::video_engine::ProxyKind, JobError> {
+    use crate::crates::video_engine::ProxyKind;
+    match kind.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("proxy") => Ok(ProxyKind::Proxy),
+        Some("mezzanine") => Ok(ProxyKind::Mezzanine),
+        Some("archival") => Ok(ProxyKind::Archival),
+        Some(other) => Err(JobError::Failed(format!(
+            "payload.kind is not a valid proxy kind: {other:?} \
+             (expected proxy|mezzanine|archival)"
+        ))),
+    }
+}
+
+/// Guesses a container extension from produced bytes for naming
+/// `video.proxy_generate` output: EBML magic → `mkv`, an `ftyp` box →
+/// `mp4` (covers `mov` too), anything else → `bin`. The engine picks
+/// the real container from encoder availability, so the payload's
+/// `kind` alone can't predict it.
+fn guess_media_ext(bytes: &[u8]) -> &'static str {
+    const EBML: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
+    if bytes.starts_with(&EBML) {
+        "mkv"
+    } else if bytes.len() > 8 && &bytes[4..8] == b"ftyp" {
+        "mp4"
+    } else {
+        "bin"
+    }
+}
+
+/// `video.proxy_generate` implementation: derive a `proxy`,
+/// `mezzanine`, or `archival` media file and write it to
+/// `<path>.<kind>.<ext>` (`ext` sniffed from the produced bytes).
+fn proxy_generate_video_at(
+    root: &Path,
+    payload: &VideoProxyGeneratePayload,
+) -> Result<(), JobError> {
+    let kind = parse_proxy_kind(payload.kind.as_deref())?;
+    let kind_name = match kind {
+        crate::crates::video_engine::ProxyKind::Proxy => "proxy",
+        crate::crates::video_engine::ProxyKind::Mezzanine => "mezzanine",
+        crate::crates::video_engine::ProxyKind::Archival => "archival",
+    };
+    let params = crate::crates::video_engine::ProxyParams {
+        kind,
+        target_height: payload.target_height,
+        crf: payload.crf,
+        preset: payload.preset.clone(),
+    };
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .generate_proxy(&data, &params, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(
+                &format!("video proxy_generate failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    let out = path_with_suffix(&file, &format!(".{kind_name}.{}", guess_media_ext(&bytes)));
+    write_output_atomic(&out, &bytes)
+}
+
+/// `video.stream_select` implementation: map streams per the payload
+/// selection into `target_ext` (default: input extension or `"mp4"`)
+/// and write `<path>.select<ext>`.
+fn stream_select_video_at(root: &Path, payload: &VideoStreamSelectPayload) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let ext = match &payload.target_ext {
+        Some(e) => sanitize_target_ext(e)?,
+        None => file
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(|e| sanitize_target_ext(e).ok())
+            .unwrap_or_else(|| "mp4".to_string()),
+    };
+    let filter = crate::crates::video_engine::StreamFilter {
+        keep_video: payload.keep_video.unwrap_or(true),
+        audio_ordinals: payload.audio_ordinals.clone(),
+        subtitle_ordinals: payload.subtitle_ordinals.clone(),
+        drop_attachments: payload.drop_attachments.unwrap_or(false),
+    };
+    let out = path_with_suffix(&file, &format!(".select.{ext}"));
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .select_streams(&data, &filter, &ext, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(
+                &format!("video stream_select failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_output_atomic(&out, &bytes)
+}
+
+/// `video.stream_cover_art` implementation: attach the image at
+/// `cover_path` as cover art and write `<path>.cover<ext>` (audio
+/// containers only — the engine rejects others honestly).
+fn stream_cover_art_video_at(
+    root: &Path,
+    payload: &VideoStreamCoverArtPayload,
+) -> Result<(), JobError> {
+    let (file, data) = read_video_input(root, &payload.path, payload.max_bytes)?;
+    let (_cover_file, cover) = read_video_input(root, &payload.cover_path, payload.max_bytes)?;
+    let ext = derived_container_ext(&file);
+    let out = path_with_suffix(&file, &format!(".cover.{ext}"));
+    let bytes = crate::crates::video_engine::VideoEngine::new()
+        .set_cover_art(&data, &cover, &video_limits(payload.max_bytes))
+        .map_err(|e| {
+            video_err(
+                &format!("video stream_cover_art failed for {:?}", payload.path),
+                e,
+            )
+        })?;
+    write_output_atomic(&out, &bytes)
+}
+
+/// `video.filters_apply` implementation: resolve `preset` (a named
+/// entry from [`VideoEngine::filter_presets`], case-insensitive)
+/// into `-vf`/`-af` chains, let explicit `video_filter`/
+/// `audio_filter` override per chain, and write `<path>.filters<ext>`.
+fn filters_apply_video_at(root: &Path, payload: &VideoFiltersApplyPayload) -> Result<(), JobError> {
+    let mut video_filter = payload.video_filter.clone();
+    let mut audio_filter = payload.audio_filter.clone();
+    if let Some(name) = payload.preset.as_deref() {
+        let preset = crate::crates::video_engine::VideoEngine::new()
+            .filter_presets()
+            .into_iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name.trim()))
+            .ok_or_else(|| JobError::Failed(format!("unknown filter preset: {name:?}")))?;
+        if video_filter.is_none() && !preset.video_filter.is_empty() {
+            video_filter = Some(preset.video_filter.to_string());
+        }
+        if audio_filter.is_none() && !preset.audio_filter.is_empty() {
+            audio_filter = Some(preset.audio_filter.to_string());
+        }
+    }
+    let has_vf = video_filter
+        .as_deref()
+        .is_some_and(|f| !f.trim().is_empty());
+    let has_af = audio_filter
+        .as_deref()
+        .is_some_and(|f| !f.trim().is_empty());
+    if !has_vf && !has_af {
+        return Err(JobError::Failed(
+            "payload must set preset, video_filter, or audio_filter".to_string(),
+        ));
+    }
+    video_transform_at(
+        root,
+        &payload.path,
+        payload.max_bytes,
+        VIDEO_FILTERS_APPLY_KIND,
+        ".filters",
+        |data, limits| {
+            crate::crates::video_engine::VideoEngine::new().apply_filters(
+                data,
+                video_filter.as_deref(),
+                audio_filter.as_deref(),
+                limits,
+            )
+        },
+    )
 }
 
 /// Validates a `MediaOutput` relative name for writing under a job
@@ -10615,6 +11850,195 @@ mod tests {
             serde_json::from_value::<VideoMergeAvPayload>(json!({"video_path": "clip.mp4"}))
                 .is_err(),
             "audio_path is required"
+        );
+    }
+
+    #[test]
+    fn video_ops_payloads_parse_with_defaults() {
+        let p: VideoChaptersSetPayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "chapters": [{"start_ms": 0, "end_ms": 5000, "title": "Intro"}]}),
+        )
+        .unwrap();
+        assert_eq!(p.chapters.len(), 1);
+        assert_eq!(p.chapters[0].start_ms, 0);
+        assert_eq!(p.chapters[0].title.as_deref(), Some("Intro"));
+        assert_eq!(p.max_bytes, DEFAULT_VIDEO_MAX_BYTES);
+        assert!(
+            serde_json::from_value::<VideoChaptersSetPayload>(json!({"path": "clip.mp4"})).is_err(),
+            "chapters is required"
+        );
+
+        let p: VideoChaptersShiftPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "offset_ms": -250})).unwrap();
+        assert_eq!(p.offset_ms, -250);
+
+        let p: VideoHdrToneMapPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "desat": 2.0, "peak": 1000}))
+                .unwrap();
+        assert_eq!(p.desat, Some(2.0));
+        assert_eq!(p.peak, Some(1000));
+
+        let p: VideoSegmentSplitPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "mode": "scenes"})).unwrap();
+        assert_eq!(p.mode.as_deref(), Some("scenes"));
+        assert_eq!(p.duration_secs, None);
+        assert_eq!(p.threshold, None);
+        assert_eq!(p.parts, None);
+        assert_eq!(p.format, None);
+        let p: VideoSegmentSplitPayload =
+            serde_json::from_value(json!({"path": "clip.mp4"})).unwrap();
+        assert_eq!(p.mode, None, "mode defaults to duration");
+
+        let p: VideoSegmentExtractPayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "start_ms": 1000, "end_ms": 5000, "format": "mkv"}),
+        )
+        .unwrap();
+        assert_eq!(p.start_ms, 1000);
+        assert_eq!(p.end_ms, 5000);
+        assert_eq!(p.format.as_deref(), Some("mkv"));
+        assert!(
+            serde_json::from_value::<VideoSegmentExtractPayload>(
+                json!({"path": "clip.mp4", "start_ms": 0})
+            )
+            .is_err(),
+            "end_ms is required"
+        );
+
+        let p: VideoWaveformPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "width": 640})).unwrap();
+        assert_eq!(p.width, Some(640));
+        assert_eq!(p.height, None);
+        assert_eq!(p.color, None);
+        assert_eq!(p.scale, None);
+
+        let p: VideoSyncFixPayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "audio_offset_ms": 40, "video_offset_ms": -10}),
+        )
+        .unwrap();
+        assert_eq!(p.audio_offset_ms, Some(40));
+        assert_eq!(p.video_offset_ms, Some(-10));
+
+        let p: VideoStabilizePayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "shakiness": 7.0, "algo": "deshake", "auto": true}),
+        )
+        .unwrap();
+        assert_eq!(p.shakiness, Some(7.0));
+        assert_eq!(p.algo.as_deref(), Some("deshake"));
+        assert!(p.auto);
+
+        let p: VideoPreviewPayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "fps": 5.0, "width": 160})).unwrap();
+        assert_eq!(p.fps, Some(5.0));
+        assert_eq!(p.width, Some(160));
+        assert_eq!(p.max_duration_secs, None);
+
+        let p: VideoProxyGeneratePayload =
+            serde_json::from_value(json!({"path": "clip.mp4", "kind": "mezzanine"})).unwrap();
+        assert_eq!(p.kind.as_deref(), Some("mezzanine"));
+        assert_eq!(p.target_height, None);
+        assert_eq!(p.crf, None);
+        assert_eq!(p.preset, None);
+
+        let p: VideoStreamSelectPayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "keep_video": false, "audio_ordinals": [0], "drop_attachments": true}),
+        )
+        .unwrap();
+        assert_eq!(p.keep_video, Some(false));
+        assert_eq!(p.audio_ordinals, Some(vec![0]));
+        assert!(p.drop_attachments.unwrap_or(false));
+        assert_eq!(p.subtitle_ordinals, None);
+        assert_eq!(p.target_ext, None);
+
+        let p: VideoStreamCoverArtPayload =
+            serde_json::from_value(json!({"path": "song.mp3", "cover_path": "cover.png"})).unwrap();
+        assert_eq!(p.path, "song.mp3");
+        assert_eq!(p.cover_path, "cover.png");
+        assert!(
+            serde_json::from_value::<VideoStreamCoverArtPayload>(json!({"path": "song.mp3"}))
+                .is_err(),
+            "cover_path is required"
+        );
+
+        let p: VideoFiltersApplyPayload = serde_json::from_value(
+            json!({"path": "clip.mp4", "preset": "grayscale", "video_filter": "hflip"}),
+        )
+        .unwrap();
+        assert_eq!(p.preset.as_deref(), Some("grayscale"));
+        assert_eq!(p.video_filter.as_deref(), Some("hflip"));
+        assert_eq!(p.audio_filter, None);
+        assert!(
+            serde_json::from_value::<VideoFiltersApplyPayload>(json!({"path": "clip.mp4"})).is_ok(),
+            "all filter fields are optional at parse time"
+        );
+    }
+
+    #[test]
+    fn video_ops_helpers_validate_payload_fields() {
+        let root = PathBuf::from("/storage");
+        let file = root.join("clip.mp4");
+
+        // Segment format: explicit values are allowlisted.
+        assert_eq!(segment_format(Some("mkv"), &file).unwrap(), "mkv");
+        assert_eq!(segment_format(Some(" MP4 "), &file).unwrap(), "mp4");
+        assert!(segment_format(Some("mov"), &file).is_err());
+        assert!(segment_format(Some("../x"), &file).is_err());
+        // Default: input ext when allowed, else mp4.
+        assert_eq!(segment_format(None, &file).unwrap(), "mp4");
+        assert_eq!(
+            segment_format(None, &root.join("clip.webm")).unwrap(),
+            "webm"
+        );
+        assert_eq!(segment_format(None, &root.join("clip.mov")).unwrap(), "mp4");
+
+        // Enum parsers.
+        assert_eq!(
+            parse_stabilize_algo(Some("Deshake")).unwrap(),
+            crate::crates::video_engine::StabilizeAlgo::Deshake
+        );
+        assert!(parse_stabilize_algo(Some("magic")).is_err());
+        assert_eq!(
+            parse_proxy_kind(Some("ARCHIVAL")).unwrap(),
+            crate::crates::video_engine::ProxyKind::Archival
+        );
+        assert!(parse_proxy_kind(Some("tiny")).is_err());
+
+        // Output-extension guessing for proxy bytes.
+        assert_eq!(guess_media_ext(&[0x1A, 0x45, 0xDF, 0xA3, 0, 0]), "mkv");
+        let mut mp4 = vec![0u8; 12];
+        mp4[4..8].copy_from_slice(b"ftyp");
+        assert_eq!(guess_media_ext(&mp4), "mp4");
+        assert_eq!(guess_media_ext(b"junk"), "bin");
+
+        // Waveform canvas bounds.
+        let payload = VideoWaveformPayload {
+            path: "clip.mp4".into(),
+            width: Some(0),
+            height: None,
+            color: None,
+            scale: None,
+            max_bytes: DEFAULT_VIDEO_MAX_BYTES,
+        };
+        assert!(
+            waveform_image_at(
+                &root,
+                &payload,
+                crate::crates::video_engine::WaveformKind::Waveform,
+                "waveform"
+            )
+            .is_err()
+        );
+        let payload = VideoWaveformPayload {
+            width: Some(MAX_WAVEFORM_DIMENSION + 1),
+            ..payload
+        };
+        assert!(
+            waveform_image_at(
+                &root,
+                &payload,
+                crate::crates::video_engine::WaveformKind::Waveform,
+                "waveform"
+            )
+            .is_err()
         );
     }
 

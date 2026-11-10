@@ -34,7 +34,7 @@ use crate::crates::video_engine::error::{VideoError, VideoResult};
 use crate::crates::video_engine::model::{LoudnessReport, VideoInfo};
 use crate::crates::video_engine::ops::probe::probe;
 use crate::crates::video_engine::ops::{
-    COMMAND_TIMEOUT, FFMPEG, ProcOutput, PROBE_TIMEOUT, TempDir, check_input, check_limits,
+    COMMAND_TIMEOUT, FFMPEG, PROBE_TIMEOUT, ProcOutput, TempDir, check_input, check_limits,
     encoder_available, ext_for_format, find_tool, read_output, run_tool, tool_failure, write_input,
 };
 
@@ -261,10 +261,7 @@ fn parse_volumedetect(stderr: &str, map: &mut BTreeMap<String, f64>) {
 /// Shared preamble for the loudness ops: validate input, resolve
 /// ffmpeg, probe, enforce limits, and require an audio stream.
 /// Returns `(program, VideoInfo)` — the caller owns tempdir setup.
-fn prepare_audio_input(
-    input: &[u8],
-    limits: &EngineLimits,
-) -> VideoResult<(PathBuf, VideoInfo)> {
+fn prepare_audio_input(input: &[u8], limits: &EngineLimits) -> VideoResult<(PathBuf, VideoInfo)> {
     let input_len = check_input(input)?;
     let program = find_tool(FFMPEG)?;
     let info = probe(input)?;
@@ -323,10 +320,7 @@ fn output_codec_args(ext: &str, has_video: bool) -> VideoResult<Vec<String>> {
 /// Measure integrated loudness, loudness range, and true peak via
 /// `ebur128=peak=true` (or `loudnorm print_format=json` fallback).
 /// `None` fields indicate values the filter did not report.
-pub(crate) fn measure_loudness(
-    input: &[u8],
-    limits: &EngineLimits,
-) -> VideoResult<LoudnessReport> {
+pub(crate) fn measure_loudness(input: &[u8], limits: &EngineLimits) -> VideoResult<LoudnessReport> {
     let (program, _info) = prepare_audio_input(input, limits)?;
     let dir = TempDir::new("loudness")?;
     let input_path = write_input(&dir, "input.bin", input)?;
@@ -406,14 +400,14 @@ pub(crate) fn normalize_loudness(
         format!("loudnorm=I={target}:TP={TARGET_TP_DBTP}:LRA={TARGET_LRA_LU}")
     } else if filter_available("volume") {
         let report = measure_loudness(input, limits)?;
-        let integrated = report.integrated_lufs.ok_or_else(|| {
-            VideoError::ExternalTool {
+        let integrated = report
+            .integrated_lufs
+            .ok_or_else(|| VideoError::ExternalTool {
                 tool: FFMPEG.to_string(),
                 detail: "cannot normalize without loudnorm: loudness \
                          measurement reported no integrated loudness"
                     .to_string(),
-            }
-        })?;
+            })?;
         // Clamp the gain to a sane range; a wildly wrong measurement
         // should not produce a uselessly clipped or silent file.
         let gain_db = (target - integrated).clamp(-60.0, 60.0);

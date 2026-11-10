@@ -61,6 +61,9 @@
 //! | `POST /jobs/batch/{id}/cancel`             | yes  | Cancel all non-terminal jobs in a batch   |
 //! | `GET/POST/DELETE /schedules`               | yes  | Recurring job schedules (global)          |
 //! | `POST /schedules/tick`                     | yes  | Run one scheduler tick now                |
+//! | `GET /media/capabilities`                  | yes  | ffmpeg capability snapshot (`media` module) |
+//! | `POST /media/probe`                        | yes  | ffprobe inspection of uploaded media bytes |
+//! | `POST /media/thumbnail`                    | yes  | PNG frame at `?time=`/`?width=` (`media` module) |
 //!
 //! Authenticated routes require `Authorization: Bearer <credential>`;
 //! the credential is either an Organization session token (validated
@@ -108,6 +111,7 @@ pub mod auth;
 pub mod error;
 pub mod flags;
 pub mod handlers;
+mod media;
 pub mod openapi;
 pub mod state;
 
@@ -236,6 +240,9 @@ pub fn router(state: Arc<ApiState>) -> Router {
         )
         .route("/schedules/{name}", delete(handlers::delete_schedule))
         .route("/schedules/tick", post(handlers::tick_schedules))
+        .route("/media/capabilities", get(media::capabilities))
+        .route("/media/probe", post(media::probe))
+        .route("/media/thumbnail", post(media::thumbnail))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

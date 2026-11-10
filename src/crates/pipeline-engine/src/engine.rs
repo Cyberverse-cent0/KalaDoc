@@ -27,7 +27,9 @@ use crate::crates::core::engine::{
 use crate::crates::image_engine::{self as image_ops, ImageEngine};
 use crate::crates::multimedia_engine::{self as media_ops, model::MediaLimits};
 use crate::crates::pdf_engine::{self as pdf_ops, PdfEngine};
-use crate::crates::security_engine::{ResourceLimits, SecurityEngine, SniffedFormat};
+use crate::crates::security_engine::{
+    AudioContainer, ResourceLimits, SecurityEngine, SniffedFormat, VideoContainer,
+};
 
 use super::error::{PipelineError, PipelineResult, StepError};
 use super::limits::PipelineLimits;
@@ -1875,6 +1877,14 @@ fn required_u64(params: &Value, key: &str) -> Result<u64, StepError> {
 }
 
 /// Parse a `SniffedFormat` name for `validate_upload.expected_format`.
+///
+/// Accepts every variant [`sniff_format`](crate::crates::security_engine::sniff_format)
+/// can produce: the scalar formats by their serde names, video and
+/// audio containers by their [`VideoContainer`]/[`AudioContainer`]
+/// serde names (which are also their conventional extensions in most
+/// cases), plus a few common aliases (`jpg`, `mkv`, `ts`, `mpg`,
+/// `wmv`, …). Matching is exact and case-sensitive — pipeline JSON
+/// uses lowercase names.
 fn parse_sniffed_format(s: &str) -> Result<SniffedFormat, StepError> {
     match s {
         "pdf" => Ok(SniffedFormat::Pdf),
@@ -1883,8 +1893,82 @@ fn parse_sniffed_format(s: &str) -> Result<SniffedFormat, StepError> {
         "zip" => Ok(SniffedFormat::Zip),
         "gif" => Ok(SniffedFormat::Gif),
         "unknown" => Ok(SniffedFormat::Unknown),
+        // Video containers — `VideoContainer` serde names plus aliases.
+        "mp4" | "mov" => Ok(SniffedFormat::Video {
+            container: VideoContainer::Mp4,
+        }),
+        "matroska" | "mkv" => Ok(SniffedFormat::Video {
+            container: VideoContainer::Matroska,
+        }),
+        "webm" => Ok(SniffedFormat::Video {
+            container: VideoContainer::Webm,
+        }),
+        "avi" => Ok(SniffedFormat::Video {
+            container: VideoContainer::Avi,
+        }),
+        "mpegts" | "mpeg-ts" | "ts" => Ok(SniffedFormat::Video {
+            container: VideoContainer::MpegTs,
+        }),
+        "mpegps" | "mpeg-ps" | "mpg" | "mpeg" => Ok(SniffedFormat::Video {
+            container: VideoContainer::MpegPs,
+        }),
+        "flv" => Ok(SniffedFormat::Video {
+            container: VideoContainer::Flv,
+        }),
+        "asf" | "wmv" | "wma" => Ok(SniffedFormat::Video {
+            container: VideoContainer::Asf,
+        }),
+        "mpegvideo" | "m2v" => Ok(SniffedFormat::Video {
+            container: VideoContainer::MpegVideo,
+        }),
+        "mxf" => Ok(SniffedFormat::Video {
+            container: VideoContainer::Mxf,
+        }),
+        "f4v" => Ok(SniffedFormat::Video {
+            container: VideoContainer::F4v,
+        }),
+        "ogv" => Ok(SniffedFormat::Video {
+            container: VideoContainer::Ogg,
+        }),
+        // Audio containers — `AudioContainer` serde names plus aliases.
+        "mp3" => Ok(SniffedFormat::Audio {
+            container: AudioContainer::Mp3,
+        }),
+        "wav" | "wave" => Ok(SniffedFormat::Audio {
+            container: AudioContainer::Wav,
+        }),
+        "flac" => Ok(SniffedFormat::Audio {
+            container: AudioContainer::Flac,
+        }),
+        // "ogg" is deliberately the *audio* container — Ogg audio is the
+        // common case and `sniff_ogg` defaults ambiguous streams to it;
+        // video Ogg is spelled "ogv".
+        "ogg" | "oggaudio" | "ogg-audio" => Ok(SniffedFormat::Audio {
+            container: AudioContainer::OggAudio,
+        }),
+        "aac" => Ok(SniffedFormat::Audio {
+            container: AudioContainer::Aac,
+        }),
+        "aiff" | "aif" | "aifc" => Ok(SniffedFormat::Audio {
+            container: AudioContainer::Aiff,
+        }),
+        "au" | "snd" => Ok(SniffedFormat::Audio {
+            container: AudioContainer::Au,
+        }),
+        "amr" => Ok(SniffedFormat::Audio {
+            container: AudioContainer::Amr,
+        }),
+        "caf" => Ok(SniffedFormat::Audio {
+            container: AudioContainer::Caf,
+        }),
+        "ac3" | "eac3" => Ok(SniffedFormat::Audio {
+            container: AudioContainer::Ac3,
+        }),
         other => Err(StepError::Params(format!(
-            "unknown expected_format `{other}` (expected pdf|png|jpeg|zip|gif|unknown)"
+            "unknown expected_format `{other}` (expected one of: pdf|png|jpeg|jpg|zip|gif|unknown|\
+             mp4|mov|matroska|mkv|webm|avi|mpegts|ts|mpegps|mpg|mpeg|flv|asf|wmv|wma|\
+             mpegvideo|m2v|mxf|f4v|ogv|mp3|wav|wave|flac|ogg|oggaudio|aac|aiff|aif|aifc|\
+             au|snd|amr|caf|ac3|eac3)"
         ))),
     }
 }
@@ -2740,5 +2824,89 @@ fn parse_split_mode<'a>(params: &'a Value) -> Result<pdf_ops::SplitMode<'a>, Ste
         other => Err(StepError::Params(format!(
             "unknown split mode `{other}` (expected count|range|every_nth)"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_sniffed_format_accepts_scalar_formats() {
+        assert_eq!(parse_sniffed_format("pdf").unwrap(), SniffedFormat::Pdf);
+        assert_eq!(parse_sniffed_format("png").unwrap(), SniffedFormat::Png);
+        assert_eq!(parse_sniffed_format("jpeg").unwrap(), SniffedFormat::Jpeg);
+        assert_eq!(parse_sniffed_format("jpg").unwrap(), SniffedFormat::Jpeg);
+        assert_eq!(parse_sniffed_format("zip").unwrap(), SniffedFormat::Zip);
+        assert_eq!(parse_sniffed_format("gif").unwrap(), SniffedFormat::Gif);
+        assert_eq!(
+            parse_sniffed_format("unknown").unwrap(),
+            SniffedFormat::Unknown
+        );
+    }
+
+    #[test]
+    fn parse_sniffed_format_accepts_every_video_container() {
+        let cases = [
+            ("mp4", VideoContainer::Mp4),
+            ("mov", VideoContainer::Mp4),
+            ("matroska", VideoContainer::Matroska),
+            ("mkv", VideoContainer::Matroska),
+            ("webm", VideoContainer::Webm),
+            ("avi", VideoContainer::Avi),
+            ("mpegts", VideoContainer::MpegTs),
+            ("ts", VideoContainer::MpegTs),
+            ("mpegps", VideoContainer::MpegPs),
+            ("mpg", VideoContainer::MpegPs),
+            ("flv", VideoContainer::Flv),
+            ("asf", VideoContainer::Asf),
+            ("wmv", VideoContainer::Asf),
+            ("mpegvideo", VideoContainer::MpegVideo),
+            ("m2v", VideoContainer::MpegVideo),
+            ("mxf", VideoContainer::Mxf),
+            ("f4v", VideoContainer::F4v),
+            ("ogv", VideoContainer::Ogg),
+        ];
+        for (name, container) in cases {
+            assert_eq!(
+                parse_sniffed_format(name).unwrap(),
+                SniffedFormat::Video { container },
+                "expected_format `{name}`"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_sniffed_format_accepts_every_audio_container() {
+        let cases = [
+            ("mp3", AudioContainer::Mp3),
+            ("wav", AudioContainer::Wav),
+            ("flac", AudioContainer::Flac),
+            ("ogg", AudioContainer::OggAudio),
+            ("oggaudio", AudioContainer::OggAudio),
+            ("aac", AudioContainer::Aac),
+            ("aiff", AudioContainer::Aiff),
+            ("au", AudioContainer::Au),
+            ("amr", AudioContainer::Amr),
+            ("caf", AudioContainer::Caf),
+            ("ac3", AudioContainer::Ac3),
+            ("eac3", AudioContainer::Ac3),
+        ];
+        for (name, container) in cases {
+            assert_eq!(
+                parse_sniffed_format(name).unwrap(),
+                SniffedFormat::Audio { container },
+                "expected_format `{name}`"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_sniffed_format_rejects_unknown_names() {
+        let err = parse_sniffed_format("docx").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown expected_format `docx`"), "{msg}");
+        // The error must enumerate the accepted values.
+        assert!(msg.contains("mp4") && msg.contains("mp3"), "{msg}");
     }
 }
