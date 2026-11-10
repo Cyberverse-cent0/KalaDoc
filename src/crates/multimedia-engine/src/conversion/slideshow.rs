@@ -53,8 +53,9 @@ pub struct SlideshowOptions {
     /// Output container/muxer name (`"mp4"`, `"webm"`, `"mkv"`, ...).
     /// Default: `"mp4"`.
     pub output_format: String,
-    /// Video encoder name. Default: `"libx264"` (required to exist in
-    /// the FFmpeg build — see [`Runtime::capabilities`]).
+    /// Video encoder name. Default: first available of
+    /// `libx264`/`libopenh264`/`h264`/`mpeg4` (see
+    /// [`Runtime::capabilities`]).
     pub video_codec: Option<String>,
     /// Audio encoder name, used only when `audio` is provided.
     /// Default: `"aac"`.
@@ -121,10 +122,22 @@ pub fn slideshow(
         )));
     }
 
-    let video_codec = options
-        .video_codec
-        .clone()
-        .unwrap_or_else(|| "libx264".to_string());
+    const DEFAULT_VIDEO_ENCODERS: &[&str] = &["libx264", "libopenh264", "h264", "mpeg4"];
+    let video_codec = match &options.video_codec {
+        Some(c) => c.clone(),
+        None => DEFAULT_VIDEO_ENCODERS
+            .iter()
+            .copied()
+            .find(|e| caps.has_encoder(e))
+            .ok_or_else(|| {
+                MediaError::Unsupported(
+                    "no usable video encoder (libx264/libopenh264/h264/mpeg4) in this FFmpeg \
+                     build"
+                        .to_string(),
+                )
+            })?
+            .to_string(),
+    };
     if !caps.has_encoder(&video_codec) {
         return Err(MediaError::Unsupported(format!(
             "video codec {video_codec:?} is not available in this FFmpeg build"
@@ -207,6 +220,12 @@ pub fn slideshow(
     }
     argv.push(OsString::from("-c:v"));
     argv.push(OsString::from(video_codec));
+    // `-loop 1` image inputs never signal EOF to the concat filter on
+    // some FFmpeg builds, hanging the muxer; bound the output
+    // explicitly to the computed total duration.
+    let total_secs = images.len() as f64 * per_image;
+    let total_arg = format!("{total_secs:.3}");
+    argv.extend(process::args(&["-t", total_arg.as_str()]));
     argv.push(OsString::from("-y"));
 
     let out_path = tmp.file(&format!("output.{format}"));

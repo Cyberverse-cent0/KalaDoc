@@ -357,8 +357,15 @@ mod tests {
 
     /// Tiny H.264 mp4 with NO audio, via lavfi `testsrc`.
     fn lavfi_video(dir: &TempDir) -> Vec<u8> {
+        let rt = rt();
+        let caps = rt.capabilities().expect("capabilities");
+        let enc = ["libx264", "libopenh264", "h264", "mpeg4"]
+            .iter()
+            .copied()
+            .find(|e| caps.has_encoder(e))
+            .expect("no usable video encoder in test build");
         ffmpeg_to(
-            &rt(),
+            &rt,
             &[
                 "-hide_banner",
                 "-y",
@@ -367,7 +374,7 @@ mod tests {
                 "-i",
                 "testsrc=duration=1:size=160x120:rate=10",
                 "-c:v",
-                "libx264",
+                enc,
                 "-pix_fmt",
                 "yuv420p",
                 "-an",

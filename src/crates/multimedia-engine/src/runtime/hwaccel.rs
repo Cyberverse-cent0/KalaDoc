@@ -102,11 +102,22 @@ pub fn available_hwaccels(runtime: &Runtime) -> MediaResult<BTreeSet<String>> {
 /// banner precedes the list, so banner/config lines are filtered out
 /// by [`is_hwaccel_name`]. Exposed for tests; callers should prefer
 /// [`available_hwaccels`].
-fn parse_hwaccels(text: &str) -> BTreeSet<String> {
+pub(crate) fn parse_hwaccels(text: &str) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
+    // Names only count after the "Hardware acceleration methods:"
+    // header — bare lowercase words in the version banner must not
+    // be mistaken for accelerators.
+    let mut in_list = false;
     for line in text.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with("Hardware acceleration methods") {
+        if line.starts_with("Hardware acceleration methods") {
+            in_list = true;
+            continue;
+        }
+        if !in_list {
+            continue;
+        }
+        if line.is_empty() {
             continue;
         }
         // Listing entries are bare names, but tolerate a flags column

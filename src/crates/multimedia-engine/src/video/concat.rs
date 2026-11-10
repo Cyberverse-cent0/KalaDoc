@@ -30,7 +30,7 @@ use std::path::Path;
 use crate::crates::multimedia_engine::error::{MediaError, MediaResult};
 use crate::crates::multimedia_engine::model::{MediaInput, MediaLimits, MediaOutput};
 use crate::crates::multimedia_engine::probe::{MediaStream, ProbeReport};
-use crate::crates::multimedia_engine::runtime::discovery::Runtime;
+use crate::crates::multimedia_engine::runtime::discovery::{Runtime, RuntimeCapabilities};
 use crate::crates::multimedia_engine::runtime::process;
 use crate::crates::multimedia_engine::runtime::tempdir::TempDir;
 
@@ -143,9 +143,10 @@ pub fn concat(
                 )));
             }
         }
-        if !caps.has_encoder("libx264") {
+        if pick_video_encoder(caps).is_none() {
             return Err(MediaError::Unsupported(
-                "ffmpeg build lacks the 'libx264' encoder required for re-encode concat"
+                "ffmpeg build lacks an H.264 encoder (libx264/libopenh264/h264/mpeg4) required \
+                 for re-encode concat"
                     .to_string(),
             ));
         }
@@ -170,8 +171,14 @@ pub fn concat(
     let out_name = format!("output.{out_ext}");
     let out_path = tmp.file(&out_name);
 
+    let video_encoder = if options.reencode {
+        pick_video_encoder(caps).expect("checked above")
+    } else {
+        ""
+    };
+
     if options.reencode {
-        concat_reencode(&paths, &out_path, options, limits, rt)?;
+        concat_reencode(&paths, &out_path, options, video_encoder, limits, rt)?;
     } else {
         concat_copy(&paths, &out_path, limits, rt)?;
     }
@@ -233,10 +240,23 @@ fn concat_copy(
 
 /// Re-encode concat: normalize every input to common parameters, then
 /// join with the `concat` filter inside one `filter_complex`.
+/// H.264 encoders acceptable for re-encode concat, in preference
+/// order.
+const VIDEO_ENCODERS: &[&str] = &["libx264", "libopenh264", "h264", "mpeg4"];
+
+/// First available H.264 encoder in this build.
+fn pick_video_encoder<'a>(caps: &'a RuntimeCapabilities) -> Option<&'a str> {
+    VIDEO_ENCODERS
+        .iter()
+        .copied()
+        .find(|e| caps.has_encoder(e))
+}
+
 fn concat_reencode(
     paths: &[std::path::PathBuf],
     out_path: &Path,
     options: &ConcatOptions,
+    video_encoder: &str,
     limits: &MediaLimits,
     rt: &Runtime,
 ) -> MediaResult<()> {
@@ -344,14 +364,18 @@ fn concat_reencode(
         OsString::from("-map"),
         OsString::from("[outv]"),
         OsString::from("-c:v"),
-        OsString::from("libx264"),
-        OsString::from("-preset"),
-        OsString::from("veryfast"),
-        OsString::from("-crf"),
-        OsString::from("23"),
+        OsString::from(video_encoder),
         OsString::from("-pix_fmt"),
         OsString::from("yuv420p"),
     ]);
+    if video_encoder == "libx264" {
+        args.extend([
+            OsString::from("-preset"),
+            OsString::from("veryfast"),
+            OsString::from("-crf"),
+            OsString::from("23"),
+        ]);
+    }
     if with_audio {
         args.extend([
             OsString::from("-map"),
@@ -468,7 +492,9 @@ mod tests {
     /// Render a 1s 320x240@30 clip with a sine tone via lavfi.
     fn make_clip(dir: &TempDir, name: &str, freq: u32, rt: &Runtime) -> MediaInput {
         let path: PathBuf = dir.file(name);
-        let args: Vec<OsString> = [
+        let caps = rt.capabilities().expect("capabilities");
+        let video_enc = pick_video_encoder(&caps).expect("no usable video encoder in test build");
+        let mut args: Vec<OsString> = [
             OsString::from("-hide_banner"),
             OsString::from("-y"),
             OsString::from("-f"),
@@ -480,15 +506,15 @@ mod tests {
             OsString::from("-i"),
             OsString::from(format!("sine=frequency={freq}:duration=1")),
             OsString::from("-c:v"),
-            OsString::from("libx264"),
+            OsString::from(video_enc),
             OsString::from("-pix_fmt"),
             OsString::from("yuv420p"),
             OsString::from("-c:a"),
             OsString::from("aac"),
             OsString::from("-shortest"),
-            path.as_os_str().to_os_string(),
         ]
         .into();
+        args.push(path.as_os_str().to_os_string());
         process::run_checked("ffmpeg", &rt.ffmpeg, &args, None, &limits())
             .expect("failed to generate test clip");
         MediaInput {

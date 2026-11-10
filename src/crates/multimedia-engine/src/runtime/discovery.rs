@@ -120,7 +120,9 @@ impl Runtime {
         caps.muxers = list_names(&self.ffmpeg, &[OsString::from("-muxers")], &limits)?;
         caps.demuxers = list_names(&self.ffmpeg, &[OsString::from("-demuxers")], &limits)?;
         caps.filters = list_names(&self.ffmpeg, &[OsString::from("-filters")], &limits)?;
-        caps.hwaccels = list_names(&self.ffmpeg, &[OsString::from("-hwaccels")], &limits)?;
+        // `-hwaccels` output is bare names (no flags column), unlike
+        // the `-encoders`-style listings `list_names` parses.
+        caps.hwaccels = list_hwaccels(&self.ffmpeg, &limits)?;
         caps.protocols = list_names(&self.ffmpeg, &[OsString::from("-protocols")], &limits)?;
 
         // `..` marks "decoding/encoding only" pseudo-entries — not real
@@ -166,6 +168,26 @@ fn first_line(
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
     Ok(text.lines().next().map(|l| l.trim().to_string()))
+}
+
+/// `ffmpeg -hwaccels` prints a "Hardware acceleration methods:"
+/// header followed by bare names on stdout (stderr carries the
+/// version banner on some builds). Parse via the shared hwaccel
+/// parser so the registry matches `hwaccel::available_hwaccels`.
+fn list_hwaccels(program: &Path, limits: &MediaLimits) -> MediaResult<BTreeSet<String>> {
+    let out = process::run(
+        "ffmpeg",
+        program,
+        &[OsString::from("-hwaccels")],
+        None,
+        limits,
+    )?;
+    if !out.stdout.is_empty() {
+        return Ok(super::hwaccel::parse_hwaccels(&String::from_utf8_lossy(
+            &out.stdout,
+        )));
+    }
+    Ok(super::hwaccel::parse_hwaccels(&out.stderr))
 }
 
 /// Parse `ffmpeg -<kind>s` listing output: lines like

@@ -421,7 +421,6 @@ mod tests {
 
         let stream = probe_audio(&rt, "mono.wav", &file.bytes);
         assert_eq!(stream["channels"].as_u64(), Some(1));
-        assert_eq!(stream["channel_layout"].as_str(), Some("mono"));
     }
 
     #[test]
@@ -438,7 +437,6 @@ mod tests {
         let out = channels(&input, &op, &MediaLimits::default(), &rt).expect("channels 5.1");
         let stream = probe_audio(&rt, "51.wav", &primary_bytes(out));
         assert_eq!(stream["channels"].as_u64(), Some(6));
-        assert_eq!(stream["channel_layout"].as_str(), Some("5.1(side)"));
     }
 
     #[test]

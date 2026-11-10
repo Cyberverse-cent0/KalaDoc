@@ -284,9 +284,11 @@ fn parse_blackdetect(stderr: &str) -> Vec<DetectionEvent> {
 ///
 /// # Arguments
 ///
-/// - `noise` — noise tolerance in dB passed as `n=` (default `-60`,
-///   matching ffmpeg's default). More negative = stricter (less
-///   noise tolerated before a frame counts as "changed").
+/// - `noise` — noise tolerance in dB (default `-60`, matching
+///   ffmpeg's default amplitude of 0.001). Converted to the linear
+///   amplitude ratio the `n=` option expects. More negative =
+///   stricter (less noise tolerated before a frame counts as
+///   "changed").
 /// - `duration` — minimum freeze duration in seconds passed as `d=`
 ///   (default `2.0`).
 ///
@@ -307,7 +309,15 @@ pub fn freezedetect(
 
     let (_dir, in_path) = stage_input(input, limits, "freezedetect")?;
 
-    let filter = format!("freezedetect=n={}:d={}", noise, duration);
+    // freezedetect's `n` is a linear amplitude ratio in [0, 1];
+    // callers pass dB, so convert: amplitude = 10^(dB/20).
+    let n = 10f64.powf(noise / 20.0);
+    if !(0.0..=1.0).contains(&n) {
+        return Err(MediaError::InvalidInput(format!(
+            "noise {noise} dB is out of range for freezedetect"
+        )));
+    }
+    let filter = format!("freezedetect=n={}:d={}", n, duration);
     let argv = process::args(&[
         "-hide_banner",
         "-nostdin",

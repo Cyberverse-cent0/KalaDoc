@@ -187,7 +187,21 @@ pub fn dash_package(
         ));
     }
 
-    let video_codec = options.video_codec.as_deref().unwrap_or("libx264");
+    const DEFAULT_VIDEO_ENCODERS: &[&str] = &["libx264", "libopenh264", "h264", "mpeg4"];
+    let video_codec = match options.video_codec.as_deref() {
+        Some(c) => c,
+        None => DEFAULT_VIDEO_ENCODERS
+            .iter()
+            .copied()
+            .find(|e| caps.has_encoder(e))
+            .ok_or_else(|| {
+                MediaError::Unsupported(
+                    "no usable video encoder (libx264/libopenh264/h264/mpeg4) in this FFmpeg \
+                     build"
+                        .to_string(),
+                )
+            })?,
+    };
     let audio_codec = options.audio_codec.as_deref().unwrap_or("aac");
     for (kind, codec) in [("video", video_codec), ("audio", audio_codec)] {
         if codec != "copy" && codec != "none" && !caps.has_encoder(codec) {
@@ -321,7 +335,11 @@ mod tests {
             "-i",
             "sine=frequency=440:duration=8",
             "-c:v",
-            "libx264",
+            ["libx264", "libopenh264", "h264", "mpeg4"]
+                .iter()
+                .copied()
+                .find(|e| rt.capabilities().unwrap().has_encoder(e))
+                .expect("no usable video encoder in test build"),
             "-c:a",
             "aac",
             "-shortest",

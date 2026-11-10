@@ -164,7 +164,7 @@ pub fn silence_detect(
     let in_path = dir.write(&in_name, input)?;
 
     let filter = format!(
-        "silencedetect=n={}:d:{}:mono={}",
+        "silencedetect=n={:.1}dB:d={}:mono={}",
         options.noise_db,
         options.min_duration_secs,
         u8::from(options.mono)

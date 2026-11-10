@@ -150,8 +150,9 @@ fn validate_options(options: &FadeOptions) -> MediaResult<()> {
             "at least one of fade_in_secs/fade_out_secs must be > 0".to_string(),
         ));
     }
-    // fade_out_start: "end" or a non-negative finite number.
-    if options.fade_out_start != "end" {
+    // fade_out_start: "end" (or empty, which `Default` produces) or a
+    // non-negative finite number.
+    if !options.fade_out_start.is_empty() && options.fade_out_start != "end" {
         let v: f64 = options.fade_out_start.parse().map_err(|_| {
             MediaError::InvalidInput(format!(
                 "fade_out_start must be \"end\" or seconds, got {:?}",
@@ -227,7 +228,7 @@ pub fn apply_fades(
     // simple and document "end" semantics by using a very large
     // start? No — afade does NOT support "end". Instead we measure
     // the duration via ffprobe when start == "end".
-    let fade_out_start = if options.fade_out_start == "end" {
+    let fade_out_start = if options.fade_out_start.is_empty() || options.fade_out_start == "end" {
         probe_duration_secs(&in_path, limits, rt)?.unwrap_or(0.0)
     } else {
         options.fade_out_start.parse::<f64>().unwrap_or(0.0)

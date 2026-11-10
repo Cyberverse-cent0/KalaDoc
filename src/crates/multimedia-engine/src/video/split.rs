@@ -160,9 +160,11 @@ pub fn split(
     let ext = extension_for(&format);
     let prefix = sanitize_prefix(&options.prefix);
 
-    if options.accurate {
-        check_reencode_caps(rt, has_video, has_audio)?;
-    }
+    let video_encoder = if options.accurate {
+        check_reencode_caps(rt, has_video, has_audio)?
+    } else {
+        None
+    };
 
     let mut warnings = Vec::new();
     if !options.accurate {
@@ -183,7 +185,7 @@ pub fn split(
             start,
             end,
             options.accurate,
-            has_video,
+            video_encoder,
             has_audio,
             &format,
             limits,
@@ -347,15 +349,38 @@ fn finish_format(format: String, rt: &Runtime) -> MediaResult<String> {
     }
 }
 
-/// Re-encode requires `libx264` for video and `aac` for audio when
-/// those streams exist.
-fn check_reencode_caps(rt: &Runtime, has_video: bool, has_audio: bool) -> MediaResult<()> {
+/// H.264 encoders acceptable for frame-accurate re-encoding, in
+/// preference order.
+const ACCURATE_VIDEO_ENCODERS: &[&str] = &["libx264", "libopenh264", "h264", "mpeg4"];
+
+/// Re-encode requires an H.264 encoder for video and `aac` for audio
+/// when those streams exist. Returns the encoder to use.
+fn check_reencode_caps<'a>(
+    rt: &'a Runtime,
+    has_video: bool,
+    has_audio: bool,
+) -> MediaResult<Option<&'a str>> {
     let caps = rt.capabilities()?;
-    if has_video && !caps.has_encoder("libx264") {
-        return Err(MediaError::Unsupported(
-            "accurate splitting needs the libx264 encoder, not present in this FFmpeg build"
-                .to_string(),
-        ));
+    if has_video {
+        let Some(enc) = ACCURATE_VIDEO_ENCODERS
+            .iter()
+            .copied()
+            .find(|e| caps.has_encoder(e))
+        else {
+            return Err(MediaError::Unsupported(
+                "accurate splitting needs an H.264 encoder (libx264/libopenh264/h264/mpeg4), \
+                 none present in this FFmpeg build"
+                    .to_string(),
+            ));
+        };
+        if has_audio && !caps.has_encoder("aac") {
+            return Err(MediaError::Unsupported(
+                "accurate splitting needs the aac encoder for the audio stream, not present in \
+                 this FFmpeg build"
+                    .to_string(),
+            ));
+        }
+        return Ok(Some(enc));
     }
     if has_audio && !caps.has_encoder("aac") {
         return Err(MediaError::Unsupported(
@@ -364,7 +389,7 @@ fn check_reencode_caps(rt: &Runtime, has_video: bool, has_audio: bool) -> MediaR
                 .to_string(),
         ));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Run one `ffmpeg` segment extraction: `-ss/-to` input seeking for
@@ -376,7 +401,7 @@ fn run_segment(
     start: f64,
     end: f64,
     accurate: bool,
-    has_video: bool,
+    video_encoder: Option<&str>,
     has_audio: bool,
     format: &str,
     limits: &MediaLimits,
@@ -393,15 +418,19 @@ fn run_segment(
         OsString::from(input.as_os_str()),
     ];
     if accurate {
-        if has_video {
+        if let Some(enc) = video_encoder {
             argv.extend([
                 OsString::from("-c:v"),
-                OsString::from("libx264"),
-                OsString::from("-preset"),
-                OsString::from("veryfast"),
-                OsString::from("-crf"),
-                OsString::from("23"),
+                OsString::from(enc),
             ]);
+            if enc == "libx264" {
+                argv.extend([
+                    OsString::from("-preset"),
+                    OsString::from("veryfast"),
+                    OsString::from("-crf"),
+                    OsString::from("23"),
+                ]);
+            }
         }
         if has_audio {
             argv.extend([OsString::from("-c:a"), OsString::from("aac")]);
@@ -536,7 +565,11 @@ mod tests {
             "-i",
             "sine=frequency=440:duration=4",
             "-c:v",
-            "libx264",
+            ACCURATE_VIDEO_ENCODERS
+                .iter()
+                .copied()
+                .find(|e| rt.capabilities().unwrap().has_encoder(e))
+                .expect("no usable video encoder in test ffmpeg build"),
             "-pix_fmt",
             "yuv420p",
             "-g",

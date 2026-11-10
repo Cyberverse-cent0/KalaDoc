@@ -8,6 +8,25 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
+/// ffprobe usually emits counts/sizes as JSON numbers but some builds
+/// emit them as strings (e.g. `"channels": "8"`); accept both.
+fn opt_u32<'de, D>(d: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        N(u32),
+        S(String),
+    }
+    Ok(match Option::<NumOrStr>::deserialize(d)? {
+        Some(NumOrStr::N(n)) => Some(n),
+        Some(NumOrStr::S(s)) => s.trim().parse().ok(),
+        None => None,
+    })
+}
+
 /// Root of `ffprobe -show_format -show_streams -show_chapters -of json`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProbeReport {
@@ -25,6 +44,7 @@ pub struct ProbeReport {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct MediaStream {
     /// Stream index within the file.
+    #[serde(default, deserialize_with = "opt_u32")]
     pub index: Option<u32>,
     /// Codec identifier (`h264`, `aac`, `mov_text`, ...).
     pub codec_name: Option<String>,
@@ -37,12 +57,16 @@ pub struct MediaStream {
     /// Pixel format (`yuv420p`, ...). Video only.
     pub pix_fmt: Option<String>,
     /// Width in pixels. Video only.
+    #[serde(default, deserialize_with = "opt_u32")]
     pub width: Option<u32>,
     /// Height in pixels. Video only.
+    #[serde(default, deserialize_with = "opt_u32")]
     pub height: Option<u32>,
     /// Coded (encoded) width — may differ from display `width`.
+    #[serde(default, deserialize_with = "opt_u32")]
     pub coded_width: Option<u32>,
     /// Coded height.
+    #[serde(default, deserialize_with = "opt_u32")]
     pub coded_height: Option<u32>,
     /// Sample aspect ratio string (`"1:1"`).
     pub sample_aspect_ratio: Option<String>,
@@ -61,6 +85,7 @@ pub struct MediaStream {
     /// Chroma location.
     pub chroma_location: Option<String>,
     /// Bits per raw sample (bit depth).
+    #[serde(default, deserialize_with = "opt_u32")]
     pub bits_per_raw_sample: Option<u32>,
     /// Frame rate string (`"30000/1001"`).
     pub r_frame_rate: Option<String>,
@@ -80,10 +105,12 @@ pub struct MediaStream {
     /// Audio sample rate in Hz.
     pub sample_rate: Option<String>,
     /// Audio channel count.
+    #[serde(default, deserialize_with = "opt_u32")]
     pub channels: Option<u32>,
     /// Audio channel layout (`stereo`, `5.1`, ...).
     pub channel_layout: Option<String>,
     /// Bits per audio sample.
+    #[serde(default, deserialize_with = "opt_u32")]
     pub bits_per_sample: Option<u32>,
     /// Language tag from stream tags (`eng`, ...).
     pub language: Option<String>,
@@ -180,6 +207,7 @@ pub struct FormatInfo {
     /// Long format name.
     pub format_long_name: Option<String>,
     /// Number of streams.
+    #[serde(default, deserialize_with = "opt_u32")]
     pub nb_streams: Option<u32>,
     /// Duration in seconds (string).
     pub duration: Option<String>,
@@ -190,6 +218,7 @@ pub struct FormatInfo {
     /// Start time (string).
     pub start_time: Option<String>,
     /// Probe score (higher = more confident detection).
+    #[serde(default, deserialize_with = "opt_u32")]
     pub probe_score: Option<u32>,
     /// Format tags (title, artist, encoder, ...).
     #[serde(default)]
@@ -223,6 +252,7 @@ impl FormatInfo {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Chapter {
     /// Chapter index.
+    #[serde(default, deserialize_with = "opt_u32")]
     pub id: Option<u32>,
     /// Start time in seconds (string).
     pub start_time: Option<String>,

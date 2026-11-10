@@ -179,9 +179,10 @@ pub fn orient(
 
     // `-autorotate` (default on) normalizes any input display-matrix
     // rotation into pixels before our filter runs, so the requested op
-    // always applies to the upright image. `-display_rotation 0` and
-    // the cleared `rotate` tag then guarantee the output carries no
-    // residual rotation metadata for players to re-apply.
+    // always applies to the upright image. The cleared `rotate` tag
+    // then guarantees the output carries no residual rotation
+    // metadata for players to re-apply (`-display_rotation` is a
+    // demuxer input option and cannot be set on output).
     let args: Vec<OsString> = [
         OsString::from("-y"),
         OsString::from("-v"),
@@ -202,8 +203,6 @@ pub fn orient(
         OsString::from("passthrough"),
         OsString::from("-sn"),
         OsString::from("-dn"),
-        OsString::from("-display_rotation"),
-        OsString::from("0"),
         OsString::from("-metadata:s:v"),
         OsString::from("rotate=0"),
     ]

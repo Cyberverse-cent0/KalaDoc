@@ -508,9 +508,9 @@ fn transcode(
         "-y",
         "-hide_banner",
         "-i",
-        "",
+        in_path.to_str().unwrap_or("input"),
         "-vf",
-        "",
+        vf,
         "-map",
         "0:v:0",
         "-map",
@@ -518,25 +518,18 @@ fn transcode(
         "-sn",
         "-dn",
         "-c:v",
-        "",
+        encoder,
         "-c:a",
         "aac",
         "-movflags",
         "+faststart",
-        "",
     ])
     .into_iter()
     .collect();
-    // Fill placeholders: argv positions are fixed above.
-    argv[4] = in_path.as_os_str().to_os_string();
-    argv[6] = OsString::from(vf);
-    argv[13] = OsString::from(encoder);
     if encoder == "libx264" {
-        argv.splice(14..14, args(&["-crf", "23", "-preset", "veryfast"]));
+        argv.extend(args(&["-crf", "23", "-preset", "veryfast"]));
     }
-    // Last empty slot is the output path (now shifted if we spliced).
-    let last = argv.len() - 1;
-    argv[last] = out_path.as_os_str().to_os_string();
+    argv.push(out_path.as_os_str().to_os_string());
 
     process::run_checked("ffmpeg", &rt.ffmpeg, &argv, None, limits)?;
 
