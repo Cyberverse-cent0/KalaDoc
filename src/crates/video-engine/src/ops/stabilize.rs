@@ -358,6 +358,7 @@ pub(crate) fn stabilize_auto(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crates::video_engine::VideoInfo;
     use crate::crates::video_engine::ops::{FFPROBE, h264_encoder};
 
     /// Encode a ~1s 160x120 H.264+AAC clip via lavfi `testsrc` +
