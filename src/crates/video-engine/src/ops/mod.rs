@@ -46,6 +46,8 @@ pub(crate) mod geometry_adv;
 #[allow(dead_code)]
 pub(crate) mod hdr;
 pub(crate) mod interpolate;
+#[allow(dead_code)]
+pub(crate) mod live;
 pub(crate) mod loudness;
 #[allow(dead_code)]
 pub(crate) mod metadata_export;

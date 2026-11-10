@@ -73,6 +73,12 @@ pub enum Commands {
     /// analysis, packaging, and runtime inspection).
     #[command(subcommand)]
     Video(VideoArgs),
+
+    /// Serve the Model Context Protocol (MCP) endpoint for AI clients.
+    /// Exposes read-only system, engine, and media tools over the
+    /// configured transport (spec §10).
+    #[command(subcommand)]
+    Mcp(McpArgs),
 }
 
 #[derive(Subcommand)]
@@ -1388,6 +1394,27 @@ pub enum PipelineArgs {
         /// Path to the input file.
         file: std::path::PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+pub enum McpArgs {
+    /// Run the MCP server. Speaks newline-delimited JSON-RPC 2.0 on
+    /// stdin/stdout for local MCP clients; runs until the client
+    /// disconnects.
+    Serve {
+        /// Transport to listen on. Only `stdio` exists — the server
+        /// never opens a network listener (spec §10, §12).
+        #[arg(long, value_enum, default_value_t = McpTransport::Stdio)]
+        transport: McpTransport,
+    },
+}
+
+/// MCP transports. `stdio` is the only implemented transport; remote
+/// Streamable HTTP is reserved for a future authenticated deployment.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum McpTransport {
+    /// Newline-delimited JSON-RPC over stdin/stdout.
+    Stdio,
 }
 
 #[derive(Subcommand)]

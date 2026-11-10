@@ -41,23 +41,12 @@ use crate::crates::video_engine::ops::{FFMPEG, PROBE_TIMEOUT, find_tool, h264_en
 /// local-file side effect this module must not enable.
 pub(crate) const STREAM_PROTOCOLS: &[&str] = &[
     // Real-Time Messaging Protocol family (all share the RTMP muxer).
-    "rtmp",
-    "rtmps",
-    "rtmpt",
-    "rtmpe",
-    "rtmpte",
-    "rtmpts",
+    "rtmp", "rtmps", "rtmpt", "rtmpe", "rtmpte", "rtmpts",
     // RTP/RTSP realtime transport.
-    "rtp",
-    "rtsp",
-    // Secure Reliable Transport.
-    "srt",
-    // Datagram transport for raw MPEG-TS fan-out.
-    "udp",
-    // HTTP-based ingestion (HLS-STYLE push endpoints, CMAF, ...).
-    "http",
-    "https",
-    // Icecast/Shoutcast source protocol.
+    "rtp", "rtsp", // Secure Reliable Transport.
+    "srt",  // Datagram transport for raw MPEG-TS fan-out.
+    "udp",  // HTTP-based ingestion (HLS-STYLE push endpoints, CMAF, ...).
+    "http", "https", // Icecast/Shoutcast source protocol.
     "icecast",
 ];
 
@@ -99,9 +88,7 @@ fn url_has_dangerous_chars(url: &str) -> bool {
 /// or [`VideoError::InvalidInput`] with a caller-facing reason.
 pub(crate) fn stream_validate_url(url: &str) -> VideoResult<()> {
     if url.is_empty() {
-        return Err(VideoError::InvalidInput(
-            "stream URL is empty".to_string(),
-        ));
+        return Err(VideoError::InvalidInput("stream URL is empty".to_string()));
     }
     if url_has_dangerous_chars(url) {
         return Err(VideoError::InvalidInput(format!(
@@ -197,9 +184,7 @@ fn valid_bitrate(s: &str) -> bool {
         _ => s,
     };
     !num.is_empty()
-        && num
-            .chars()
-            .all(|c| c.is_ascii_digit() || c == '.')
+        && num.chars().all(|c| c.is_ascii_digit() || c == '.')
         && num.chars().filter(|&c| c == '.').count() <= 1
         && num.chars().any(|c| c.is_ascii_digit())
 }
@@ -371,9 +356,7 @@ fn parse_muxer_names(stdout: &str) -> Vec<String> {
             let mut it = line.split_whitespace();
             let first = it.next()?;
             // Flag column: 1-2 chars of E/D/. — skip it and take name.
-            let name = if first.chars().all(|c| matches!(c, 'E' | 'D' | '.'))
-                && first.len() <= 2
-            {
+            let name = if first.chars().all(|c| matches!(c, 'E' | 'D' | '.')) && first.len() <= 2 {
                 it.next()?
             } else {
                 first
@@ -419,12 +402,8 @@ pub(crate) fn stream_capability_report() -> VideoResult<StreamCapabilityReport> 
                 .description
                 .as_deref()
                 .map(|d| {
-                    let parts: Vec<&str> =
-                        d.split(',').map(str::trim).collect();
-                    (
-                        parts.contains(&"input"),
-                        parts.contains(&"output"),
-                    )
+                    let parts: Vec<&str> = d.split(',').map(str::trim).collect();
+                    (parts.contains(&"input"), parts.contains(&"output"))
                 })
                 .unwrap_or((false, false));
             let name = p.name.to_ascii_lowercase();
@@ -492,15 +471,15 @@ mod tests {
             "",
             "rtmp://",
             "rtmp:///nohost",
-            "rtmp://host name/app",      // whitespace
-            "rtmp://host/\"quoted\"",    // quote
-            "rtmp://host/$(whoami)",     // command substitution
+            "rtmp://host name/app",   // whitespace
+            "rtmp://host/\"quoted\"", // quote
+            "rtmp://host/$(whoami)",  // command substitution
             "rtmp://host/`id`",
             "rtmp://host/a;b",
             "rtmp://host/a|b",
             "rtmp://host/a\\b",
-            "1rtmp://host/app",          // scheme can't start with digit
-            "rtmp:host/app",             // missing //
+            "1rtmp://host/app", // scheme can't start with digit
+            "rtmp:host/app",    // missing //
             "://host/app",
         ] {
             assert!(
@@ -547,9 +526,7 @@ mod tests {
         match h264_encoder() {
             Some(enc) => {
                 let args = result.expect("stream_args");
-                let pos = |needle: &str| {
-                    args.iter().position(|a| a == needle).unwrap()
-                };
+                let pos = |needle: &str| args.iter().position(|a| a == needle).unwrap();
                 assert_eq!(args[pos("-c:v") + 1], enc);
                 assert_eq!(args[pos("-c:a") + 1], "aac");
                 assert_eq!(args[pos("-b:v") + 1], "2500k");
@@ -575,12 +552,7 @@ mod tests {
             codec: Some(StreamCodec::Vp9),
             ..StreamPushOpts::default()
         };
-        let args = stream_args(
-            Path::new("in.webm"),
-            "udp://239.0.0.1:5004",
-            &opts,
-        )
-        .unwrap();
+        let args = stream_args(Path::new("in.webm"), "udp://239.0.0.1:5004", &opts).unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("libvpx-vp9"));
         assert!(joined.contains("libopus"));
