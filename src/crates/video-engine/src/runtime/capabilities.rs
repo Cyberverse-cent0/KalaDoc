@@ -8,7 +8,6 @@
 use std::sync::OnceLock;
 
 use crate::crates::video_engine::error::VideoResult;
-use crate::crates::video_engine::model::CaptureDevice;
 use crate::crates::video_engine::ops::{FFMPEG, PROBE_TIMEOUT, find_tool, run_tool};
 
 /// Everything one ffmpeg/ffprobe build advertises. Names are the
@@ -224,41 +223,5 @@ fn parse_hwaccels(text: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(str::to_string)
-        .collect()
-}
-
-/// Enumerate capture devices/sources for [`super::hardware`]/
-/// [`super::capabilities`] consumers. Kept here so `ffmpeg -devices`
-/// parsing lives next to the other list probes.
-pub(crate) fn devices() -> Vec<CaptureDevice> {
-    let Ok(program) = find_tool(FFMPEG) else {
-        return Vec::new();
-    };
-    let args = vec!["-hide_banner".to_string(), "-devices".to_string()];
-    let Ok(out) = run_tool(FFMPEG, &program, &args, PROBE_TIMEOUT) else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .skip_while(|l| !l.trim_start().starts_with("Devices:"))
-        .skip(1)
-        .skip_while(|l| l.trim().is_empty())
-        .take_while(|l| !l.trim().is_empty())
-        .filter_map(|line| {
-            let t = line.trim();
-            let (kind, rest) = t.split_once(' ')?;
-            let name = rest.split_whitespace().next()?.to_string();
-            let desc = rest
-                .split_once(char::is_whitespace)
-                .map(|(_, d)| d.trim().to_string());
-            Some(CaptureDevice {
-                kind: "device".to_string(),
-                name: format!("{kind} {name}"),
-                description: desc.filter(|d| !d.is_empty()),
-            })
-        })
         .collect()
 }

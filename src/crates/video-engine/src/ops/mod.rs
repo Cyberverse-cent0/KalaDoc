@@ -39,6 +39,10 @@ pub(crate) mod encode;
 pub(crate) mod enhance;
 pub(crate) mod extract;
 pub(crate) mod extract_audio;
+// Filter listing/complex-graph/preset-lookup surface is implemented
+// ahead of engine wiring; dead_code allowed until VideoEngine
+// dispatches to it.
+#[allow(dead_code)]
 pub mod filters;
 pub(crate) mod frames;
 pub(crate) mod geometry;

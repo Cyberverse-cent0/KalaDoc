@@ -24,6 +24,7 @@ use crate::crates::video_engine::ops::{
 /// (`RIFF`), FLAC (`fLaC`), Ogg (`OggS`), MP4/M4A (`....ftyp` at
 /// offset 4). Unknown payloads get `"bin"` — ffmpeg probes content
 /// anyway; the extension is only a demuxer hint.
+#[allow(dead_code)] // used only by the not-yet-wired mix ops below
 fn audio_ext(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(b"ID3")
         || (bytes.len() > 1 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0)
@@ -44,6 +45,7 @@ fn audio_ext(bytes: &[u8]) -> &'static str {
 
 /// Output container extension for a probed video, or
 /// [`VideoError::InvalidInput`] when the container cannot be named.
+#[allow(dead_code)] // used only by the not-yet-wired mix ops below
 fn output_ext(info: &VideoInfo) -> VideoResult<String> {
     info.format_name
         .as_deref()
@@ -57,6 +59,7 @@ fn output_ext(info: &VideoInfo) -> VideoResult<String> {
 }
 
 /// Probe `input`, enforce `limits`, and require the named stream kind.
+#[allow(dead_code)] // used only by the not-yet-wired mix ops below
 fn probed_input<'a>(
     input: &'a [u8],
     limits: &EngineLimits,
@@ -89,6 +92,7 @@ fn probed_input<'a>(
 /// container. Requires at least one audio input and a video that
 /// already carries an audio stream — there is nothing to anchor
 /// `duration=first` to otherwise.
+#[allow(dead_code)] // implemented ahead of engine wiring
 pub(crate) fn audio_mix_video(
     input_video: &[u8],
     inputs_audio: &[Vec<u8>],
@@ -169,6 +173,7 @@ pub(crate) fn audio_mix_video(
 /// `-shortest` ends the output at the shorter of the video/audio
 /// streams, so a long replacement track does not pad the result and a
 /// short one trims it. Output container matches the probed input.
+#[allow(dead_code)] // implemented ahead of engine wiring
 pub(crate) fn audio_replace(
     input_video: &[u8],
     audio: &[u8],
@@ -227,6 +232,7 @@ pub(crate) fn audio_replace(
 /// requires identical codec parameters across segments while paired
 /// audio files may differ (wav + mp3 + ...). The result is
 /// `-map 0:v -map "[acat]" -c:v copy -c:a aac`.
+#[allow(dead_code)] // implemented ahead of engine wiring
 pub(crate) fn video_audio_mix(
     inputs: &[(Vec<u8>, Vec<u8>)],
     limits: &EngineLimits,

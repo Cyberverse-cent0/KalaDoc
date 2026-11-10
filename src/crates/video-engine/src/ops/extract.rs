@@ -9,8 +9,6 @@
 //! the requested text format (`srt`/`ass`/`vtt`) because raw subtitle
 //! packets are container-specific and text is the portable form.
 
-use std::collections::BTreeMap;
-
 use crate::crates::core::engine::EngineLimits;
 use crate::crates::video_engine::error::{VideoError, VideoResult};
 use crate::crates::video_engine::model::{MediaFile, MediaOutput, StreamInfo, StreamSelection};
@@ -23,24 +21,6 @@ use crate::crates::video_engine::ops::{
 /// Subtitle text formats [`extract_streams`] accepts, mapped to the
 /// ffmpeg subtitle encoder that produces them.
 const SUBTITLE_FORMATS: &[(&str, &str)] = &[("srt", "srt"), ("ass", "ass"), ("vtt", "webvtt")];
-
-/// ffmpeg `-c copy` output extension for an audio codec, or `None`
-/// when no standalone audio container is known to accept it (the
-/// caller falls back to `.mkv`).
-fn audio_ext(codec_name: Option<&str>) -> Option<&'static str> {
-    match codec_name.unwrap_or("") {
-        "mp3" => Some("mp3"),
-        "aac" => Some("aac"), // ADTS
-        "opus" => Some("ogg"),
-        "vorbis" => Some("ogg"),
-        "flac" => Some("flac"),
-        "pcm_s16le" | "pcm_s16be" | "pcm_s24le" | "pcm_s24be" | "pcm_s32le" | "pcm_s32be"
-        | "pcm_u8" | "pcm_s8" | "pcm_f32le" | "pcm_f32be" | "pcm_f64le" | "pcm_f64be" => {
-            Some("wav")
-        }
-        _ => None,
-    }
-}
 
 /// Extension for a still-image attachment/cover stream. Returns `None`
 /// for codecs with no standalone image muxer — callers fall back to
@@ -273,18 +253,6 @@ pub(crate) fn chapters_json(
     serde_json::to_vec_pretty(chapters).map_err(Into::into)
 }
 
-/// Best-effort subtitle codec → text format name table used by
-/// callers to pick `subtitle_format` defaults.
-pub(crate) fn subtitle_format_for(codec_name: &str) -> &'static str {
-    match codec_name {
-        "mov_text" | "tx3g" => "srt",
-        "subrip" | "srt" => "srt",
-        "ass" | "ssa" => "ass",
-        "webvtt" => "vtt",
-        _ => "srt",
-    }
-}
-
 /// Sanitize a stream-derived filename component (codec names,
 /// languages, indices) into `[a-z0-9_-]`.
 pub(crate) fn sanitize_component(raw: &str) -> String {
@@ -299,11 +267,4 @@ pub(crate) fn sanitize_component(raw: &str) -> String {
         .collect::<String>()
         .trim_matches('_')
         .to_string()
-}
-
-/// Merge helper: fold per-stream tag maps when building reports.
-pub(crate) fn merge_tags(into: &mut BTreeMap<String, String>, tags: &BTreeMap<String, String>) {
-    for (k, v) in tags {
-        into.entry(k.clone()).or_insert_with(|| v.clone());
-    }
 }
