@@ -225,9 +225,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::AppConfig;
 use crate::crates::application::services::folder_watch;
-use crate::crates::application::services::ingestion::{
-    DocumentIngestionService, RecoveryOptions,
-};
+use crate::crates::application::services::ingestion::{DocumentIngestionService, RecoveryOptions};
 use crate::crates::application::services::media_ops;
 use crate::crates::conversion_engine::{
     ConversionEngine, ConvertError, ConvertOptions as EngineConvertOptions, ConvertOutput,

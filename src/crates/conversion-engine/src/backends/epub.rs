@@ -131,18 +131,19 @@ impl ConversionBackend for EpubBackend {
 
         // container.xml → OPF package document.
         let container = read_member(&archive, "META-INF/container.xml", &mut total_out)?
-        .ok_or_else(|| ConvertError::InvalidInput {
-            reason: "META-INF/container.xml not found; not an EPUB archive".to_string(),
-        })?;
+            .ok_or_else(|| ConvertError::InvalidInput {
+                reason: "META-INF/container.xml not found; not an EPUB archive".to_string(),
+            })?;
         let container_xml = String::from_utf8_lossy(&container);
         let opf_name =
             container_rootfile(&container_xml).ok_or_else(|| ConvertError::InvalidInput {
                 reason: "container.xml has no <rootfile> element".to_string(),
             })?;
-        let opf_bytes = read_member(&archive, &opf_name, &mut total_out)?
-            .ok_or_else(|| ConvertError::InvalidInput {
+        let opf_bytes = read_member(&archive, &opf_name, &mut total_out)?.ok_or_else(|| {
+            ConvertError::InvalidInput {
                 reason: "OPF package document referenced by container.xml is missing".to_string(),
-            })?;
+            }
+        })?;
         let opf_dir = parent_dir_str(&opf_name);
         let opf_xml = String::from_utf8_lossy(&opf_bytes);
         let (manifest, spine) = parse_opf(&opf_xml);
