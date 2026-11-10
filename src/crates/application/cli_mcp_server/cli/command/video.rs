@@ -12,11 +12,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::crates::core::engine::EngineLimits;
 use crate::crates::video_engine::{
-    CaptureDevice, FitMode, FramesSpec, MediaOutput, StreamFilter, StreamSelection, SubtitleStyle,
-    VideoEngine, VideoError, VisualStyle,
+    CaptureDevice, ExportFormat, FitMode, FramesSpec, HdrToneMapParams, MediaFile, MediaOutput,
+    PreviewFormat, PreviewParams, ProxyKind, ProxyParams, StabilizeAlgo, StabilizeParams,
+    StreamFilter, StreamSelection, SubtitleStyle, SyncParams, VideoEngine, VideoError, VisualStyle,
+    WaveformKind, WaveformParams,
 };
 
-use super::super::args::{FitArg, OrientArg, VideoArgs, VisualStyleArg};
+use super::super::args::{
+    ChaptersArgs, FitArg, HdrArgs, MetadataFormatArg, OrientArg, PreviewFormatArg, ProxyKindArg,
+    SegmentArgs, SplitByArg, StabilizeAlgoArg, SyncArgs, VideoArgs, VisualStyleArg,
+    WaveformKindArg,
+};
 use super::{CliError, Context};
 
 pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
@@ -920,6 +926,98 @@ pub fn run(ctx: &Context, args: &VideoArgs) -> Result<i32, CliError> {
             report(ctx, file, &out, "faststart", bytes.len())
         }
 
+        // Validation / chapters / HDR / segmentation
+        VideoArgs::Validate { file } => validate(ctx, &engine, file, &limits),
+        VideoArgs::Chapters(sub) => chapters(ctx, &engine, sub, &limits),
+        VideoArgs::Hdr(sub) => hdr(ctx, &engine, sub, &limits),
+        VideoArgs::Segment(sub) => segment(ctx, &engine, sub, &limits),
+        VideoArgs::Waveform {
+            file,
+            kind,
+            width,
+            height,
+            color,
+            scale,
+            output_file: output,
+        } => waveform(
+            ctx,
+            &engine,
+            file,
+            *kind,
+            *width,
+            *height,
+            color.as_deref(),
+            scale.as_deref(),
+            output.as_deref(),
+        ),
+        VideoArgs::Sync(sub) => sync(ctx, &engine, sub, &limits),
+        VideoArgs::Stabilize {
+            file,
+            algo,
+            shakiness,
+            smoothing,
+            output_file: output,
+        } => stabilize(
+            ctx,
+            &engine,
+            file,
+            *algo,
+            *shakiness,
+            *smoothing,
+            output.as_deref(),
+            &limits,
+        ),
+        VideoArgs::Preview {
+            file,
+            format,
+            duration,
+            fps,
+            width,
+            output_file: output,
+        } => preview(
+            ctx,
+            &engine,
+            file,
+            *format,
+            *duration,
+            *fps,
+            *width,
+            output.as_deref(),
+            &limits,
+        ),
+        VideoArgs::Proxy {
+            file,
+            kind,
+            height,
+            crf,
+            preset,
+            output_file: output,
+        } => proxy(
+            ctx,
+            &engine,
+            file,
+            *kind,
+            *height,
+            *crf,
+            preset.as_deref(),
+            output.as_deref(),
+            &limits,
+        ),
+        VideoArgs::MetadataReport { file } => metadata_report(ctx, &engine, file),
+        VideoArgs::MetadataExport {
+            file,
+            format,
+            output_file: output,
+        } => metadata_export(ctx, &engine, file, *format, output.as_deref()),
+        VideoArgs::MetadataCompare { first, second } => {
+            metadata_compare(ctx, &engine, first, second)
+        }
+        VideoArgs::ConcatHetero {
+            files,
+            ext,
+            output_file: output,
+        } => concat_hetero(ctx, &engine, files, ext, output.as_deref(), &limits),
+
         // Runtime inspection
         VideoArgs::Devices => device_list(ctx, &engine.list_devices().map_err(map_video_error)?),
         VideoArgs::Protocols => {
@@ -984,6 +1082,8 @@ fn marker_to_op(marker: &str) -> &'static str {
         "pitch" => "pitch",
         "delay" => "delay",
         "loudnorm" => "normalize-lufs",
+        "stabilized" => "stabilize",
+        "tonemap" => "hdr-tone-map",
         _ => "video-op",
     }
 }
@@ -2193,6 +2293,749 @@ fn package(
     let input = read_input(file)?;
     let out = pack(engine, &input, limits).map_err(map_video_error)?;
     write_media_output(ctx, file, output_dir, kind, out, kind)
+}
+
+// ---------------------------------------------------------------------------
+// Validation / chapters / HDR / segmentation / sync / preview / proxy
+// ---------------------------------------------------------------------------
+
+fn validate(
+    ctx: &Context,
+    engine: &VideoEngine,
+    file: &Path,
+    limits: &EngineLimits,
+) -> Result<i32, CliError> {
+    let input = read_input(file)?;
+    let report = engine
+        .validate_media(&input, limits)
+        .map_err(map_video_error)?;
+    let ok = report.valid;
+    let issues = report.issues.len();
+    if emit_kv(
+        ctx,
+        &report,
+        &[
+            "valid",
+            "format_name",
+            "duration_secs",
+            "video_streams",
+            "audio_streams",
+            "subtitle_streams",
+        ],
+    )? {
+        return Ok(if ok { 0 } else { 1 });
+    }
+    println!("valid: {ok}");
+    println!("issues: {issues}");
+    for issue in &report.issues {
+        let sev = serde_json::to_value(&issue.severity)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "issue".to_string());
+        println!("[{sev}] {}: {}", issue.code, issue.message);
+    }
+    Ok(if ok { 0 } else { 1 })
+}
+
+fn chapters(
+    ctx: &Context,
+    engine: &VideoEngine,
+    sub: &ChaptersArgs,
+    limits: &EngineLimits,
+) -> Result<i32, CliError> {
+    match sub {
+        ChaptersArgs::List { file } => {
+            let input = read_input(file)?;
+            let chapters = engine.chapters_list(&input).map_err(map_video_error)?;
+            let items: Vec<serde_json::Value> = chapters
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "id": c.id,
+                        "start_ms": c.start_ms,
+                        "end_ms": c.end_ms,
+                        "title": c.title,
+                    })
+                })
+                .collect();
+            if ctx.emit_structured(&items)? {
+                return Ok(0);
+            }
+            for c in &items {
+                println!(
+                    "{}\t{}\t{}",
+                    c["start_ms"].as_i64().unwrap_or(0),
+                    c["end_ms"].as_i64().unwrap_or(0),
+                    c["title"].as_str().unwrap_or("")
+                );
+            }
+            Ok(0)
+        }
+        ChaptersArgs::Set {
+            file,
+            chapters: specs,
+            output_file: output,
+        } => {
+            let mut parsed: Vec<(i64, i64, String)> = Vec::with_capacity(specs.len());
+            for spec in specs {
+                parsed.push(parse_chapter_spec(spec)?);
+            }
+            let refs: Vec<(i64, i64, &str)> = parsed
+                .iter()
+                .map(|(s, e, t)| (*s, *e, t.as_str()))
+                .collect();
+            let input = read_input(file)?;
+            let bytes = engine
+                .chapters_set(&input, &refs, limits)
+                .map_err(map_video_error)?;
+            let out = pick_out(
+                output.as_deref(),
+                sniffed_default(file, "chapters", &bytes, "mp4"),
+            )?;
+            check_output(&out, &[file])?;
+            write_output(&out, &bytes)?;
+            report(ctx, file, &out, "chapters-set", bytes.len())
+        }
+        ChaptersArgs::Remove {
+            file,
+            output_file: output,
+        } => {
+            let input = read_input(file)?;
+            let bytes = engine
+                .chapters_remove(&input, limits)
+                .map_err(map_video_error)?;
+            let out = pick_out(
+                output.as_deref(),
+                sniffed_default(file, "nochaps", &bytes, "mp4"),
+            )?;
+            check_output(&out, &[file])?;
+            write_output(&out, &bytes)?;
+            report(ctx, file, &out, "chapters-remove", bytes.len())
+        }
+        ChaptersArgs::Shift {
+            file,
+            offset_ms,
+            output_file: output,
+        } => {
+            let input = read_input(file)?;
+            let bytes = engine
+                .chapters_shift(&input, *offset_ms, limits)
+                .map_err(map_video_error)?;
+            let out = pick_out(
+                output.as_deref(),
+                sniffed_default(file, "shifted", &bytes, "mp4"),
+            )?;
+            check_output(&out, &[file])?;
+            write_output(&out, &bytes)?;
+            report(ctx, file, &out, "chapters-shift", bytes.len())
+        }
+    }
+}
+
+/// Parse a `--chapter` spec `start_ms,end_ms,title` (title optional,
+/// may itself contain commas only via the last-field rule — split on
+/// the first two commas).
+fn parse_chapter_spec(spec: &str) -> Result<(i64, i64, String), CliError> {
+    let mut parts = spec.splitn(3, ',');
+    let start = parts
+        .next()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .ok_or_else(|| CliError::Usage(format!("--chapter: bad start in {spec:?}")))?;
+    let end = parts
+        .next()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .ok_or_else(|| CliError::Usage(format!("--chapter: bad end in {spec:?}")))?;
+    let title = parts.next().unwrap_or("").trim().to_string();
+    if start < 0 || end <= start {
+        return Err(CliError::Usage(format!(
+            "--chapter requires 0 <= start_ms < end_ms, got {spec:?}"
+        )));
+    }
+    Ok((start, end, title))
+}
+
+fn hdr(
+    ctx: &Context,
+    engine: &VideoEngine,
+    sub: &HdrArgs,
+    limits: &EngineLimits,
+) -> Result<i32, CliError> {
+    match sub {
+        HdrArgs::Detect { file } => {
+            let input = read_input(file)?;
+            let info = engine.hdr_detect(&input).map_err(map_video_error)?;
+            let report = serde_json::json!({
+                "is_hdr": info.is_hdr,
+                "color_transfer": info.color_transfer,
+                "color_primaries": info.color_primaries,
+                "color_space": info.color_space,
+                "bit_depth": info.bit_depth,
+                "pix_fmt": info.pix_fmt,
+            });
+            if ctx.emit_structured(&report)? {
+                return Ok(0);
+            }
+            println!("is_hdr: {}", info.is_hdr);
+            println!(
+                "color_transfer: {}",
+                info.color_transfer.as_deref().unwrap_or("(none)")
+            );
+            println!(
+                "color_primaries: {}",
+                info.color_primaries.as_deref().unwrap_or("(none)")
+            );
+            println!(
+                "color_space: {}",
+                info.color_space.as_deref().unwrap_or("(none)")
+            );
+            println!("bit_depth: {}", info.bit_depth);
+            println!("pix_fmt: {}", info.pix_fmt);
+            Ok(0)
+        }
+        HdrArgs::ToneMap {
+            file,
+            desat,
+            peak,
+            output_file: output,
+        } => geometry1(
+            ctx,
+            engine,
+            file,
+            "tonemap",
+            output.as_deref(),
+            limits,
+            |input| {
+                let params = HdrToneMapParams {
+                    desat: *desat,
+                    peak: *peak,
+                };
+                engine.hdr_tone_map(input, &params, limits)
+            },
+        ),
+    }
+}
+
+fn segment(
+    ctx: &Context,
+    engine: &VideoEngine,
+    sub: &SegmentArgs,
+    limits: &EngineLimits,
+) -> Result<i32, CliError> {
+    match sub {
+        SegmentArgs::Split {
+            file,
+            by,
+            seconds,
+            threshold,
+            parts,
+            format,
+            output_dir,
+        } => {
+            let ext = sanitize_extension(format)?;
+            match by {
+                SplitByArg::Duration => {
+                    let secs = seconds.ok_or_else(|| {
+                        CliError::Usage("--by duration requires --seconds".to_string())
+                    })?;
+                    if secs <= 0.0 {
+                        return Err(CliError::Usage("--seconds must be > 0".to_string()));
+                    }
+                    segment_split(
+                        ctx,
+                        engine,
+                        file,
+                        output_dir.as_deref(),
+                        &ext,
+                        limits,
+                        |input, l| engine.split_by_duration(input, secs, &ext, l),
+                    )
+                }
+                SplitByArg::Scenes => {
+                    let thr = threshold.unwrap_or(0.3);
+                    if thr < 0.0 {
+                        return Err(CliError::Usage("--threshold must be >= 0".to_string()));
+                    }
+                    segment_split(
+                        ctx,
+                        engine,
+                        file,
+                        output_dir.as_deref(),
+                        &ext,
+                        limits,
+                        |input, l| engine.split_by_scenes(input, thr, &ext, l),
+                    )
+                }
+                SplitByArg::Equal => {
+                    let n = parts.ok_or_else(|| {
+                        CliError::Usage("--by equal requires --parts".to_string())
+                    })?;
+                    if !(2..=100).contains(&n) {
+                        return Err(CliError::Usage("--parts must be in 2..=100".to_string()));
+                    }
+                    segment_split(
+                        ctx,
+                        engine,
+                        file,
+                        output_dir.as_deref(),
+                        &ext,
+                        limits,
+                        |input, l| engine.split_equal(input, n, &ext, l),
+                    )
+                }
+            }
+        }
+        SegmentArgs::Extract {
+            file,
+            start_ms,
+            end_ms,
+            format,
+            output_file: output,
+        } => {
+            if start_ms >= end_ms {
+                return Err(CliError::Usage(
+                    "--start-ms must be less than --end-ms".to_string(),
+                ));
+            }
+            let ext = sanitize_extension(format)?;
+            let input = read_input(file)?;
+            let bytes = engine
+                .extract_segment(&input, *start_ms, *end_ms, &ext, limits)
+                .map_err(map_video_error)?;
+            let out = pick_out(output.as_deref(), marked_default(file, "segment", &ext))?;
+            check_output(&out, &[file])?;
+            write_output(&out, &bytes)?;
+            report(ctx, file, &out, "segment-extract", bytes.len())
+        }
+    }
+}
+
+/// Shared tail for the three `segment split` strategies: run the
+/// split, wrap the [`SplitResult`] as a [`MediaOutput`] of
+/// `segment_NNN.<ext>` files, and write it to `--output-dir`.
+fn segment_split(
+    ctx: &Context,
+    _engine: &VideoEngine,
+    file: &Path,
+    output_dir: Option<&Path>,
+    ext: &str,
+    limits: &EngineLimits,
+    split: impl FnOnce(
+        &[u8],
+        &EngineLimits,
+    ) -> crate::crates::video_engine::VideoResult<
+        crate::crates::video_engine::SplitResult,
+    >,
+) -> Result<i32, CliError> {
+    let input = read_input(file)?;
+    let result = split(&input, limits).map_err(map_video_error)?;
+    let files = result
+        .segments
+        .into_iter()
+        .enumerate()
+        .map(|(i, seg)| MediaFile {
+            name: format!("segment_{i:03}.{ext}"),
+            bytes: seg.bytes,
+        })
+        .collect();
+    write_media_output(
+        ctx,
+        file,
+        output_dir,
+        "split",
+        MediaOutput { files },
+        "segment-split",
+    )
+}
+
+fn waveform(
+    ctx: &Context,
+    engine: &VideoEngine,
+    file: &Path,
+    kind: WaveformKindArg,
+    width: Option<u32>,
+    height: Option<u32>,
+    color: Option<&str>,
+    scale: Option<&str>,
+    output: Option<&Path>,
+) -> Result<i32, CliError> {
+    let kind = match kind {
+        WaveformKindArg::Waveform => WaveformKind::Waveform,
+        WaveformKindArg::Spectrogram => WaveformKind::Spectrogram,
+        WaveformKindArg::FreqSpectrum => WaveformKind::FreqSpectrum,
+        WaveformKindArg::Vectorscope => WaveformKind::Vectorscope,
+        WaveformKindArg::Volume => WaveformKind::Volume,
+    };
+    let input = read_input(file)?;
+    let params = WaveformParams {
+        kind,
+        width: width.unwrap_or(800),
+        height: height.unwrap_or(400),
+        color: color.map(str::to_string),
+        scale: scale.map(str::to_string),
+    };
+    let bytes = engine
+        .audio_waveform_image(&input, &params)
+        .map_err(map_video_error)?;
+    let marker = match kind {
+        WaveformKind::Waveform => "waveform",
+        WaveformKind::Spectrogram => "spectrogram",
+        WaveformKind::FreqSpectrum => "freqspectrum",
+        WaveformKind::Vectorscope => "vectorscope",
+        WaveformKind::Volume => "volume",
+    };
+    let out = pick_out(output, marked_default(file, marker, "png"))?;
+    check_output(&out, &[file])?;
+    write_output(&out, &bytes)?;
+    report(ctx, file, &out, marker, bytes.len())
+}
+
+fn sync(
+    ctx: &Context,
+    engine: &VideoEngine,
+    sub: &SyncArgs,
+    limits: &EngineLimits,
+) -> Result<i32, CliError> {
+    match sub {
+        SyncArgs::Report { file } => {
+            let input = read_input(file)?;
+            let report = engine.av_sync_report(&input).map_err(map_video_error)?;
+            let value = serde_json::json!({
+                "audio_start_ms": report.audio_start_ms,
+                "video_start_ms": report.video_start_ms,
+                "applied_audio_shift_ms": report.applied_audio_shift_ms,
+                "applied_video_shift_ms": report.applied_video_shift_ms,
+            });
+            if ctx.emit_structured(&value)? {
+                return Ok(0);
+            }
+            println!(
+                "audio_start_ms: {}",
+                report
+                    .audio_start_ms
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "(unknown)".to_string())
+            );
+            println!(
+                "video_start_ms: {}",
+                report
+                    .video_start_ms
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "(unknown)".to_string())
+            );
+            Ok(0)
+        }
+        SyncArgs::Fix {
+            file,
+            audio_offset_ms,
+            video_offset_ms,
+            output_file: output,
+        } => {
+            if *audio_offset_ms == 0 && *video_offset_ms == 0 {
+                return Err(CliError::Usage(
+                    "sync fix requires at least one non-zero offset".to_string(),
+                ));
+            }
+            let input = read_input(file)?;
+            let params = SyncParams {
+                audio_offset_ms: *audio_offset_ms,
+                video_offset_ms: *video_offset_ms,
+            };
+            let bytes = engine
+                .av_sync_fix(&input, &params, limits)
+                .map_err(map_video_error)?;
+            let out = pick_out(output.as_deref(), marked_default(file, "synced", "mp4"))?;
+            check_output(&out, &[file])?;
+            write_output(&out, &bytes)?;
+            report(ctx, file, &out, "av-sync-fix", bytes.len())
+        }
+        SyncArgs::Auto {
+            file,
+            output_file: output,
+        } => {
+            let input = read_input(file)?;
+            let bytes = engine
+                .av_sync_auto(&input, limits)
+                .map_err(map_video_error)?;
+            let out = pick_out(output.as_deref(), marked_default(file, "synced", "mp4"))?;
+            check_output(&out, &[file])?;
+            write_output(&out, &bytes)?;
+            report(ctx, file, &out, "av-sync-auto", bytes.len())
+        }
+    }
+}
+
+fn stabilize(
+    ctx: &Context,
+    engine: &VideoEngine,
+    file: &Path,
+    algo: StabilizeAlgoArg,
+    shakiness: Option<f64>,
+    smoothing: Option<f64>,
+    output: Option<&Path>,
+    limits: &EngineLimits,
+) -> Result<i32, CliError> {
+    let algo = match algo {
+        StabilizeAlgoArg::Auto => None,
+        StabilizeAlgoArg::Vidstab => Some(StabilizeAlgo::Vidstab),
+        StabilizeAlgoArg::Deshake => Some(StabilizeAlgo::Deshake),
+    };
+    let params = StabilizeParams {
+        shakiness: shakiness.unwrap_or(5.0),
+        smoothing: smoothing.unwrap_or(15.0),
+        algo: algo.unwrap_or_default(),
+    };
+    geometry1(
+        ctx,
+        engine,
+        file,
+        "stabilized",
+        output,
+        limits,
+        |input| match algo {
+            Some(a) => {
+                let p = StabilizeParams { algo: a, ..params };
+                engine.stabilize_video(input, &p, limits)
+            }
+            None => engine.stabilize_auto(input, &params, limits),
+        },
+    )
+}
+
+fn preview(
+    ctx: &Context,
+    engine: &VideoEngine,
+    file: &Path,
+    format: PreviewFormatArg,
+    duration: Option<f64>,
+    fps: Option<f64>,
+    width: Option<u32>,
+    output: Option<&Path>,
+    limits: &EngineLimits,
+) -> Result<i32, CliError> {
+    let (format, ext) = match format {
+        PreviewFormatArg::Gif => (PreviewFormat::Gif, "gif"),
+        PreviewFormatArg::Webp => (PreviewFormat::WebpAnimated, "webp"),
+    };
+    if !engine.preview_encoder_available(format) {
+        return Err(CliError::Unsupported(format!(
+            "this ffmpeg build cannot encode {ext} previews"
+        )));
+    }
+    if let Some(d) = duration {
+        if !(d.is_finite() && d > 0.0) {
+            return Err(CliError::Usage("--duration must be > 0".to_string()));
+        }
+    }
+    if let Some(f) = fps {
+        if !(f.is_finite() && f > 0.0 && f <= 240.0) {
+            return Err(CliError::Usage("--fps must be in (0, 240]".to_string()));
+        }
+    }
+    let params = PreviewParams {
+        max_duration_secs: duration.unwrap_or(5.0),
+        fps: fps.unwrap_or(10.0),
+        width: width.unwrap_or(320),
+        format,
+    };
+    let input = read_input(file)?;
+    let bytes = engine
+        .video_preview(&input, &params, limits)
+        .map_err(map_video_error)?;
+    let out = pick_out(output, marked_default(file, "preview", ext))?;
+    check_output(&out, &[file])?;
+    write_output(&out, &bytes)?;
+    report(ctx, file, &out, "preview", bytes.len())
+}
+
+fn proxy(
+    ctx: &Context,
+    engine: &VideoEngine,
+    file: &Path,
+    kind: ProxyKindArg,
+    height: Option<u32>,
+    crf: Option<u32>,
+    preset: Option<&str>,
+    output: Option<&Path>,
+    limits: &EngineLimits,
+) -> Result<i32, CliError> {
+    let (kind, marker) = match kind {
+        ProxyKindArg::Proxy => (ProxyKind::Proxy, "proxy"),
+        ProxyKindArg::Mezzanine => (ProxyKind::Mezzanine, "mezzanine"),
+        ProxyKindArg::Archival => (ProxyKind::Archival, "archival"),
+    };
+    let mut params = ProxyParams::new(kind);
+    params.target_height = height;
+    params.crf = crf;
+    params.preset = preset.map(str::to_string);
+    let input = read_input(file)?;
+    let bytes = engine
+        .generate_proxy(&input, &params, limits)
+        .map_err(map_video_error)?;
+    // The engine picks the container internally (mov/mkv/mp4
+    // depending on available encoders); sniff the bytes for an
+    // honest default extension.
+    let ext = sniff_container_ext(&bytes).unwrap_or("mp4");
+    let out = pick_out(output, marked_default(file, marker, ext))?;
+    check_output(&out, &[file])?;
+    write_output(&out, &bytes)?;
+    report(ctx, file, &out, marker, bytes.len())
+}
+
+fn metadata_report(ctx: &Context, engine: &VideoEngine, file: &Path) -> Result<i32, CliError> {
+    let input = read_input(file)?;
+    let report = engine.metadata_report(&input).map_err(map_video_error)?;
+    let value = serde_json::json!({
+        "title": report.title,
+        "artist": report.artist,
+        "album": report.album,
+        "genre": report.genre,
+        "date": report.date,
+        "comment": report.comment,
+        "encoder": report.encoder,
+        "duration_secs": report.duration_secs,
+        "format_name": report.format_name,
+        "bitrate_bps": report.bitrate_bps,
+        "size_bytes": report.size_bytes,
+        "languages": report.languages,
+        "custom": report
+            .custom
+            .iter()
+            .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
+            .collect::<Vec<_>>(),
+    });
+    if ctx.emit_structured(&value)? {
+        return Ok(0);
+    }
+    for key in [
+        "title",
+        "artist",
+        "album",
+        "genre",
+        "date",
+        "comment",
+        "encoder",
+        "duration_secs",
+        "format_name",
+        "bitrate_bps",
+        "size_bytes",
+    ] {
+        if let Some(v) = value.get(key) {
+            if !v.is_null() {
+                println!("{key}: {}", render_value(v));
+            }
+        }
+    }
+    if let Some(langs) = value.get("languages").and_then(|l| l.as_array()) {
+        if !langs.is_empty() {
+            println!("languages: {}", render_value(&serde_json::json!(langs)));
+        }
+    }
+    Ok(0)
+}
+
+fn metadata_export(
+    ctx: &Context,
+    engine: &VideoEngine,
+    file: &Path,
+    format: MetadataFormatArg,
+    output: Option<&Path>,
+) -> Result<i32, CliError> {
+    let (format, ext) = match format {
+        MetadataFormatArg::Json => (ExportFormat::Json, "json"),
+        MetadataFormatArg::Xml => (ExportFormat::Xml, "xml"),
+        MetadataFormatArg::Csv => (ExportFormat::Csv, "csv"),
+        MetadataFormatArg::Text => (ExportFormat::Text, "txt"),
+    };
+    let input = read_input(file)?;
+    let bytes = engine
+        .metadata_export(&input, format)
+        .map_err(map_video_error)?;
+    let out = pick_out(output, marked_default(file, "metadata", ext))?;
+    check_output(&out, &[file])?;
+    write_output(&out, &bytes)?;
+    report(ctx, file, &out, "metadata-export", bytes.len())
+}
+
+fn metadata_compare(
+    ctx: &Context,
+    engine: &VideoEngine,
+    first: &Path,
+    second: &Path,
+) -> Result<i32, CliError> {
+    let a = read_input(first)?;
+    let b = read_input(second)?;
+    let diff = engine.metadata_compare(&a, &b).map_err(map_video_error)?;
+    let value = serde_json::json!({
+        "only_in_first": diff.only_in_a,
+        "only_in_second": diff.only_in_b,
+        "different": diff
+            .different
+            .iter()
+            .map(|(k, av, bv)| serde_json::json!({
+                "key": k, "first": av, "second": bv,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    if ctx.emit_structured(&value)? {
+        return Ok(0);
+    }
+    for key in ["only_in_first", "only_in_second", "different"] {
+        if let Some(v) = value.get(key) {
+            if !v.is_null() {
+                println!("{key}: {}", render_value(v));
+            }
+        }
+    }
+    Ok(0)
+}
+
+fn concat_hetero(
+    ctx: &Context,
+    engine: &VideoEngine,
+    files: &[PathBuf],
+    ext: &str,
+    output: Option<&Path>,
+    limits: &EngineLimits,
+) -> Result<i32, CliError> {
+    require_multi(files, "concat-hetero")?;
+    let ext = sanitize_extension(ext)?;
+    let inputs = read_inputs(files)?;
+    let bytes = engine
+        .concat_hetero(&inputs, &ext, limits)
+        .map_err(map_video_error)?;
+    let out = pick_out(output, Ok(files[0].with_file_name(format!("concat.{ext}"))))?;
+    check_output_multi(&out, files)?;
+    write_output(&out, &bytes)?;
+    report(ctx, &files[0], &out, "concat-hetero", bytes.len())
+}
+
+/// Guess the container extension from produced bytes: EBML magic →
+/// `mkv`, ISO-BMFF `ftyp` → `mov` for the QuickTime brand else `mp4`.
+/// Returns `None` for anything unrecognized so callers can fall back.
+fn sniff_container_ext(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return Some("mkv");
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return Some(match &bytes[8..12] {
+            b"qt  " => "mov",
+            _ => "mp4",
+        });
+    }
+    None
+}
+
+/// `<stem>.<marker>.<ext>` where `ext` is sniffed from the produced
+/// bytes (falling back to `fallback`) — for ops whose container the
+/// engine chooses internally.
+fn sniffed_default(
+    file: &Path,
+    marker: &str,
+    bytes: &[u8],
+    fallback: &str,
+) -> Result<PathBuf, CliError> {
+    let ext = sniff_container_ext(bytes).unwrap_or(fallback);
+    marked_default(file, marker, ext)
 }
 
 // ---------------------------------------------------------------------------

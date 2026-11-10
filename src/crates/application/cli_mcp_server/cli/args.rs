@@ -1327,6 +1327,168 @@ pub enum VideoArgs {
     },
 
     // ------------------------------------------------------------------
+    // Validation / chapters / HDR / segmentation
+    // ------------------------------------------------------------------
+    /// Validate a media file: probe it, decode-check streams, and
+    /// print a structured report of errors, warnings, and info.
+    Validate {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+    },
+
+    /// List, set, remove, or shift embedded chapters.
+    #[command(subcommand)]
+    Chapters(ChaptersArgs),
+
+    /// Inspect HDR signalling or tone-map HDR content to SDR.
+    #[command(subcommand)]
+    Hdr(HdrArgs),
+
+    /// Split a video into segments or extract a time range.
+    #[command(subcommand)]
+    Segment(SegmentArgs),
+
+    /// Render a still audio-visualization image (waveform,
+    /// spectrogram, frequency spectrum, vectorscope, or volume
+    /// meter) as PNG.
+    Waveform {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Visualization kind.
+        #[arg(long, value_enum, default_value_t = WaveformKindArg::Waveform)]
+        kind: WaveformKindArg,
+        /// Image width in pixels (default: engine default).
+        #[arg(long)]
+        width: Option<u32>,
+        /// Image height in pixels (default: engine default).
+        #[arg(long)]
+        height: Option<u32>,
+        /// Color override: `name|name|...` channel list for
+        /// waveform/freq-spectrum, palette name for spectrogram.
+        #[arg(long)]
+        color: Option<String>,
+        /// Scale override accepted by the chosen filter.
+        #[arg(long)]
+        scale: Option<String>,
+        /// Output PNG path (default: `<stem>.<kind>.png`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Measure or correct audio/video sync offsets.
+    #[command(subcommand)]
+    Sync(SyncArgs),
+
+    /// Stabilize shaky footage (vidstab when available, deshake
+    /// fallback, or `--algo auto` to pick the best backend).
+    Stabilize {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Stabilization backend.
+        #[arg(long, value_enum, default_value_t = StabilizeAlgoArg::Auto)]
+        algo: StabilizeAlgoArg,
+        /// Shakiness 1–10 (default: 5).
+        #[arg(allow_negative_numbers = true, long)]
+        shakiness: Option<f64>,
+        /// Smoothing 1–100 (default: 15; vidstab only).
+        #[arg(allow_negative_numbers = true, long)]
+        smoothing: Option<f64>,
+        /// Output path (default: `<stem>.stabilized<same-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Render a short animated preview of the first seconds of a
+    /// video (GIF or animated WebP).
+    Preview {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Preview format.
+        #[arg(long, value_enum, default_value_t = PreviewFormatArg::Gif)]
+        format: PreviewFormatArg,
+        /// Maximum seconds of source to animate (default: 5).
+        #[arg(long)]
+        duration: Option<f64>,
+        /// Output frame rate (default: 10).
+        #[arg(long)]
+        fps: Option<f64>,
+        /// Output width in pixels; height keeps aspect (default:
+        /// 320).
+        #[arg(long)]
+        width: Option<u32>,
+        /// Output path (default: `<stem>.preview.<ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Generate a mezzanine (edit master), proxy (small H.264), or
+    /// archival (lossless) derivative of a video.
+    Proxy {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Which derivative to produce.
+        #[arg(long, value_enum, default_value_t = ProxyKindArg::Proxy)]
+        kind: ProxyKindArg,
+        /// Maximum output height for `--kind proxy` (default: 720).
+        #[arg(long)]
+        height: Option<u32>,
+        /// H.264 CRF for `--kind proxy` when libx264 is the encoder
+        /// (default: 23).
+        #[arg(long)]
+        crf: Option<u32>,
+        /// x264 preset for `--kind proxy` (default: `veryfast`).
+        #[arg(long)]
+        preset: Option<String>,
+        /// Output path (default: `<stem>.<kind>.<sniffed-ext>` —
+        /// the container is detected from the produced bytes).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Print the structured metadata report for a media file
+    /// (container tags, duration, bitrate, languages).
+    MetadataReport {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+    },
+
+    /// Export a media file's metadata as a document
+    /// (`json`, `xml`, `csv`, or `text`).
+    MetadataExport {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Export format.
+        #[arg(long, value_enum, default_value_t = MetadataFormatArg::Json)]
+        format: MetadataFormatArg,
+        /// Output path (default: `<stem>.metadata.<ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Diff the metadata of two media files.
+    MetadataCompare {
+        /// Path to the first media file.
+        first: std::path::PathBuf,
+        /// Path to the second media file.
+        second: std::path::PathBuf,
+    },
+
+    /// Concatenate heterogeneous media files into one container,
+    /// normalizing codecs via re-encode (unlike `concat`, which
+    /// stream-copies same-codec inputs).
+    ConcatHetero {
+        /// Input media files, in playback order (at least two).
+        files: Vec<std::path::PathBuf>,
+        /// Target container/extension for the output, e.g. `mp4`.
+        #[arg(long)]
+        ext: String,
+        /// Output path (default: `concat.<ext>` next to the first
+        /// input).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    // ------------------------------------------------------------------
     // Runtime inspection
     // ------------------------------------------------------------------
     /// List capture devices/sources known to this ffmpeg build.
@@ -1379,6 +1541,236 @@ pub enum VisualStyleArg {
     Spectrum,
     /// Waveform and spectrum stacked.
     Both,
+}
+
+/// Chapter operations for `kaladoc video chapters`.
+#[derive(Subcommand)]
+pub enum ChaptersArgs {
+    /// List embedded chapters with millisecond bounds.
+    List {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+    },
+
+    /// Replace the chapter table. Each `--chapter` is a
+    /// `start_ms,end_ms,title` triple (title may be empty).
+    /// Output containers are limited to mp4/mkv by the engine.
+    Set {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// One chapter per flag: `start_ms,end_ms,title`.
+        #[arg(long = "chapter", required = true)]
+        chapters: Vec<String>,
+        /// Output path (default: `<stem>.chapters.<sniffed-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Remove every embedded chapter.
+    Remove {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Output path (default: `<stem>.nochaps.<sniffed-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Shift every chapter time by an offset in milliseconds.
+    Shift {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Offset in milliseconds (negative shifts earlier).
+        #[arg(allow_negative_numbers = true, long)]
+        offset_ms: i64,
+        /// Output path (default: `<stem>.shifted.<sniffed-ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+}
+
+/// HDR operations for `kaladoc video hdr`.
+#[derive(Subcommand)]
+pub enum HdrArgs {
+    /// Detect HDR signalling on the primary video stream
+    /// (transfer, primaries, colour space, bit depth, pix_fmt).
+    Detect {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+    },
+
+    /// Tone-map HDR content to SDR (Hable curve) and re-encode to
+    /// MP4/H.264.
+    ToneMap {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Tone-mapper desaturation strength (optional; ffmpeg
+        /// default applies when omitted).
+        #[arg(allow_negative_numbers = true, long)]
+        desat: Option<f64>,
+        /// Signal peak override in nits (optional).
+        #[arg(long)]
+        peak: Option<u32>,
+        /// Output path (default: `<stem>.tonemap.mp4`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+}
+
+/// How `kaladoc video segment split` divides the input.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SplitByArg {
+    /// Fixed-length segments (`--seconds`).
+    Duration,
+    /// Cut at detected scene changes (`--threshold`).
+    Scenes,
+    /// Equal-duration parts (`--parts`).
+    Equal,
+}
+
+/// Segment operations for `kaladoc video segment`.
+#[derive(Subcommand)]
+pub enum SegmentArgs {
+    /// Split a video into multiple segment files written to a
+    /// directory.
+    Split {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Split strategy.
+        #[arg(long, value_enum)]
+        by: SplitByArg,
+        /// Segment length in seconds (`--by duration`).
+        #[arg(long)]
+        seconds: Option<f64>,
+        /// Scene-change threshold 0.0+ (`--by scenes`).
+        #[arg(allow_negative_numbers = true, long)]
+        threshold: Option<f64>,
+        /// Number of equal parts, 2–100 (`--by equal`).
+        #[arg(long)]
+        parts: Option<u32>,
+        /// Segment container: `mp4`, `mkv`, `webm`, or `avi`.
+        #[arg(long, default_value = "mp4")]
+        format: String,
+        /// Output directory (default: `<stem>-split/` next to the
+        /// input).
+        #[arg(long = "output-dir")]
+        output_dir: Option<std::path::PathBuf>,
+    },
+
+    /// Extract the `[start_ms, end_ms)` range of a video into one
+    /// file.
+    Extract {
+        /// Path to the input video file.
+        file: std::path::PathBuf,
+        /// Range start in milliseconds.
+        #[arg(long)]
+        start_ms: u64,
+        /// Range end in milliseconds (exclusive).
+        #[arg(long)]
+        end_ms: u64,
+        /// Output container: `mp4`, `mkv`, `webm`, or `avi`.
+        #[arg(long, default_value = "mp4")]
+        format: String,
+        /// Output path (default: `<stem>.segment.<ext>`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+}
+
+/// A/V sync operations for `kaladoc video sync`.
+#[derive(Subcommand)]
+pub enum SyncArgs {
+    /// Report the probed start times of the primary video and audio
+    /// streams (read-only).
+    Report {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+    },
+
+    /// Apply a manual A/V sync correction and re-encode to MP4.
+    /// Positive offsets delay a stream; negative offsets advance it.
+    Fix {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Audio shift in milliseconds.
+        #[arg(allow_negative_numbers = true, long, default_value_t = 0)]
+        audio_offset_ms: i64,
+        /// Video shift in milliseconds.
+        #[arg(allow_negative_numbers = true, long, default_value_t = 0)]
+        video_offset_ms: i64,
+        /// Output path (default: `<stem>.synced.mp4`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+
+    /// Automatically align the audio start to the video start and
+    /// re-encode to MP4. Fails when either stream lacks a reported
+    /// start time.
+    Auto {
+        /// Path to the input media file.
+        file: std::path::PathBuf,
+        /// Output path (default: `<stem>.synced.mp4`).
+        #[arg(long = "output-file")]
+        output_file: Option<std::path::PathBuf>,
+    },
+}
+
+/// Visualization kinds for `kaladoc video waveform --kind`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum WaveformKindArg {
+    /// Oscilloscope-style amplitude waveform.
+    Waveform,
+    /// Frequency-vs-time spectrogram.
+    Spectrogram,
+    /// Real-time FFT bar display.
+    FreqSpectrum,
+    /// Stereo Lissajous vectorscope (needs ≥2 audio channels).
+    Vectorscope,
+    /// Per-channel volume meter.
+    Volume,
+}
+
+/// Stabilization backends for `kaladoc video stabilize --algo`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum StabilizeAlgoArg {
+    /// Pick the best available backend (vidstab → deshake).
+    Auto,
+    /// Two-pass libvidstab pipeline (requires libvidstab filters).
+    Vidstab,
+    /// Single-pass `deshake` filter.
+    Deshake,
+}
+
+/// Preview formats for `kaladoc video preview --format`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum PreviewFormatArg {
+    /// Animated GIF.
+    Gif,
+    /// Animated WebP.
+    Webp,
+}
+
+/// Derivative kinds for `kaladoc video proxy --kind`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ProxyKindArg {
+    /// Small long-GOP H.264 editing proxy.
+    Proxy,
+    /// Intra-frame editing master (ProRes/ffv1).
+    Mezzanine,
+    /// Lossless preservation master (ffv1/ProRes).
+    Archival,
+}
+
+/// Export formats for `kaladoc video metadata-export --format`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum MetadataFormatArg {
+    /// Pretty-printed JSON.
+    Json,
+    /// XML document.
+    Xml,
+    /// `field,value` CSV rows.
+    Csv,
+    /// `key: value` lines.
+    Text,
 }
 
 #[derive(Subcommand)]
